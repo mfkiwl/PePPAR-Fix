@@ -487,40 +487,22 @@ class FixedPosFilter:
             'elev': elev,
         }
 
-    _diag_epoch = 0  # class-level diagnostic counter
-
     def update(self, observations, sp3, t, clk_file=None):
         H_rows, z_rows, R_diag = [], [], []
         n_pr = 0
         n_td = 0
         current_geo = {}
-        FixedPosFilter._diag_epoch += 1
-        _do_diag = FixedPosFilter._diag_epoch <= 5
 
         # Seed clock from first epoch's pseudorange residuals
         if not self.initialized:
             residuals = []
-            seed_info = []
             for obs in observations:
                 sv = obs['sv']
                 geo = self.compute_geometry(sv, sp3, t, clk_file)
                 if geo is None:
-                    if _do_diag:
-                        log.info(f"  SEED {sv}: geo=None (no eph/corrections)")
                     continue
                 rho_corr = geo['rho'] - geo['sat_clk_m'] + geo['tropo']
-                resid = obs['pr_if'] - rho_corr
-                residuals.append(resid)
-                if _do_diag:
-                    seed_info.append((sv, obs['pr_if'], geo['rho'],
-                                     geo['sat_clk_m'], geo['tropo'],
-                                     geo['elev'], resid))
-            if _do_diag and seed_info:
-                log.info(f"  SEED diagnostics ({len(residuals)} SVs):")
-                for sv, pr_if, rho, sclk, trp, el, res in seed_info:
-                    log.info(f"    {sv}: pr_if={pr_if:.1f} rho={rho:.1f} "
-                             f"sat_clk_m={sclk:.1f} tropo={trp:.1f} "
-                             f"elev={el:.1f}° resid={res:.1f}m")
+                residuals.append(obs['pr_if'] - rho_corr)
             if len(residuals) >= 4:
                 self.x[0] = float(np.median(residuals))
                 # Reset P[0,0] to reflect post-seed uncertainty (~50m)
@@ -556,11 +538,6 @@ class FixedPosFilter:
 
             # --- Pseudorange: absolute clock level ---
             dz_pr = obs['pr_if'] - rho_corr - self.x[0]
-
-            if _do_diag:
-                log.info(f"  UPD {sv}: pr_if={obs['pr_if']:.1f} rho={geo['rho']:.1f} "
-                         f"sat_clk_m={geo['sat_clk_m']:.1f} tropo={geo['tropo']:.1f} "
-                         f"elev={elev:.1f}° innov={dz_pr:.1f}m x[0]={self.x[0]:.1f}")
             h_pr = np.array([1.0, 0.0])
             H_rows.append(h_pr)
             z_rows.append(dz_pr)
