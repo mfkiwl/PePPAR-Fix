@@ -291,6 +291,13 @@ class BroadcastEphemeris:
         else:
             return None
 
+        # pyrtcm returns angular quantities in semi-circles; convert to radians
+        _ANGULAR_KEYS = ('M0', 'delta_n', 'omega', 'omega0', 'i0',
+                         'i_dot', 'omega_dot')
+        for key in _ANGULAR_KEYS:
+            if key in eph:
+                eph[key] = eph[key] * math.pi
+
         self._ephs[prn] = eph
         self._update_count += 1
         return prn
