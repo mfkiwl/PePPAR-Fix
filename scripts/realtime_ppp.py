@@ -378,11 +378,14 @@ def run_realtime(args):
     # Start NTRIP threads
     ntrip_threads = []
 
+    use_tls = getattr(args, 'tls', False) or args.port == 443
+
     if args.eph_mount:
         eph_stream = NtripStream(
             caster=args.caster, port=args.port,
             mountpoint=args.eph_mount,
             user=args.user, password=args.password,
+            tls=use_tls,
         )
         t_eph = threading.Thread(
             target=ntrip_reader,
@@ -398,6 +401,7 @@ def run_realtime(args):
             caster=args.caster, port=args.port,
             mountpoint=args.ssr_mount,
             user=args.user, password=args.password,
+            tls=use_tls,
         )
         t_ssr = threading.Thread(
             target=ntrip_reader,
@@ -540,8 +544,10 @@ def main():
 
     # NTRIP (real-time mode)
     ntrip = ap.add_argument_group("NTRIP corrections")
+    ntrip.add_argument("--ntrip-conf", help="NTRIP config file (INI format)")
     ntrip.add_argument("--caster", help="NTRIP caster hostname")
     ntrip.add_argument("--port", type=int, default=2101)
+    ntrip.add_argument("--tls", action="store_true", help="Use TLS (auto for port 443)")
     ntrip.add_argument("--eph-mount", help="Mountpoint for broadcast ephemeris")
     ntrip.add_argument("--ssr-mount", help="Mountpoint for SSR corrections")
     ntrip.add_argument("--user", help="NTRIP username")
@@ -567,6 +573,26 @@ def main():
         format="%(asctime)s %(levelname)s %(message)s",
         stream=sys.stderr,
     )
+
+    # Load NTRIP config file if specified
+    if args.ntrip_conf:
+        import configparser
+        conf = configparser.ConfigParser()
+        conf.read(args.ntrip_conf)
+        if 'ntrip' in conf:
+            s = conf['ntrip']
+            if not args.caster:
+                args.caster = s.get('caster', args.caster)
+            if args.port == 2101 and s.get('port'):
+                args.port = int(s.get('port'))
+            if not args.user:
+                args.user = s.get('user', args.user)
+            if not args.password:
+                args.password = s.get('password', args.password)
+            if not args.tls and s.getboolean('tls', False):
+                args.tls = True
+            if not args.ssr_mount and s.get('mount'):
+                args.ssr_mount = s.get('mount')
 
     if args.replay:
         if not args.sp3:

@@ -26,6 +26,7 @@ Standalone test:
 import base64
 import logging
 import socket
+import ssl
 import struct
 import sys
 import time
@@ -68,7 +69,7 @@ class NtripStream:
     """A single NTRIP stream connection to one mountpoint."""
 
     def __init__(self, caster, port, mountpoint, user=None, password=None,
-                 timeout=10, reconnect_delay=5, max_reconnects=10):
+                 timeout=10, reconnect_delay=5, max_reconnects=10, tls=None):
         self.caster = caster
         self.port = port
         self.mountpoint = mountpoint
@@ -77,6 +78,7 @@ class NtripStream:
         self.timeout = timeout
         self.reconnect_delay = reconnect_delay
         self.max_reconnects = max_reconnects
+        self.tls = tls if tls is not None else (port == 443)
         self._sock = None
         self._buffer = bytearray()
         self._connected = False
@@ -87,15 +89,21 @@ class NtripStream:
 
     def connect(self):
         """Establish connection to the NTRIP caster."""
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw_sock = socket.create_connection(
+            (self.caster, self.port), timeout=self.timeout)
+        if self.tls:
+            ctx = ssl.create_default_context()
+            self._sock = ctx.wrap_socket(raw_sock, server_hostname=self.caster)
+        else:
+            self._sock = raw_sock
         self._sock.settimeout(self.timeout)
 
-        log.info(f"Connecting to {self.caster}:{self.port}/{self.mountpoint}")
-        self._sock.connect((self.caster, self.port))
+        log.info(f"Connecting to {self.caster}:{self.port}/{self.mountpoint}"
+                 f"{' (TLS)' if self.tls else ''}")
 
-        # Build NTRIP v2 request
+        # Build NTRIP request (HTTP/1.0 to avoid chunked transfer encoding)
         request = (
-            f"GET /{self.mountpoint} HTTP/1.1\r\n"
+            f"GET /{self.mountpoint} HTTP/1.0\r\n"
             f"Host: {self.caster}:{self.port}\r\n"
             f"Ntrip-Version: Ntrip/2.0\r\n"
             f"User-Agent: PePPAR-Fix/0.4\r\n"
@@ -252,7 +260,13 @@ class NtripStream:
 
         for msg_type, frame in self.raw_frames():
             try:
-                _, parsed = RTCMReader.parse(frame)
+                result = RTCMReader.parse(frame)
+                # pyrtcm >= 1.1: returns RTCMMessage directly
+                # pyrtcm < 1.1: returns (raw, parsed) tuple
+                if isinstance(result, tuple):
+                    parsed = result[1]
+                else:
+                    parsed = result
                 self._msgs_decoded += 1
                 yield parsed
             except Exception as e:
