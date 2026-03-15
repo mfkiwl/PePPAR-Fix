@@ -20,12 +20,15 @@ Usage:
 
 import argparse
 import csv
+import logging
 import math
 import sys
 from collections import defaultdict
 from datetime import timedelta
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 from solve_pseudorange import (
     SP3, C, OMEGA_E, ecef_to_lla, ecef_to_enu, lla_to_ecef,
@@ -425,9 +428,9 @@ class FixedPosFilter:
     def __init__(self, pos_ecef):
         self.pos = np.array(pos_ecef)
         self.x = np.array([0.0, 0.0])  # Clock offset + drift (meters)
-        self.P = np.diag([1e8, 100.0**2])  # Large initial uncertainty
+        self.P = np.diag([1e18, 1e6])  # Very large initial uncertainty (receiver clock unknown)
         self.prev_geo = {}  # sv → {rho_corr, sat_clk_m, phi_if_m, tropo}
-        self.initialized = True
+        self.initialized = False  # Will seed clock from first epoch
 
     def predict(self, dt):
         if dt <= 0:
@@ -489,6 +492,22 @@ class FixedPosFilter:
         n_pr = 0
         n_td = 0
         current_geo = {}
+
+        # Seed clock from first epoch's pseudorange residuals
+        if not self.initialized:
+            residuals = []
+            for obs in observations:
+                sv = obs['sv']
+                geo = self.compute_geometry(sv, sp3, t, clk_file)
+                if geo is None:
+                    continue
+                rho_corr = geo['rho'] - geo['sat_clk_m'] + geo['tropo']
+                residuals.append(obs['pr_if'] - rho_corr)
+            if len(residuals) >= 4:
+                self.x[0] = float(np.median(residuals))
+                log.info(f"Clock seeded from {len(residuals)} PRs: "
+                         f"{self.x[0]/C*1e6:.1f} µs")
+                self.initialized = True
 
         for obs in observations:
             sv = obs['sv']
