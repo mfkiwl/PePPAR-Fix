@@ -226,18 +226,15 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     cp_f2 = f2['cp']
 
                     # Apply SSR code biases before IF combination
+                    # Note: SSRA00BKG0 provides C1C/C1P/C2W biases (L1+L2)
+                    # but not C5Q (L5). Biases only apply when both f1 and
+                    # f2 codes are available from the SSR stream.
                     if ssr is not None:
                         rinex_f1 = SIG_TO_RINEX.get(f1['sig_name'])
                         rinex_f2 = SIG_TO_RINEX.get(f2['sig_name'])
                         if rinex_f1 and rinex_f2:
                             cb_f1 = ssr.get_code_bias(sv, rinex_f1[0])
                             cb_f2 = ssr.get_code_bias(sv, rinex_f2[0])
-                            if n_epochs < 1:
-                                avail = list(ssr._code_bias.get(sv, {}).keys())
-                                log.info(f"    BIAS-LOOKUP {sv}: "
-                                         f"want={rinex_f1[0]},{rinex_f2[0]} "
-                                         f"have={avail} "
-                                         f"cb_f1={cb_f1} cb_f2={cb_f2}")
                             if cb_f1 is not None and cb_f2 is not None:
                                 pr_f1 -= cb_f1
                                 pr_f2 -= cb_f2
@@ -277,7 +274,7 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                                  f"f1={f1_sig}:{f1_pr:.1f} "
                                  f"f2={f2_sig}:{f2_pr:.1f}")
 
-                if len(observations) >= 3:
+                if len(observations) >= 4:
                     # Compute GPS time from RAWX header
                     gps_epoch = datetime(1980, 1, 6, tzinfo=timezone.utc)
                     gps_time = gps_epoch + timedelta(weeks=week, seconds=rcvTow)
