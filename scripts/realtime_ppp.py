@@ -87,7 +87,8 @@ for _mt in range(1240, 1264):
 
 # ── Serial observation reader ──────────────────────────────────────────────── #
 
-def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None):
+def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
+                   ssr=None):
     """Read UBX messages from F9T serial port.
 
     Puts (timestamp, observations_list) tuples onto obs_queue for each
@@ -96,6 +97,9 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None):
     Args:
         systems: set of system names to include (e.g. {'gps', 'gal', 'bds'}).
                  None means all systems.
+        ssr: SSRState instance for real-time code bias corrections.
+             If provided, biases are applied to raw pseudoranges before
+             IF combination (same as OSB in the file-based pipeline).
     """
     try:
         from pyubx2 import UBXReader
@@ -216,9 +220,27 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None):
                     a1 = f1['alpha_f1']
                     a2 = f1['alpha_f2']
 
-                    pr_if = a1 * f1['pr'] - a2 * f2['pr']
+                    pr_f1 = f1['pr']
+                    pr_f2 = f2['pr']
+                    cp_f1 = f1['cp']
+                    cp_f2 = f2['cp']
+
+                    # Apply SSR code/phase biases before IF combination
+                    n_bias = 0
+                    if ssr is not None:
+                        rinex_f1 = SIG_TO_RINEX.get(f1['sig_name'])
+                        rinex_f2 = SIG_TO_RINEX.get(f2['sig_name'])
+                        if rinex_f1 and rinex_f2:
+                            cb_f1 = ssr.get_code_bias(sv, rinex_f1[0])
+                            cb_f2 = ssr.get_code_bias(sv, rinex_f2[0])
+                            if cb_f1 is not None and cb_f2 is not None:
+                                pr_f1 -= cb_f1
+                                pr_f2 -= cb_f2
+                                n_bias += 1
+
+                    pr_if = a1 * pr_f1 - a2 * pr_f2
                     wl_f1, wl_f2, _, _ = IF_WL[prefix]
-                    phi_if_m = a1 * wl_f1 * f1['cp'] - a2 * wl_f2 * f2['cp']
+                    phi_if_m = a1 * wl_f1 * cp_f1 - a2 * wl_f2 * cp_f2
 
                     observations.append({
                         'sv': sv,
@@ -461,7 +483,7 @@ def run_realtime(args):
     # Start serial reader
     t_serial = threading.Thread(
         target=serial_reader,
-        args=(args.serial, args.baud, obs_queue, stop_event, beph, systems),
+        args=(args.serial, args.baud, obs_queue, stop_event, beph, systems, ssr),
         daemon=True,
     )
     t_serial.start()
