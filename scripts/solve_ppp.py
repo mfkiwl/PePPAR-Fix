@@ -424,26 +424,29 @@ class FixedPosFilter:
 
     IDX_CLK = 0
     IDX_CLK_RATE = 1
+    IDX_ISB_GAL = 2
+    N_STATES = 3
 
     def __init__(self, pos_ecef):
         self.pos = np.array(pos_ecef)
-        self.x = np.array([0.0, 0.0])  # Clock offset + drift (meters)
-        self.P = np.diag([1e18, 1e6])  # Very large initial uncertainty (receiver clock unknown)
+        self.x = np.zeros(self.N_STATES)     # [clock, clock_rate, isb_gal] in meters
+        self.P = np.diag([1e18, 1e6, 1e8])   # ISB starts uncertain (~100m)
         self.prev_geo = {}  # sv → {rho_corr, sat_clk_m, phi_if_m, tropo}
         self.initialized = False  # Will seed clock from first epoch
 
     def predict(self, dt):
         if dt <= 0:
             dt = 1.0
-        # Clock propagation
+        # Clock propagation (ISB is constant — no prediction needed)
         self.x[self.IDX_CLK] += self.x[self.IDX_CLK_RATE] * dt
-        F = np.eye(2)
+        F = np.eye(self.N_STATES)
         F[0, 1] = dt
         self.P = F @ self.P @ F.T
-        # Process noise: TCXO model
-        Q = np.zeros((2, 2))
+        # Process noise: TCXO model + small ISB walk
+        Q = np.zeros((self.N_STATES, self.N_STATES))
         Q[0, 0] = 0.01 * dt      # phase noise (m²/s)
         Q[1, 1] = 0.01 * dt      # frequency noise (m²/s³)
+        Q[2, 2] = 1e-6 * dt      # ISB random walk (very slow — ~ns/hour)
         self.P += Q
 
     def compute_geometry(self, sv, sp3, t, clk_file):
@@ -493,17 +496,19 @@ class FixedPosFilter:
         n_td = 0
         current_geo = {}
 
-        # Seed clock from first epoch's pseudorange residuals
+        # Seed clock from first epoch's GPS pseudorange residuals
         if not self.initialized:
             residuals = []
             for obs in observations:
+                if obs.get('sys') != 'gps':
+                    continue  # Seed from GPS only to avoid ISB
                 sv = obs['sv']
                 geo = self.compute_geometry(sv, sp3, t, clk_file)
                 if geo is None:
                     continue
                 rho_corr = geo['rho'] - geo['sat_clk_m'] + geo['tropo']
                 residuals.append(obs['pr_if'] - rho_corr)
-            if len(residuals) >= 4:
+            if len(residuals) >= 3:
                 self.x[0] = float(np.median(residuals))
                 # Reset P[0,0] to reflect post-seed uncertainty (~50m)
                 # Without this, P[0,0]=1e18 makes S matrix near-singular
@@ -536,9 +541,14 @@ class FixedPosFilter:
             # Predicted range (without receiver clock)
             rho_corr = geo['rho'] - geo['sat_clk_m'] + geo['tropo']
 
+            # ISB column: 1 for Galileo, 0 for GPS
+            is_gal = 1.0 if obs.get('sys') == 'gal' else 0.0
+
             # --- Pseudorange: absolute clock level ---
-            dz_pr = obs['pr_if'] - rho_corr - self.x[0]
-            h_pr = np.array([1.0, 0.0])
+            dz_pr = obs['pr_if'] - rho_corr - self.x[0] - is_gal * self.x[self.IDX_ISB_GAL]
+            h_pr = np.zeros(self.N_STATES)
+            h_pr[0] = 1.0
+            h_pr[self.IDX_ISB_GAL] = is_gal
             H_rows.append(h_pr)
             z_rows.append(dz_pr)
             R_diag.append((SIGMA_P_IF / w) ** 2)
@@ -549,22 +559,14 @@ class FixedPosFilter:
                     sv in self.prev_geo and
                     self.prev_geo[sv]['phi_if_m'] is not None):
                 prev = self.prev_geo[sv]
-                # Observed: Δφ = φ(t) - φ(t-1)
                 delta_phi = obs['phi_if_m'] - prev['phi_if_m']
-                # Predicted: Δρ_corr = ρ_corr(t) - ρ_corr(t-1)
                 delta_rho_corr = rho_corr - (prev['rho'] - prev['sat_clk_m'] + prev['tropo'])
-                # Innovation: Δφ - Δρ_corr should equal Δclock
-                # But Δclock = clock(t) - clock(t-1) = already in x[0] after predict
-                # We need: Δφ - Δρ_corr - (x[0] - clock_prev) → 0
-                # Simplify: measurement = Δφ - Δρ_corr + clock_prev
-                #           predicted  = x[0]
                 dz_td = (delta_phi - delta_rho_corr + self.prev_clock) - self.x[0]
-                h_td = np.array([1.0, 0.0])
+                h_td = np.zeros(self.N_STATES)
+                h_td[0] = 1.0
+                # ISB cancels in time difference (constant bias)
                 H_rows.append(h_td)
                 z_rows.append(dz_td)
-                # TD phase noise: dominated by orbit/multipath systematics
-                # Empirical: ~0.3m at high elevation, ~2.5m at low elev
-                # Use elevation-dependent model: 0.3 / sin(elev)
                 sigma_td = 0.3 / max(0.2, elev_factor)
                 R_diag.append((sigma_td / w) ** 2)
                 n_td += 1
@@ -587,7 +589,7 @@ class FixedPosFilter:
             return n_pr, z, n_td
 
         self.x = self.x + K @ z
-        I_KH = np.eye(2) - K @ H
+        I_KH = np.eye(self.N_STATES) - K @ H
         self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
         self.P = 0.5 * (self.P + self.P.T)
 
