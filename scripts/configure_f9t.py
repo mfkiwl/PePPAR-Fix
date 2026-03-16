@@ -2,6 +2,15 @@
 """
 configure_f9t.py — Configure a u-blox ZED-F9T for PPP-AR observations.
 
+Cross-rig note: This script is an intentional FORK of testAnt's
+configure_receivers.py. Both share infrastructure (factory reset, ACK
+waiting, CFG-VALSET, baud probing) but differ in signal configuration:
+  - testAnt: GPS L1+L5, GAL E1 only, BDS B1 only (antenna evaluation)
+  - peppar_fix: GPS L1+L5, GAL E1+E5a, BDS B1+B2a (dual-freq IF for PPP-AR)
+Do NOT add this to shared_files.toml — it should diverge.
+Long-term plan: extract shared F9T utilities (reset, ACK, VALSET, baud
+probing) into a separate repo (e.g. bobvan/f9tLibs) and import from both.
+
 Sequence:
   1. Factory reset (CFG-RST)
   2. Configure dual-frequency signals (GPS L1C/A+L5, GAL E1+E5a, BDS B1+B2a)
