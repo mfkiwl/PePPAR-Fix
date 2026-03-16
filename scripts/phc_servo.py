@@ -571,15 +571,16 @@ def run_servo(args):
                          f"total={total_offset_ns:+.0f}ns")
 
                 # Use phc_ctl adj for the step (reliable, uses clock_settime)
+                # phc_ctl adj takes SECONDS (float), not nanoseconds
                 import subprocess
-                adj_ns = -total_offset_ns
+                adj_s = -total_offset_ns / 1_000_000_000
                 result = subprocess.run(
                     ['/usr/sbin/phc_ctl', args.ptp_dev, '--',
-                     'adj', str(int(adj_ns))],
+                     'adj', f'{adj_s:.9f}'],
                     capture_output=True, text=True,
                 )
                 if result.returncode == 0:
-                    log.info(f"  phc_ctl adj {adj_ns}ns: {result.stdout.strip()}")
+                    log.info(f"  phc_ctl adj {adj_s:.6f}s: {result.stdout.strip()}")
                 else:
                     log.error(f"  phc_ctl adj failed (rc={result.returncode}): "
                               f"{result.stderr.strip()} {result.stdout.strip()}")
