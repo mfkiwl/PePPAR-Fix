@@ -133,7 +133,7 @@ class PtpDevice:
 
     def get_caps(self):
         """Query PTP clock capabilities."""
-        buf = array.array('b', b'\x00' * PTP_CLOCK_GETCAPS_SIZE)
+        buf = array.array('b', b'\x00' * 80)
         fcntl.ioctl(self.fd, PTP_CLOCK_GETCAPS, buf, True)
         raw = buf.tobytes()
         max_adj = struct.unpack_from('<i', raw, 0)[0]
@@ -150,7 +150,7 @@ class PtpDevice:
     def set_pin_function(self, pin_index, func, channel):
         """Configure an SDP pin (EXTTS, PEROUT, or NONE)."""
         # struct ptp_pin_desc: name[64] + index + func + chan + rsv[5]
-        buf = bytearray(PTP_PIN_SETFUNC_SIZE)
+        buf = bytearray(96)
         struct.pack_into('<64sIII', buf, 0, b'', pin_index, func, channel)
         fcntl.ioctl(self.fd, PTP_PIN_SETFUNC, bytes(buf))
 
