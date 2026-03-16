@@ -415,9 +415,9 @@ def run_servo(args):
     n_epochs = 0
     warmup_epochs = 20  # let filter converge before steering
 
-    # Extts state: latest PPS timestamp from PHC
+    # Extts state: ring buffer of recent PPS timestamps
     extts_lock = threading.Lock()
-    extts_latest = {}  # {gps_second: (phc_sec, phc_nsec)}
+    extts_events = []  # list of (phc_sec, phc_nsec, monotonic_time)
 
     def extts_reader():
         """Background thread reading PPS timestamps from PHC."""
@@ -426,21 +426,46 @@ def run_servo(args):
             if event is None:
                 continue
             phc_sec, phc_nsec, _idx = event
-            # The PPS edge marks the start of a GPS second.
-            # The PHC timestamp tells us what the PHC read at that instant.
-            # We key by PHC second (rounded to nearest integer) for lookup.
-            gps_sec = round(phc_sec)
+            mono = time.monotonic()
             with extts_lock:
-                extts_latest[gps_sec] = (phc_sec, phc_nsec)
-                # Keep only recent entries
-                cutoff = gps_sec - 30
-                stale = [k for k in extts_latest if k < cutoff]
-                for k in stale:
-                    del extts_latest[k]
+                extts_events.append((phc_sec, phc_nsec, mono))
+                # Keep only last 30 events
+                if len(extts_events) > 30:
+                    extts_events.pop(0)
 
     t_extts = threading.Thread(target=extts_reader, daemon=True)
     t_extts.start()
     log.info("EXTTS reader started")
+
+    def get_latest_pps():
+        """Get the most recent PPS event."""
+        with extts_lock:
+            if not extts_events:
+                return None
+            return extts_events[-1]
+
+    def pps_fractional_error(phc_sec, phc_nsec):
+        """Compute PHC error from PPS fractional second.
+
+        The F9T PPS fires at GPS second boundaries. The PHC timestamps it.
+        If PHC is perfectly aligned, phc_nsec == 0 (or very close).
+        phc_nsec near 0 → PHC is slightly ahead (positive error)
+        phc_nsec near 1e9 → PHC is slightly behind (negative error)
+        """
+        if phc_nsec <= 500_000_000:
+            return float(phc_nsec)       # PHC ahead
+        else:
+            return float(phc_nsec) - 1_000_000_000  # PHC behind
+
+    def phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec):
+        """Compute whole-second offset between PHC epoch and GPS time.
+
+        Returns (PHC_time - GPS_time) in seconds (integer).
+        The PPS fires at gps_unix_sec. PHC reads phc_sec.phc_nsec.
+        The nearest integer second in PHC time is round(phc_sec + nsec/1e9).
+        """
+        phc_rounded = phc_sec if phc_nsec < 500_000_000 else phc_sec + 1
+        return phc_rounded - gps_unix_sec
 
     # Open log file
     log_f = None
@@ -455,6 +480,7 @@ def run_servo(args):
         ])
 
     start_time = time.time()
+    stepped = False  # True after initial clock step
 
     try:
         while not stop_event.is_set():
@@ -489,29 +515,24 @@ def run_servo(args):
             dt_rx_sigma = math.sqrt(filt.P[filt.IDX_CLK, filt.IDX_CLK]) / C * 1e9
             n_epochs += 1
 
-            # Get the GPS integer second for this epoch
-            gps_sec = int(gps_time.timestamp())
-
-            # Look up the PPS timestamp from the PHC
-            with extts_lock:
-                pps_ts = extts_latest.get(gps_sec)
-
-            if pps_ts is None:
+            # Get latest PPS event
+            pps = get_latest_pps()
+            if pps is None:
                 if n_epochs % 10 == 0:
-                    log.info(f"  [{n_epochs}] No PPS for GPS sec {gps_sec}, "
-                             f"dt_rx={dt_rx_ns:+.1f}ns ±{dt_rx_sigma:.1f}ns")
+                    log.info(f"  [{n_epochs}] No PPS events yet")
                 continue
+            phc_sec, phc_nsec, _mono = pps
 
-            phc_sec, phc_nsec = pps_ts
+            # GPS integer second for this PPS
+            gps_unix_sec = int(round(gps_time.timestamp()))
 
-            # PHC error computation:
-            # At the PPS edge, the true GPS time is: gps_sec + dt_rx (in seconds)
-            # The PHC read: phc_sec + phc_nsec/1e9
-            # Error = PHC_reading - true_GPS_time
-            # If error > 0, PHC is running fast → need to slow down (negative adjfine)
-            true_gps_ns = gps_sec * 1_000_000_000 + dt_rx_ns
-            phc_reading_ns = phc_sec * 1_000_000_000 + phc_nsec
-            phc_error_ns = phc_reading_ns - true_gps_ns
+            # PHC fractional-second error (standard PPS discipline)
+            # This works regardless of PHC epoch, as long as PPS fires at
+            # GPS second boundaries (which it does for timing receivers).
+            phc_error_ns = pps_fractional_error(phc_sec, phc_nsec)
+
+            # Check if PHC integer seconds match GPS (needed for step)
+            epoch_offset = phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec)
 
             # Mode state machine
             adjfine_ppb = servo.freq
@@ -520,8 +541,13 @@ def run_servo(args):
             if mode == ServoMode.WARMUP:
                 if n_epochs >= warmup_epochs and dt_rx_sigma < 50.0:
                     log.info(f"  Warmup complete ({n_epochs} epochs, "
-                             f"σ={dt_rx_sigma:.1f}ns)")
-                    if abs(phc_error_ns) > STEP_THRESHOLD_NS:
+                             f"σ={dt_rx_sigma:.1f}ns, "
+                             f"phc_frac_err={phc_error_ns:+.0f}ns, "
+                             f"epoch_offset={epoch_offset}s)")
+                    if epoch_offset != 0:
+                        mode = ServoMode.STEP
+                        log.info(f"  PHC epoch offset: {epoch_offset}s — need to step")
+                    elif abs(phc_error_ns) > STEP_THRESHOLD_NS:
                         mode = ServoMode.STEP
                     else:
                         mode = ServoMode.CONVERGING
@@ -530,15 +556,34 @@ def run_servo(args):
                 elif n_epochs % 10 == 0:
                     log.info(f"  [{n_epochs}] Warmup: "
                              f"dt_rx={dt_rx_ns:+.1f}ns ±{dt_rx_sigma:.1f}ns "
-                             f"phc_err={phc_error_ns:+.0f}ns")
+                             f"phc_frac={phc_error_ns:+.0f}ns "
+                             f"epoch_off={epoch_offset}s")
 
             elif mode == ServoMode.STEP:
-                log.info(f"  STEP: phc_error={phc_error_ns:+.0f}ns, stepping clock")
-                ptp.step_time(-phc_error_ns)
+                # Use phc_ctl for reliable clock stepping
+                # Total offset = epoch_offset (whole seconds) + fractional error
+                total_offset_ns = epoch_offset * 1_000_000_000 + phc_error_ns
+                log.info(f"  STEP: epoch_offset={epoch_offset}s, "
+                         f"frac_err={phc_error_ns:+.0f}ns, "
+                         f"total={total_offset_ns:+.0f}ns")
+
+                # Use phc_ctl adj for the step (more reliable than ADJ_SETOFFSET)
+                import subprocess
+                adj_ns = -total_offset_ns
+                result = subprocess.run(
+                    ['phc_ctl', args.ptp_dev, 'adj', str(int(adj_ns))],
+                    capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    log.info(f"  phc_ctl adj {adj_ns}ns: OK")
+                else:
+                    log.error(f"  phc_ctl adj failed: {result.stderr.strip()}")
+                stepped = True
                 mode = ServoMode.CONVERGING
                 servo = PIServo(CONVERGE_KP, CONVERGE_KI,
                                 max_ppb=caps['max_adj'])
-                # After stepping, skip this sample (timestamps are stale)
+                # Skip a few samples for the step to settle
+                time.sleep(2)
                 continue
 
             elif mode == ServoMode.CONVERGING:
@@ -570,7 +615,6 @@ def run_servo(args):
                 if abs(phc_error_ns) > 5000:  # 5 µs = clear outlier
                     log.warning(f"  Outlier: phc_err={phc_error_ns:+.0f}ns, skipping")
                     consecutive_good = 0
-                    # If too many outliers, fall back to converging
                     continue
 
                 adjfine_ppb = servo.update(phc_error_ns)
@@ -586,7 +630,7 @@ def run_servo(args):
             # Log
             if log_w:
                 log_w.writerow([
-                    ts_str, gps_sec, phc_sec, phc_nsec,
+                    ts_str, gps_unix_sec, phc_sec, phc_nsec,
                     f'{dt_rx_ns:.3f}', f'{dt_rx_sigma:.3f}',
                     f'{phc_error_ns:.1f}',
                     f'{adjfine_ppb:.3f}', mode, n_used,
