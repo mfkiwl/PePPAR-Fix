@@ -594,7 +594,8 @@ def run_servo(args):
                 continue
 
             elif mode == ServoMode.CONVERGING:
-                adjfine_ppb = servo.update(phc_error_ns)
+                # Negate: positive error (PHC ahead) → negative adjfine (slow down)
+                adjfine_ppb = -servo.update(phc_error_ns)
                 ptp.adjfine(adjfine_ppb)
 
                 if abs(phc_error_ns) < CONVERGE_THRESHOLD_NS:
@@ -624,7 +625,7 @@ def run_servo(args):
                     consecutive_good = 0
                     continue
 
-                adjfine_ppb = servo.update(phc_error_ns)
+                adjfine_ppb = -servo.update(phc_error_ns)
                 ptp.adjfine(adjfine_ppb)
 
                 if n_epochs % 10 == 0:
