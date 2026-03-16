@@ -87,6 +87,18 @@ def load_ticc(path: Path) -> pd.DataFrame:
 
     df["ref_sec"] = df["ref_sec"].astype("int64")
     df["ref_ps"] = df["ref_ps"].astype("int64")
+
+    # Detect TICC resets: ref_sec should be monotonically increasing.
+    # After a reset, ref_sec drops to a small value. Keep only data after
+    # the last reset (the largest contiguous monotonic block at the end).
+    diffs = df["ref_sec"].diff()
+    reset_mask = diffs < -10  # large backward jump = reset
+    if reset_mask.any():
+        last_reset = reset_mask[reset_mask].index[-1]
+        n_dropped = last_reset
+        df = df.iloc[last_reset:].reset_index(drop=True)
+        print(f"  TICC reset detected: dropped {n_dropped} stale edges")
+
     df["integer_sec"] = df["ref_sec"]
 
     if "host_timestamp" in df.columns:
@@ -157,16 +169,21 @@ def individual_stability(piv: pd.DataFrame, taus="decade") -> dict:
     diff = chA - chB (differential measurement)
     """
 
-    def _phase_ps_to_s(ps_arr: np.ndarray) -> np.ndarray:
-        """Phase residual from int64 ps array → float64 seconds."""
-        return (ps_arr - ps_arr[0]).astype(float) * 1e-12
-
     result = {}
 
-    # Individual channels: phase = cumulative ps relative to first sample
+    # Individual channels: phase = total time relative to first sample.
+    # Use ref_sec + ref_ps/1e12, but compute in int64 picoseconds to
+    # avoid float64 precision loss, then convert only the RESIDUAL to float.
     for ch, label in [("chA", "chA"), ("chB", "chB")]:
-        ps = piv[f"{ch}_ref_ps"].values
-        phase_s = _phase_ps_to_s(ps)
+        sec = piv[f"{ch}_ref_sec"].values.astype("int64")
+        ps = piv[f"{ch}_ref_ps"].values.astype("int64")
+        # Total time in ps relative to first sample
+        total_ps = (sec - sec[0]) * 1_000_000_000_000 + (ps - ps[0])
+        # Remove nominal 1 Hz rate: expected total_ps[i] = i * 1e12
+        # The residual is the PPS timing jitter
+        expected_ps = np.arange(len(total_ps), dtype="int64") * 1_000_000_000_000
+        residual_ps = total_ps - expected_ps
+        phase_s = residual_ps.astype(float) * 1e-12
         result[label] = compute_stability(phase_s, taus=taus)
 
     # Difference (already computed)
