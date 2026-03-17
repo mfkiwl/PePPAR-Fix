@@ -147,11 +147,12 @@ PTP GM (where GPSDO → PPS → SDP → PHC discipline) because:
 
 | Component | Model | Notes |
 |-----------|-------|-------|
-| SBC | Raspberry Pi 5 | |
-| NIC | TimeHAT (Intel i226) | TCXO ±280 ppb, 4 SDP pins |
-| GNSS | u-blox ZED-F9T | L1/L5, UBX-RXM-RAWX at 1 Hz |
-| Antenna | TBD | Active, L1/L5, roof-mounted |
-| NTRIP | IGS real-time service | CLK93 or similar SSR stream |
+| SBC | Raspberry Pi 5 | TimeHat host |
+| NIC | TimeHAT v5 (Intel i226) | TCXO ±280 ppb, 4 SDP pins, current dev platform |
+| NIC | Intel E810-XXVDA4T | OCXO, onboard F9T, SyncE, 4×25G — on order |
+| GNSS | u-blox ZED-F9T (EVK) | L1/L5, UBX-RXM-RAWX at 1 Hz, external USB |
+| Antenna | Patch2 | Active, L1/L5, roof-mounted |
+| NTRIP | IGS real-time service | BCEP00BKG0 (eph), SSRA00BKG0 (SSR) |
 
 ## Setup
 

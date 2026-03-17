@@ -169,7 +169,7 @@ available, a second TimeHAT on a Pi 5 remains the cleanest path.
 - [ ] If licensed → u.FL pigtails + PCIe host = done
 - [ ] If not licensed → use SFN6322F (PTP standard, guaranteed)
 - [ ] Order u.FL→SMA pigtails (×2 per card: PPS IN + PPS OUT)
-- [ ] Intel E810-XXVDA4T (~$1,100) — precision upgrade (later)
+- [x] Intel E810-XXVDA4T (~$1,100) — **ORDERED 2026-03-17** (with onboard F9T)
 
 ## Sources
 

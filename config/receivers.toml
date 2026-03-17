@@ -12,3 +12,9 @@ note = "F9T-3RD (EVK-F9T-20-00, ZED-F9T-20B); Patch2 antenna; no GLONASS (-20B v
 port = "/dev/ticc"              # udev symlink, matched by Arduino serial number
 baud = 115200
 note = "TAPR TICC #3; chA = TimeHAT PHC PPS OUT (SDP0, disciplined), chB = F9T-3RD PPS (raw GPS)"
+
+[nic.e810]
+model = "Intel E810-XXVDA4T"
+status = "on order (2026-03-17)"
+gnss = "/dev/gnss0"             # onboard F9T via ice driver (I2C, GNSS_TYPE_UBX)
+note = "OCXO, 4x25G, SyncE, DPLL (ZL30795), onboard ZED-F9T. PHC and DPLL are independent clock domains — adjfine() works regardless of DPLL state."
