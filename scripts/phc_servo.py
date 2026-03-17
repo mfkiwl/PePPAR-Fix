@@ -36,10 +36,13 @@ GNSS receiver requirements:
     GPS L5 availability: only GPS Block IIF/III satellites transmit L5
     (~15 of 32 SVs). The signal is flagged "unhealthy" in the nav message;
     the receiver needs the L5 health override (u-blox App Note UBX-21038688,
-    key 0x10320001). Some F9T variants (e.g. -20B with TIM 2.25) do not
-    support this key — in that case, GPS provides only L1 (single-freq,
-    dropped by the filter) and Galileo is the primary dual-freq source.
-    This is acceptable: 6-7 dual-freq GAL SVs is sufficient for the filter.
+    key 0x10320001). IMPORTANT: the override is saved to flash but does NOT
+    take effect until the receiver is warm-restarted. configure_f9t.py
+    handles this automatically. Without the restart, GPS delivers only L1
+    (single-freq, dropped by filter) even though the config ACK'd correctly.
+
+    With GPS L5 enabled: ~8 GPS + ~7 Galileo = ~15 dual-freq SVs per epoch.
+    Without GPS L5: ~7 Galileo only — still sufficient for the filter.
 
     Run configure_f9t.py to set up the receiver:
         python scripts/configure_f9t.py /dev/gnss-top --port-type USB
@@ -461,10 +464,11 @@ def run_servo(args):
 
         if 'gps' in (systems or set()) and sys_counts.get('gps', 0) == 0:
             log.warning(
-                "  NO GPS dual-frequency observations! GPS L5 may not be enabled.\n"
-                "  The receiver needs GPS L5 health override for L5 tracking.\n"
-                "  Run: python scripts/configure_f9t.py <port> --port-type USB --skip-reset\n"
-                "  See u-blox App Note UBX-21038688.")
+                "  NO GPS dual-frequency observations! GPS L5 is not being tracked.\n"
+                "  The receiver needs: (1) GPS L5 signal enabled, (2) L5 health override\n"
+                "  (App Note UBX-21038688), and (3) a warm restart after the override.\n"
+                "  Run: python scripts/configure_f9t.py <port> --port-type USB\n"
+                "  (Full factory reset + configure + L5 override + restart)")
         if 'gal' in (systems or set()) and sys_counts.get('gal', 0) == 0:
             log.warning(
                 "  NO Galileo dual-frequency observations!\n"
