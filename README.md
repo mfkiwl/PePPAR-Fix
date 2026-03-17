@@ -153,20 +153,35 @@ PTP GM (where GPSDO → PPS → SDP → PHC discipline) because:
 | Antenna | TBD | Active, L1/L5, roof-mounted |
 | NTRIP | IGS real-time service | CLK93 or similar SSR stream |
 
+## Setup
+
+```bash
+# Create a venv (once, on each host that runs PePPAR Fix)
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# On Debian/Raspberry Pi OS with externally-managed Python:
+#   If `python3 -m venv` fails, install the venv package first:
+#   sudo apt install python3-venv
+#
+# The venv isolates deps from the system Python and ensures
+# consistent versions across hosts (TimeHat, PiPuss, dev machines).
+```
+
+System packages (not in pip):
+- `linuxptp` — provides `phc_ctl` for PHC clock stepping (`sudo apt install linuxptp`)
+
 ## Quick start — Milestone 1: Raw observations
 
 ```bash
-pip install pyubx2 pyserial
+source venv/bin/activate
 
 # Configure F9T (factory reset → signals → survey-in → enable messages)
-python scripts/configure_f9t.py /dev/ttyF9T
-
-# With options:
-python scripts/configure_f9t.py /dev/ttyF9T \
-    --rate 1 --survey-dur 300 --survey-acc 5.0
+python scripts/configure_f9t.py /dev/gnss-top --port-type USB
 
 # Log observations (Ctrl-C or --duration to stop)
-python scripts/log_observations.py /dev/ttyF9T --baud 460800 --duration 3600
+python scripts/log_observations.py /dev/gnss-top --baud 9600 --duration 3600
 ```
 
 ### configure_f9t.py
@@ -234,19 +249,18 @@ Captures observations to CSV + raw UBX binary:
 ## Quick start — Milestone 4: Real-time clock estimation
 
 ```bash
-pip install pyubx2 pyserial pyrtcm numpy
+source venv/bin/activate
 
 # 1. Register for IGS Real-Time Service: https://igs.org/rts/access/
 #    You'll receive a username and password for the NTRIP caster.
+#    Save credentials in ntrip.conf (see ntrip.conf.example).
 
 # 2. Real-time mode (live F9T + NTRIP corrections):
 python scripts/realtime_ppp.py \
-    --serial /dev/gnss-bot --baud 115200 \
+    --serial /dev/gnss-top --baud 9600 \
     --known-pos "41.8430626,-88.1037190,201.671" \
-    --caster products.igs-ip.net --port 2101 \
-    --eph-mount BCEP00BKG0 --ssr-mount SSRA00CNE0 \
-    --user YOUR_USER --password YOUR_PASS \
-    --duration 3600 --out data/realtime_1h.csv
+    --ntrip-conf ntrip.conf --eph-mount BCEP00BKG0 \
+    --systems gps,gal --duration 3600 --out data/realtime_1h.csv
 
 # 3. Replay mode (validate with existing data):
 python scripts/realtime_ppp.py \
@@ -257,6 +271,34 @@ python scripts/realtime_ppp.py \
     --known-pos "41.8430626,-88.1037190,201.671" \
     --systems gal --out data/replay_test.csv
 ```
+
+## Quick start — Milestone 6: PHC servo with competitive error sources
+
+```bash
+source venv/bin/activate
+
+# 1. Configure F9T (ensures TIM-TP, dual-freq signals, timing mode):
+python scripts/configure_f9t.py /dev/gnss-top --port-type USB
+
+# 2. Run servo (needs /dev/ptp0 with SDP extts — i226 TimeHat):
+#    PHC device must be the i226 NIC, not the RPi built-in MAC.
+sudo chmod 666 /dev/ptp0   # or add udev rule for ptp group
+python scripts/phc_servo.py \
+    --serial /dev/gnss-top --baud 9600 \
+    --known-pos "41.8430626,-88.1037190,201.671" \
+    --ntrip-conf ntrip.conf --eph-mount BCEP00BKG0 \
+    --ptp-dev /dev/ptp0 --extts-pin 1 \
+    --systems gps,gal --duration 3600 \
+    --log data/servo_log.csv
+
+# 3. Analyze results (TDEV/ADEV plots, requires TICC data):
+python scripts/analyze_servo.py data/servo_log.csv
+```
+
+The servo selects the best error source at each epoch:
+- **PPS-only** (±20 ns) — always available, used during early startup
+- **PPS+qErr** (±2-3 ns) — once TIM-TP arrives, removes PPS quantization noise
+- **Carrier-phase** (±0.1 ns) — once PPP filter converges (~20 epochs)
 
 ### NTRIP caster registration
 
@@ -281,7 +323,14 @@ Key mountpoints on `products.igs-ip.net:2101`:
 │   ├── broadcast_eph.py      # M4: Broadcast ephemeris → ECEF (Keplerian model)
 │   ├── ntrip_client.py       # M4: NTRIP v2 client for RTCM3 streams
 │   ├── ssr_corrections.py    # M4: Real-time SSR correction state manager
-│   └── realtime_ppp.py       # M4: Real-time PPP orchestrator
+│   ├── realtime_ppp.py       # M4: Real-time PPP orchestrator + QErrStore
+│   ├── phc_servo.py          # M6: PHC discipline loop (competitive error sources)
+│   ├── analyze_servo.py      # TDEV/ADEV analysis + TICC integration
+│   ├── ticc.py               # TAPR TICC time interval counter interface
+│   └── qerr_test.py          # Quick TIM-TP qErr variance validation
+├── config/
+│   ├── 99-timehat-devices.rules  # udev rules for F9T + TICC
+│   └── receivers.toml            # Device configuration
 ├── docs/
 │   └── nic-survey.md         # PHC hardware survey (PPS IN+OUT qualified)
 ├── data/                     # Observation runs + correction products

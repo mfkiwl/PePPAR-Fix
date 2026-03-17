@@ -1,4 +1,10 @@
+# Core: observation pipeline, PPP filter, PHC servo
 numpy
-pyubx2>=1.2.60
+pyubx2>=1.2.55
 pyserial
 pyrtcm>=1.1.0
+
+# Analysis: TDEV/ADEV plots, servo log analysis
+allantools
+matplotlib
+pandas
