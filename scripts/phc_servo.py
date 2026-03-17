@@ -22,20 +22,24 @@ GNSS receiver requirements:
     observations. This REQUIRES two frequencies per satellite:
         GPS:     L1 C/A + L5Q
         Galileo: E1C + E5aQ
-        BDS:     B1I + B2aI  (optional — GPS+GAL sufficient)
+        BDS:     B1I + B2aI
 
     Single-frequency satellites are silently dropped. The filter needs
-    at least 4 dual-frequency SVs per epoch.
-
-    IMPORTANT: GPS L5 is flagged "unhealthy" in the navigation message.
-    The receiver must have the L5 health override enabled (u-blox App Note
-    UBX-21038688, key 0x10320001). Without it, no GPS SVs produce L5,
-    and only Galileo provides dual-frequency observations.
+    at least 4 dual-frequency SVs per epoch from any combination of
+    constellations.
 
     L1-only operation is NOT supported — the ionosphere-free combination
     is fundamental to the PPP approach. Without it, ionospheric delay
     (up to ~50 ns at zenith, worse at low elevation) would dominate the
     clock estimate.
+
+    GPS L5 availability: only GPS Block IIF/III satellites transmit L5
+    (~15 of 32 SVs). The signal is flagged "unhealthy" in the nav message;
+    the receiver needs the L5 health override (u-blox App Note UBX-21038688,
+    key 0x10320001). Some F9T variants (e.g. -20B with TIM 2.25) do not
+    support this key — in that case, GPS provides only L1 (single-freq,
+    dropped by the filter) and Galileo is the primary dual-freq source.
+    This is acceptable: 6-7 dual-freq GAL SVs is sufficient for the filter.
 
     Run configure_f9t.py to set up the receiver:
         python scripts/configure_f9t.py /dev/gnss-top --port-type USB
