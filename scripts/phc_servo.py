@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-phc_servo.py — PHC discipline loop for PePPAR Fix M5.
+phc_servo.py — PHC discipline loop for PePPAR Fix M6.
 
-Disciplines the TimeHAT i226 PHC (/dev/ptp0) using carrier-phase
-clock estimates from the PPP filter (realtime_ppp.py).
+Disciplines the TimeHAT i226 PHC (/dev/ptp0) using competitive
+error source selection: PPS-only, PPS+qErr, and carrier-phase
+estimates compete at every epoch based on confidence.
 
 Architecture:
     F9T PPS → SDP1 → extts event (PHC timestamp of PPS edge)
+    F9T TIM-TP → qErr (PPS quantization error, ~3 ns precision)
     PPP filter → dt_rx (receiver clock offset from GPS time)
-    PHC error = phc_timestamp - (GPS_second + dt_rx)
-    PI servo → adjfine() on /dev/ptp0 to steer TCXO frequency
+
+    Error sources (compete by confidence):
+      1. PPS-only:    error = pps_frac(phc)           ±20 ns
+      2. PPS + qErr:  error = pps_frac(phc) + qErr    ±3 ns
+      3. Carrier-phase: error = pps_frac(phc) + dt_rx  ±0.1 ns
+
+    PI servo → adjfine() on /dev/ptp0, gains scaled by confidence
 
     Output: SDP0 → disciplined PPS (SMA J4 → TICC chA for measurement)
 
@@ -349,10 +356,10 @@ def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
 
     # 2. PPS + qErr: available when TIM-TP has been received
     if qerr_ns is not None:
-        # qErr is the PPS timing error: positive = PPS fired late
-        # Correction: subtract qErr to get the true GPS second alignment
+        # Validated sign convention (testAnt): corrected = raw + qerr
+        # Positive qErr means PPS fired early; adding qErr compensates.
         sources.append(ErrorSource('pps+qerr',
-                                   pps_error_ns - qerr_ns,
+                                   pps_error_ns + qerr_ns,
                                    qerr_confidence))
 
     # 3. Carrier-phase: available when filter has converged
@@ -370,7 +377,18 @@ def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
 # ── Main servo loop ──────────────────────────────────────────────────────── #
 
 def run_servo(args):
-    """Main PHC discipline loop integrating PPP filter + PTP extts."""
+    """Main PHC discipline loop with competitive error source selection (M6).
+
+    Three error sources compete at every epoch:
+      1. PPS-only    (~20 ns confidence, always available)
+      2. PPS + qErr  (~3 ns, when TIM-TP is available)
+      3. Carrier-phase (~0.1 ns, when PPP filter has converged)
+
+    The source with the lowest confidence interval drives the servo.
+    PI gains scale with selected confidence: better measurement → more
+    aggressive correction.  No discrete mode transitions after the
+    initial warmup/step bootstrap.
+    """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -407,6 +425,9 @@ def run_servo(args):
     corrections = RealtimeCorrections(beph, ssr)
     obs_queue = queue.Queue(maxsize=100)
     stop_event = threading.Event()
+
+    # QErrStore for TIM-TP quantization error (M6)
+    qerr_store = QErrStore()
 
     # Read NTRIP config if provided
     ntrip_kwargs = {}
@@ -474,23 +495,17 @@ def run_servo(args):
     # Parse systems filter
     systems = set(args.systems.split(',')) if args.systems else None
 
-    # Start serial reader
+    # Start serial reader (with qerr_store for TIM-TP extraction)
     t_serial = threading.Thread(
         target=serial_reader,
         args=(args.serial, args.baud, obs_queue, stop_event, beph, systems, ssr),
+        kwargs={'qerr_store': qerr_store},
         daemon=True,
     )
     t_serial.start()
     log.info(f"Serial: {args.serial} at {args.baud} baud")
 
     # ── Receiver signal diagnostic ──────────────────────────────────────
-    # Check that the receiver is delivering dual-frequency observations.
-    # The PPP filter requires ionosphere-free (IF) pseudorange and carrier
-    # phase, which needs two frequencies per SV:
-    #   GPS: L1 C/A + L5Q    Galileo: E1C + E5aQ    BDS: B1I + B2aI
-    # Single-frequency SVs are silently dropped by serial_reader.
-    # If GPS L5 is missing (common without the L5 health override),
-    # all GPS SVs are dropped and only Galileo contributes.
     log.info("Checking receiver signals (3 epochs)...")
     sys_counts = {}
     for _diag_i in range(3):
@@ -503,7 +518,6 @@ def run_servo(args):
         for o in _obs:
             s = o.get('sys', '?')
             sys_counts[s] = sys_counts.get(s, 0) + 1
-        # Put back for the filter to consume
         obs_queue.put((_t, _obs))
 
     if sys_counts:
@@ -538,28 +552,28 @@ def run_servo(args):
 
     # Servo parameters
     STEP_THRESHOLD_NS = 10_000     # 10 µs — step if offset larger
-    CONVERGE_THRESHOLD_NS = 500    # 500 ns — switch to tracking
-    CONVERGE_WINDOW = 10           # consecutive samples below threshold
 
-    # PI gains (from SatPulse, adapted)
-    CONVERGE_KP = 0.7
-    CONVERGE_KI = 0.3
-    TRACK_KP = args.track_kp
-    TRACK_KI = args.track_ki
+    # PI gains — base values, scaled by error source confidence at runtime
+    BASE_KP = args.track_kp        # default 0.3
+    BASE_KI = args.track_ki        # default 0.1
 
-    # EMA smoothing of phc_error before feeding to PI (reduces servo noise)
-    ema_alpha = args.ema_alpha  # 0 = no smoothing, 1 = raw sample
-    ema_error = None  # initialized on first tracking sample
+    # Gain scaling: gain_factor = clamp(REF_SIGMA / source_confidence)
+    # REF_SIGMA chosen so gains = 1× at PPS+qErr quality (~2 ns)
+    GAIN_REF_SIGMA = args.gain_ref_sigma
+    GAIN_MIN_SCALE = 0.1           # floor (PPS-only: gentle)
+    GAIN_MAX_SCALE = 3.0           # ceiling (excellent carrier: aggressive)
 
-    # Adaptive gain scaling based on filter confidence
-    adaptive = args.adaptive_gains
+    # During convergence (large error), ensure minimum gain aggressiveness
+    # so pull-in doesn't stall at PPS-only quality
+    CONVERGE_ERROR_NS = 500        # above this, boost gains
+    CONVERGE_MIN_SCALE = 2.0       # minimum gain scale during convergence
 
-    servo = PIServo(CONVERGE_KP, CONVERGE_KI, max_ppb=caps['max_adj'])
-    mode = ServoMode.WARMUP
-    consecutive_good = 0
+    servo = PIServo(BASE_KP, BASE_KI, max_ppb=caps['max_adj'])
+    phase = 'warmup'
     prev_t = None
     n_epochs = 0
-    warmup_epochs = 20  # let filter converge before steering
+    warmup_epochs = args.warmup    # default 20
+    prev_source = None
 
     # PPS event queue: extts reader puts events, main loop consumes 1:1
     pps_queue = queue.Queue(maxsize=10)
@@ -574,7 +588,6 @@ def run_servo(args):
             try:
                 pps_queue.put_nowait((phc_sec, phc_nsec))
             except queue.Full:
-                # Drain stale events and put the new one
                 while not pps_queue.empty():
                     try:
                         pps_queue.get_nowait()
@@ -589,23 +602,16 @@ def run_servo(args):
     def pps_fractional_error(phc_sec, phc_nsec):
         """Compute PHC error from PPS fractional second.
 
-        The F9T PPS fires at GPS second boundaries. The PHC timestamps it.
-        If PHC is perfectly aligned, phc_nsec == 0 (or very close).
-        phc_nsec near 0 → PHC is slightly ahead (positive error)
-        phc_nsec near 1e9 → PHC is slightly behind (negative error)
+        phc_nsec near 0 → PHC slightly ahead (positive error)
+        phc_nsec near 1e9 → PHC slightly behind (negative error)
         """
         if phc_nsec <= 500_000_000:
-            return float(phc_nsec)       # PHC ahead
+            return float(phc_nsec)
         else:
-            return float(phc_nsec) - 1_000_000_000  # PHC behind
+            return float(phc_nsec) - 1_000_000_000
 
     def phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec):
-        """Compute whole-second offset between PHC epoch and GPS time.
-
-        Returns (PHC_time - GPS_time) in seconds (integer).
-        The PPS fires at gps_unix_sec. PHC reads phc_sec.phc_nsec.
-        The nearest integer second in PHC time is round(phc_sec + nsec/1e9).
-        """
+        """Whole-second offset: PHC_time - GPS_time."""
         phc_rounded = phc_sec if phc_nsec < 500_000_000 else phc_sec + 1
         return phc_rounded - gps_unix_sec
 
@@ -617,12 +623,14 @@ def run_servo(args):
         log_w = csv.writer(log_f)
         log_w.writerow([
             'timestamp', 'gps_second', 'phc_sec', 'phc_nsec',
-            'dt_rx_ns', 'dt_rx_sigma_ns', 'pps_error_ns', 'phc_error_ns',
-            'adjfine_ppb', 'mode', 'n_meas',
+            'dt_rx_ns', 'dt_rx_sigma_ns', 'pps_error_ns', 'qerr_ns',
+            'source', 'source_error_ns', 'source_confidence_ns',
+            'adjfine_ppb', 'phase', 'n_meas', 'gain_scale',
         ])
 
     start_time = time.time()
-    stepped = False  # True after initial clock step
+    adjfine_ppb = 0.0
+    gain_scale = 1.0
 
     try:
         while not stop_event.is_set():
@@ -666,90 +674,52 @@ def run_servo(args):
                     log.info(f"  [{n_epochs}] No PPS event for this epoch")
                 continue
 
-            # GPS integer second for this PPS
             gps_unix_sec = int(round(gps_time.timestamp()))
-
-            # PHC error computation:
-            #
-            # PPS-only mode (warmup, step, early convergence):
-            #   phc_error = pps_fractional_error(phc_nsec)
-            #   Assumes PPS fires at the GPS second boundary. Accuracy limited
-            #   by the receiver's PPS alignment (~5-20 ns qErr).
-            #
-            # Carrier-phase mode (tracking with converged filter):
-            #   dt_rx from the PPP filter tells us the receiver clock's offset
-            #   from true GPS time to ~0.1 ns. The PPS fires at the receiver's
-            #   second boundary, which is (GPS_second + dt_rx/c), NOT exactly
-            #   at the GPS second. We use dt_rx to compute the PHC's offset
-            #   from true GPS time rather than from the PPS edge.
-            #
-            #   Once the PHC is stepped to true GPS time, the PPS arrives at
-            #   a fractional offset equal to dt_rx. The servo then tracks the
-            #   drift of dt_rx (the receiver clock rate) and keeps the PHC
-            #   aligned to true GPS time rather than to the drifting PPS.
-            #
-            # PPS-only error (always computed — used for step and fallback)
+            ts_str = gps_time.strftime('%Y-%m-%d %H:%M:%S')
             pps_error_ns = pps_fractional_error(phc_sec, phc_nsec)
 
-            # Carrier-phase corrected error (used in tracking when filter converged)
-            # dt_rx is the receiver clock offset: positive = receiver ahead of GPS.
-            # If receiver is behind (dt_rx < 0), PPS fires LATE — phc_nsec reads
-            # a positive value equal to |dt_rx| when the PHC is on true GPS time.
-            # Correction: phc_error = pps_error + dt_rx (cancels the PPS timing error)
-            #
-            # Example: PHC on GPS time, receiver 9ms behind (dt_rx = -9e6 ns)
-            #   PPS arrives 9ms late → pps_error = +9e6 ns
-            #   corrected = +9e6 + (-9e6) = 0  ✓
-            if dt_rx_sigma < 10.0:
-                phc_error_ns = pps_error_ns + dt_rx_ns
-            else:
-                phc_error_ns = pps_error_ns
+            # Get qErr from TIM-TP (None if stale or unavailable)
+            qerr_ns, _ = qerr_store.get()
 
-            # Check if PHC integer seconds match GPS (needed for step)
-            epoch_offset = phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec)
+            # Compute competitive error sources (M6)
+            sources = compute_error_sources(
+                pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma,
+            )
+            best = sources[0]
 
-            # Mode state machine
-            adjfine_ppb = servo.freq
-            ts_str = gps_time.strftime('%Y-%m-%d %H:%M:%S')
-
-            if mode == ServoMode.WARMUP:
+            # ── Bootstrap: warmup ──────────────────────────────────────
+            if phase == 'warmup':
                 if n_epochs >= warmup_epochs:
+                    epoch_offset = phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec)
                     log.info(f"  Warmup complete ({n_epochs} epochs, "
-                             f"σ={dt_rx_sigma:.1f}ns, "
-                             f"phc_frac_err={phc_error_ns:+.0f}ns, "
-                             f"epoch_offset={epoch_offset}s)")
-                    if epoch_offset != 0:
-                        mode = ServoMode.STEP
-                        log.info(f"  PHC epoch offset: {epoch_offset}s — need to step")
-                    elif abs(phc_error_ns) > STEP_THRESHOLD_NS:
-                        mode = ServoMode.STEP
+                             f"best={best}, epoch_offset={epoch_offset}s)")
+                    if epoch_offset != 0 or abs(best.error_ns) > STEP_THRESHOLD_NS:
+                        phase = 'step'
                     else:
-                        mode = ServoMode.CONVERGING
-                        servo = PIServo(CONVERGE_KP, CONVERGE_KI,
-                                        max_ppb=caps['max_adj'])
+                        phase = 'tracking'
+                        log.info(f"  → tracking (no step needed)")
                 elif n_epochs % 10 == 0:
-                    log.info(f"  [{n_epochs}] Warmup: "
-                             f"dt_rx={dt_rx_ns:+.1f}ns ±{dt_rx_sigma:.1f}ns "
-                             f"phc_frac={phc_error_ns:+.0f}ns "
-                             f"epoch_off={epoch_offset}s")
+                    log.info(f"  [{n_epochs}] warmup: best={best} "
+                             f"dt_rx={dt_rx_ns:+.1f}±{dt_rx_sigma:.1f}ns")
+                # Log but don't steer during warmup
+                if log_w:
+                    log_w.writerow([
+                        ts_str, gps_unix_sec, phc_sec, phc_nsec,
+                        f'{dt_rx_ns:.3f}', f'{dt_rx_sigma:.3f}',
+                        f'{pps_error_ns:.1f}', f'{qerr_ns:.3f}' if qerr_ns is not None else '',
+                        best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
+                        f'{adjfine_ppb:.3f}', phase, n_used, f'{gain_scale:.3f}',
+                    ])
+                continue
 
-            elif mode == ServoMode.STEP:
-                # Step PHC to true GPS time.
-                # Total offset = epoch_offset (whole seconds) + PPS fractional error
-                # Include dt_rx if filter is converged so we land on GPS time,
-                # not PPS time. This means the PPS will arrive at nsec ≈ |dt_rx|
-                # after the step, which the tracking loop corrects for.
-                step_frac = pps_error_ns
-                if dt_rx_sigma < 10.0:
-                    step_frac = pps_error_ns + dt_rx_ns
-                total_offset_ns = epoch_offset * 1_000_000_000 + step_frac
+            # ── Bootstrap: step ────────────────────────────────────────
+            if phase == 'step':
+                epoch_offset = phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec)
+                # Use the best available error source for the step
+                total_offset_ns = epoch_offset * 1_000_000_000 + best.error_ns
                 log.info(f"  STEP: epoch_offset={epoch_offset}s, "
-                         f"pps_err={pps_error_ns:+.0f}ns, "
-                         f"dt_rx={dt_rx_ns:+.0f}ns (σ={dt_rx_sigma:.1f}), "
-                         f"total={total_offset_ns:+.0f}ns")
+                         f"source={best}, total={total_offset_ns:+.0f}ns")
 
-                # Use phc_ctl adj for the step (reliable, uses clock_settime)
-                # phc_ctl adj takes SECONDS (float), not nanoseconds
                 import subprocess
                 adj_s = -total_offset_ns / 1_000_000_000
                 result = subprocess.run(
@@ -762,11 +732,11 @@ def run_servo(args):
                 else:
                     log.error(f"  phc_ctl adj failed (rc={result.returncode}): "
                               f"{result.stderr.strip()} {result.stdout.strip()}")
-                stepped = True
-                mode = ServoMode.CONVERGING
-                servo = PIServo(CONVERGE_KP, CONVERGE_KI,
-                                max_ppb=caps['max_adj'])
-                # Wait for step to settle, then flush stale PPS events
+
+                # Reset servo for clean start after step
+                servo = PIServo(BASE_KP, BASE_KI, max_ppb=caps['max_adj'])
+                phase = 'tracking'
+                # Flush stale PPS events
                 time.sleep(2)
                 while not pps_queue.empty():
                     try:
@@ -775,85 +745,51 @@ def run_servo(args):
                         break
                 continue
 
-            elif mode == ServoMode.CONVERGING:
-                # Negate: positive error (PHC ahead) → negative adjfine (slow down)
-                adjfine_ppb = -servo.update(phc_error_ns)
-                ptp.adjfine(adjfine_ppb)
+            # ── Continuous tracking with competitive error sources ──────
+            # Outlier rejection
+            if abs(best.error_ns) > 5000:
+                log.warning(f"  Outlier: {best}, skipping")
+                continue
 
-                if abs(phc_error_ns) < CONVERGE_THRESHOLD_NS:
-                    consecutive_good += 1
-                else:
-                    consecutive_good = 0
+            # Gain scaling by error source confidence
+            gain_scale = max(GAIN_MIN_SCALE, min(GAIN_MAX_SCALE,
+                             GAIN_REF_SIGMA / best.confidence_ns))
 
-                if consecutive_good >= CONVERGE_WINDOW:
-                    log.info(f"  Converged! Switching to tracking mode "
-                             f"(err={phc_error_ns:+.0f}ns)")
-                    mode = ServoMode.TRACKING
-                    servo = PIServo(TRACK_KP, TRACK_KI,
-                                    max_ppb=caps['max_adj'],
-                                    initial_freq=adjfine_ppb)
-                    consecutive_good = 0
+            # Boost gains during convergence (large error) to ensure
+            # pull-in doesn't stall when using low-confidence sources
+            if abs(best.error_ns) > CONVERGE_ERROR_NS:
+                gain_scale = max(gain_scale, CONVERGE_MIN_SCALE)
 
-                if n_epochs % 5 == 0:
-                    log.info(f"  [{n_epochs}] CONVERGE: "
-                             f"phc_err={phc_error_ns:+.0f}ns "
-                             f"adj={adjfine_ppb:+.1f}ppb "
-                             f"σ={dt_rx_sigma:.1f}ns")
+            servo.kp = BASE_KP * gain_scale
+            servo.ki = BASE_KI * gain_scale
 
-            elif mode == ServoMode.TRACKING:
-                # Outlier rejection: skip if error > 10× typical
-                if abs(phc_error_ns) > 5000:  # 5 µs = clear outlier
-                    log.warning(f"  Outlier: phc_err={phc_error_ns:+.0f}ns, skipping")
-                    consecutive_good = 0
-                    continue
+            # Negate: positive error (PHC ahead) → negative adjfine (slow down)
+            adjfine_ppb = -servo.update(best.error_ns)
+            ptp.adjfine(adjfine_ppb)
 
-                # EMA smoothing: reduces servo noise from PPS measurement jitter
-                if ema_alpha < 1.0:
-                    if ema_error is None:
-                        ema_error = phc_error_ns
-                    else:
-                        ema_error = ema_alpha * phc_error_ns + (1 - ema_alpha) * ema_error
-                    servo_input = ema_error
-                else:
-                    servo_input = phc_error_ns
+            # Log source transitions
+            if prev_source != best.name:
+                if prev_source is not None:
+                    log.info(f"  Source: {prev_source} → {best.name} "
+                             f"(confidence {best.confidence_ns:.1f}ns)")
+                prev_source = best.name
 
-                # Adaptive gain scaling: scale PI gains by filter confidence.
-                # When filter sigma is small (high confidence), use tighter gains.
-                # When sigma is large (low confidence), use looser gains.
-                if adaptive and dt_rx_sigma > 0:
-                    # Scale factor: 1.0 at sigma=1ns, smaller at lower sigma
-                    # Clamp between 0.1 (very confident) and 2.0 (uncertain)
-                    gain_scale = max(0.1, min(2.0, dt_rx_sigma / 1.0))
-                    servo.kp = TRACK_KP * gain_scale
-                    servo.ki = TRACK_KI * gain_scale
+            if n_epochs % 10 == 0:
+                src_summary = ' '.join(f'{s.name}={s.error_ns:+.1f}' for s in sources)
+                log.info(f"  [{n_epochs}] {best.name}: "
+                         f"err={best.error_ns:+.1f}ns "
+                         f"adj={adjfine_ppb:+.1f}ppb "
+                         f"gain={gain_scale:.2f}x "
+                         f"[{src_summary}]")
 
-                adjfine_ppb = -servo.update(servo_input)
-                ptp.adjfine(adjfine_ppb)
-
-                if n_epochs % 10 == 0:
-                    extra = ""
-                    if dt_rx_sigma < 10.0:
-                        extra += f" dt_rx={dt_rx_ns:+.1f}"
-                    else:
-                        extra += " PPS-only"
-                    if ema_alpha < 1.0:
-                        extra += f" ema={ema_error:+.0f}"
-                    if adaptive:
-                        extra += f" kp={servo.kp:.3f} ki={servo.ki:.3f}"
-                    log.info(f"  [{n_epochs}] TRACK: "
-                             f"phc_err={phc_error_ns:+.0f}ns "
-                             f"pps={pps_error_ns:+.0f}ns "
-                             f"adj={adjfine_ppb:+.1f}ppb "
-                             f"σ={dt_rx_sigma:.1f}ns "
-                             f"n={n_used}{extra}")
-
-            # Log
+            # CSV log
             if log_w:
                 log_w.writerow([
                     ts_str, gps_unix_sec, phc_sec, phc_nsec,
                     f'{dt_rx_ns:.3f}', f'{dt_rx_sigma:.3f}',
-                    f'{pps_error_ns:.1f}', f'{phc_error_ns:.1f}',
-                    f'{adjfine_ppb:.3f}', mode, n_used,
+                    f'{pps_error_ns:.1f}', f'{qerr_ns:.3f}' if qerr_ns is not None else '',
+                    best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
+                    f'{adjfine_ppb:.3f}', phase, n_used, f'{gain_scale:.3f}',
                 ])
 
     except KeyboardInterrupt:
@@ -861,7 +797,7 @@ def run_servo(args):
     finally:
         stop_event.set()
         try:
-            ptp.adjfine(0.0)  # Don't leave PHC at non-zero rate
+            ptp.adjfine(0.0)
         except Exception:
             pass
         ptp.disable_extts(extts_channel)
@@ -871,9 +807,9 @@ def run_servo(args):
 
     elapsed = time.time() - start_time
     log.info(f"\n{'='*60}")
-    log.info(f"  PHC servo complete")
+    log.info(f"  PHC servo complete (M6 competitive error sources)")
     log.info(f"  Duration: {elapsed:.0f}s, Epochs: {n_epochs}")
-    log.info(f"  Final mode: {mode}, adjfine: {adjfine_ppb:+.3f} ppb")
+    log.info(f"  Last source: {prev_source}, adjfine: {adjfine_ppb:+.3f} ppb")
     log.info(f"{'='*60}")
 
 
@@ -881,7 +817,7 @@ def run_servo(args):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="PHC discipline loop using PPP clock estimates (M5)",
+        description="PHC discipline loop with competitive error sources (M6)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -926,11 +862,8 @@ def main():
                     help="Tracking mode Kp gain (default: 0.3)")
     ap.add_argument("--track-ki", type=float, default=0.1,
                     help="Tracking mode Ki gain (default: 0.1)")
-    ap.add_argument("--ema-alpha", type=float, default=1.0,
-                    help="EMA smoothing alpha for phc_error (1.0=no smoothing, "
-                         "0.3=heavy smoothing, default: 1.0)")
-    ap.add_argument("--adaptive-gains", action="store_true",
-                    help="Scale PI gains by PPP filter confidence (sigma)")
+    ap.add_argument("--gain-ref-sigma", type=float, default=2.0,
+                    help="Reference confidence (ns) for gain scale=1.0 (default: 2.0)")
 
     # Output
     ap.add_argument("--log", default=None,

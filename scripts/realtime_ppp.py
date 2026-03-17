@@ -94,16 +94,22 @@ class QErrStore:
         self._lock = threading.Lock()
         self._qerr_ns = None
         self._tow_ms = None
+        self._host_time = None
 
     def update(self, qerr_ps, tow_ms):
         """Store new qErr (picoseconds from TIM-TP) as nanoseconds."""
         with self._lock:
             self._qerr_ns = qerr_ps / 1000.0
             self._tow_ms = tow_ms
+            self._host_time = time.monotonic()
 
-    def get(self):
-        """Return (qerr_ns, tow_ms) or (None, None) if not yet available."""
+    def get(self, max_age_s=2.0):
+        """Return (qerr_ns, tow_ms) or (None, None) if stale/unavailable."""
         with self._lock:
+            if self._host_time is None:
+                return None, None
+            if time.monotonic() - self._host_time > max_age_s:
+                return None, None
             return self._qerr_ns, self._tow_ms
 
 
@@ -174,7 +180,10 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
             if msg_id == 'TIM-TP' and qerr_store is not None:
                 qerr_ps = getattr(parsed, 'qErr', None)
                 tow_ms = getattr(parsed, 'towMS', None)
-                if qerr_ps is not None:
+                # Check qErrInvalid flag (bit 4 of flags byte)
+                flags = getattr(parsed, 'flags', 0)
+                qerr_invalid = bool(flags & 0x10) if isinstance(flags, int) else False
+                if qerr_ps is not None and not qerr_invalid:
                     qerr_store.update(qerr_ps, tow_ms)
 
             if msg_id == 'RXM-RAWX':
