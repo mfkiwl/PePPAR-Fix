@@ -91,6 +91,7 @@ import csv
 import ctypes
 import ctypes.util
 import fcntl
+import json
 import logging
 import math
 import os
@@ -105,7 +106,7 @@ from datetime import datetime, timezone, timedelta
 import numpy as np
 
 # Local imports (same scripts/ directory)
-from solve_pseudorange import C, lla_to_ecef
+from solve_pseudorange import C, lla_to_ecef, ecef_to_lla
 from solve_ppp import FixedPosFilter
 from ntrip_client import NtripStream
 from broadcast_eph import BroadcastEphemeris
@@ -562,6 +563,115 @@ class DisciplineScheduler:
         return tau
 
 
+# ── Position watchdog ────────────────────────────────────────────────────── #
+
+class PositionWatchdog:
+    """Monitors PPP filter residuals to detect antenna position changes.
+
+    If the antenna moves, pseudorange residuals grow systematically.
+    When the implied position shift exceeds threshold, stops servo steering.
+    """
+
+    def __init__(self, threshold_m=0.5, window=30, alarm_count=10):
+        self.threshold_m = threshold_m  # position shift to trigger alarm
+        self.window = window            # epochs of residuals to establish baseline
+        self.alarm_count = alarm_count  # consecutive bad epochs before alarm
+        self._residuals = []            # recent RMS residuals
+        self._baseline_rms = None       # established baseline
+        self._bad_count = 0
+        self._alarmed = False
+
+    def update(self, residuals_rms, n_used):
+        """Feed one epoch's residual RMS. Returns True if position is OK.
+
+        During the first `window` epochs, collects residuals to establish
+        a baseline RMS. After that, compares each epoch against the baseline.
+        If RMS exceeds max(baseline*3, baseline+threshold_m) for
+        `alarm_count` consecutive epochs, sets alarmed=True.
+        """
+        if n_used < 4:
+            return True  # not enough data to judge
+
+        if self._baseline_rms is None:
+            # Still collecting baseline
+            self._residuals.append(residuals_rms)
+            if len(self._residuals) >= self.window:
+                self._baseline_rms = float(np.median(self._residuals))
+                self._residuals.clear()
+            return True
+
+        # Compare against baseline: alarm if RMS exceeds 3x baseline
+        # or baseline + threshold_m (whichever is larger)
+        limit = max(self._baseline_rms * 3.0,
+                    self._baseline_rms + self.threshold_m)
+
+        if residuals_rms > limit:
+            self._bad_count += 1
+            if self._bad_count >= self.alarm_count and not self._alarmed:
+                self._alarmed = True
+            return not self._alarmed
+        else:
+            self._bad_count = 0
+            return True
+
+    @property
+    def alarmed(self):
+        return self._alarmed
+
+
+# ── Position save/load ───────────────────────────────────────────────────── #
+
+def save_position(path, ecef, sigma_m, source, note=""):
+    """Save position to JSON file (ECEF + LLA for human readability).
+
+    Args:
+        path: file path to write
+        ecef: numpy array [x, y, z] in meters (ECEF)
+        sigma_m: position sigma in meters (convergence quality proxy)
+        source: string describing origin (e.g. 'ppp_bootstrap', 'known_pos')
+        note: optional human-readable note
+    """
+    lat, lon, alt = ecef_to_lla(ecef[0], ecef[1], ecef[2])
+    data = {
+        "lat": round(lat, 7),
+        "lon": round(lon, 7),
+        "alt_m": round(alt, 3),
+        "ecef_m": [round(float(ecef[0]), 3),
+                    round(float(ecef[1]), 3),
+                    round(float(ecef[2]), 3)],
+        "sigma_m": round(float(sigma_m), 4),
+        "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        "source": source,
+        "note": note,
+    }
+    tmp = path + ".tmp"
+    with open(tmp, 'w') as f:
+        json.dump(data, f, indent=2)
+        f.write('\n')
+    os.replace(tmp, path)
+
+
+def load_position(path):
+    """Load position from JSON file.
+
+    Returns:
+        numpy array [x, y, z] in ECEF meters, or None if file missing/invalid.
+    """
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        ecef = np.array(data["ecef_m"], dtype=float)
+        if ecef.shape != (3,):
+            return None
+        return ecef
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        logging.getLogger("phc_servo").warning(
+            f"Failed to load position from {path}: {e}")
+        return None
+
+
 # ── Main servo loop ──────────────────────────────────────────────────────── #
 
 def run_servo(args):
@@ -582,11 +692,34 @@ def run_servo(args):
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    # Parse known position
-    parts = args.known_pos.split(',')
-    lat, lon, alt = float(parts[0]), float(parts[1]), float(parts[2])
-    known_ecef = lla_to_ecef(lat, lon, alt)
-    log.info(f"Position: {lat:.6f}, {lon:.6f}, {alt:.1f}m")
+    # ── Resolve position: --known-pos > position file > error ────────────
+    position_source = None  # tracks where the position came from
+    known_ecef = None
+
+    if args.known_pos:
+        # Explicit CLI override — highest priority
+        parts = args.known_pos.split(',')
+        lat, lon, alt = float(parts[0]), float(parts[1]), float(parts[2])
+        known_ecef = lla_to_ecef(lat, lon, alt)
+        position_source = "cli"
+        log.info(f"Position (CLI): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
+    elif args.position_file:
+        # Try loading from saved position file
+        loaded = load_position(args.position_file)
+        if loaded is not None:
+            known_ecef = loaded
+            position_source = "file"
+            lat, lon, alt = ecef_to_lla(known_ecef[0], known_ecef[1], known_ecef[2])
+            log.info(f"Position (file): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
+            log.info(f"  Loaded from: {args.position_file}")
+            # TODO: sanity check saved position against NAV-PVT on startup.
+            # The runtime PositionWatchdog will catch moved antennas.
+        else:
+            log.warning(f"Position file not found or invalid: {args.position_file}")
+
+    if known_ecef is None:
+        log.error("No position available. Provide --known-pos or --position-file.")
+        sys.exit(1)
 
     # Open PTP device
     ptp = PtpDevice(args.ptp_dev)
@@ -763,11 +896,15 @@ def run_servo(args):
         min_interval=args.min_interval,
         max_interval=args.max_interval,
     )
+    watchdog = PositionWatchdog(
+        threshold_m=args.watchdog_threshold,
+    )
     phase = 'warmup'
     prev_t = None
     n_epochs = 0
     warmup_epochs = args.warmup    # default 20
     prev_source = None
+    position_saved = False  # track whether we've saved position to file
 
     # PPS event queue: extts reader puts events, main loop consumes 1:1
     pps_queue = queue.Queue(maxsize=10)
@@ -820,7 +957,7 @@ def run_servo(args):
             'dt_rx_ns', 'dt_rx_sigma_ns', 'pps_error_ns', 'qerr_ns',
             'source', 'source_error_ns', 'source_confidence_ns',
             'adjfine_ppb', 'phase', 'n_meas', 'gain_scale',
-            'discipline_interval', 'n_accumulated',
+            'discipline_interval', 'n_accumulated', 'watchdog_alarm',
         ])
 
     start_time = time.time()
@@ -856,10 +993,40 @@ def run_servo(args):
             if n_used < 4:
                 continue
 
+            # Feed watchdog with residual RMS
+            resid_rms = float(np.sqrt(np.mean(resid ** 2))) if len(resid) > 0 else 0.0
+            watchdog.update(resid_rms, n_used)
+            if watchdog.alarmed:
+                log.error("POSITION WATCHDOG ALARM: residuals indicate antenna "
+                          "position has changed! Servo steering DISABLED. "
+                          "Investigate and restart with correct position.")
+                # Stop steering — don't call adjfine, let PHC free-run
+                # The PPS OUT (if configured externally) will drift, which is
+                # better than being wrong by a large constant offset.
+                break
+
             dt_rx_ns = filt.x[filt.IDX_CLK] / C * 1e9
             p_clk = filt.P[filt.IDX_CLK, filt.IDX_CLK]
             dt_rx_sigma = math.sqrt(max(0, p_clk)) / C * 1e9
             n_epochs += 1
+
+            # Save position to file once filter has converged
+            # FixedPosFilter uses fixed known_ecef (doesn't estimate position),
+            # so we save known_ecef with dt_rx_sigma as convergence quality proxy.
+            if (args.position_file and not position_saved
+                    and n_epochs >= 300
+                    and dt_rx_sigma < 100.0):  # 100 ns ~ 0.03 m
+                sigma_m = dt_rx_sigma * 1e-9 * C  # convert ns to meters
+                if sigma_m < 0.1:
+                    save_position(
+                        args.position_file, known_ecef,
+                        sigma_m=sigma_m,
+                        source="ppp_bootstrap" if position_source == "file" else "known_pos",
+                        note=f"saved after {n_epochs} epochs, dt_rx_sigma={dt_rx_sigma:.2f}ns",
+                    )
+                    position_saved = True
+                    log.info(f"Position saved to {args.position_file} "
+                             f"(sigma={sigma_m:.4f}m after {n_epochs} epochs)")
 
             # Get the PPS event for this epoch (1:1 pairing)
             try:
@@ -904,7 +1071,7 @@ def run_servo(args):
                         f'{pps_error_ns:.1f}', f'{qerr_ns:.3f}' if qerr_ns is not None else '',
                         best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
                         f'{adjfine_ppb:.3f}', phase, n_used, f'{gain_scale:.3f}',
-                        scheduler.interval, 0,
+                        scheduler.interval, 0, int(watchdog.alarmed),
                     ])
                 continue
 
@@ -929,13 +1096,16 @@ def run_servo(args):
                     log.error(f"  phc_ctl adj failed (rc={result.returncode}): "
                               f"{result.stderr.strip()} {result.stdout.strip()}")
 
-                # Reset servo and scheduler for clean start after step
+                # Reset servo, scheduler, and watchdog for clean start after step
                 servo = PIServo(BASE_KP, BASE_KI, max_ppb=caps['max_adj'])
                 scheduler = DisciplineScheduler(
                     base_interval=args.discipline_interval,
                     adaptive=args.adaptive_interval,
                     min_interval=args.min_interval,
                     max_interval=args.max_interval,
+                )
+                watchdog = PositionWatchdog(
+                    threshold_m=args.watchdog_threshold,
                 )
                 phase = 'tracking'
                 # Flush stale PPS events
@@ -1018,6 +1188,7 @@ def run_servo(args):
                     best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
                     f'{adjfine_ppb:.3f}', phase, n_used, f'{gain_scale:.3f}',
                     scheduler.interval, scheduler.n_accumulated,
+                    int(watchdog.alarmed),
                 ])
 
     except KeyboardInterrupt:
@@ -1050,8 +1221,12 @@ def main():
     )
 
     # Position
-    ap.add_argument("--known-pos", required=True,
-                    help="Known position as lat,lon,alt")
+    ap.add_argument("--known-pos", default=None,
+                    help="Known position as lat,lon,alt (overrides position file)")
+    ap.add_argument("--position-file", default=None,
+                    help="JSON file for position save/load (default: None)")
+    ap.add_argument("--watchdog-threshold", type=float, default=0.5,
+                    help="Position watchdog threshold in meters (default: 0.5)")
     ap.add_argument("--leap", type=int, default=18,
                     help="UTC-GPS leap seconds (default: 18)")
     ap.add_argument("--systems", default="gps,gal",
