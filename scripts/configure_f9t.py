@@ -215,6 +215,36 @@ def configure_uart_baud(ser, ubr, baud):
     return True
 
 
+def configure_gps_l5_health(ser, ubr):
+    """Override GPS L5 health status so receiver tracks L5 signals.
+
+    GPS Block IIF/III satellites flag L5 as "unhealthy" in the navigation
+    message while the constellation is pre-operational.  This raw CFG-VALSET
+    sets key 0x10320001 to 1, causing the receiver to substitute GPS L1 C/A
+    health status for L5.
+
+    Source: u-blox App Note UBX-21038688 "GPS L5 configuration"
+    A NAK means the key is unsupported — GPS L5 simply won't be tracked.
+    """
+    raw_msg = bytes([
+        0xB5, 0x62,              # UBX sync
+        0x06, 0x8A,              # class=CFG, id=VALSET
+        0x09, 0x00,              # length = 9
+        0x01, 0x07, 0x00, 0x00,  # version=1, layers=RAM+BBR+Flash, reserved
+        0x01, 0x00, 0x32, 0x10,  # key 0x10320001 (little-endian)
+        0x01,                    # value = 1 (enable override)
+        0xE5, 0x26,              # Fletcher checksum
+    ])
+    print("  GPS L5 health override (UBX-21038688)...", end=" ", flush=True)
+    ser.write(raw_msg)
+    ack = wait_ack(ubr, "CFG", "VALSET", timeout=3.0)
+    if ack:
+        print("OK")
+    else:
+        print("NAK (key not supported — GPS L5 will not be tracked)")
+    return ack
+
+
 def save_config(ser, ubr):
     """Save current config to flash (BBR + Flash layers)."""
     # Saving is implicit when using layers=7 in VALSET, but belt-and-suspenders:
@@ -302,8 +332,9 @@ def main():
         ser.reset_input_buffer()
         ubr = UBXReader(ser, protfilter=2)
 
-    # Step 2: Configure signals
+    # Step 2: Configure signals + GPS L5 health override
     configure_signals(ser, ubr)
+    configure_gps_l5_health(ser, ubr)
 
     # Step 3: Set measurement rate
     configure_rate(ser, ubr, args.rate)

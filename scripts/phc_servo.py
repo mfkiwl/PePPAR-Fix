@@ -17,6 +17,34 @@ The servo reads PPS timestamps via the PTP_EXTTS_EVENT ioctl and
 correlates them with PPP clock estimates at the same GPS second.
 A PI controller drives adjfine to minimize the PHC-GPS offset.
 
+GNSS receiver requirements:
+    The PPP filter uses ionosphere-free (IF) combination of dual-frequency
+    observations. This REQUIRES two frequencies per satellite:
+        GPS:     L1 C/A + L5Q
+        Galileo: E1C + E5aQ
+        BDS:     B1I + B2aI  (optional — GPS+GAL sufficient)
+
+    Single-frequency satellites are silently dropped. The filter needs
+    at least 4 dual-frequency SVs per epoch.
+
+    IMPORTANT: GPS L5 is flagged "unhealthy" in the navigation message.
+    The receiver must have the L5 health override enabled (u-blox App Note
+    UBX-21038688, key 0x10320001). Without it, no GPS SVs produce L5,
+    and only Galileo provides dual-frequency observations.
+
+    L1-only operation is NOT supported — the ionosphere-free combination
+    is fundamental to the PPP approach. Without it, ionospheric delay
+    (up to ~50 ns at zenith, worse at low elevation) would dominate the
+    clock estimate.
+
+    Run configure_f9t.py to set up the receiver:
+        python scripts/configure_f9t.py /dev/gnss-top --port-type USB
+
+    Correction stream requirements:
+        - Broadcast ephemeris (RTCM 1019/1042/1045/1046) — required
+        - SSR orbit + clock corrections — recommended for sub-meter accuracy
+        - SSR code biases — applied when available (improves convergence)
+
 Usage:
     python phc_servo.py --serial /dev/gnss-top --baud 9600 \\
         --known-pos '41.8430626,-88.1037190,201.671' \\
@@ -399,6 +427,54 @@ def run_servo(args):
     )
     t_serial.start()
     log.info(f"Serial: {args.serial} at {args.baud} baud")
+
+    # ── Receiver signal diagnostic ──────────────────────────────────────
+    # Check that the receiver is delivering dual-frequency observations.
+    # The PPP filter requires ionosphere-free (IF) pseudorange and carrier
+    # phase, which needs two frequencies per SV:
+    #   GPS: L1 C/A + L5Q    Galileo: E1C + E5aQ    BDS: B1I + B2aI
+    # Single-frequency SVs are silently dropped by serial_reader.
+    # If GPS L5 is missing (common without the L5 health override),
+    # all GPS SVs are dropped and only Galileo contributes.
+    log.info("Checking receiver signals (3 epochs)...")
+    sys_counts = {}
+    for _diag_i in range(3):
+        try:
+            _t, _obs = obs_queue.get(timeout=10)
+        except queue.Empty:
+            log.warning("  No observations received — check serial connection "
+                        "and receiver configuration")
+            break
+        for o in _obs:
+            s = o.get('sys', '?')
+            sys_counts[s] = sys_counts.get(s, 0) + 1
+        # Put back for the filter to consume
+        obs_queue.put((_t, _obs))
+
+    if sys_counts:
+        parts = [f"{s.upper()}={n//3}" for s, n in sorted(sys_counts.items())]
+        log.info(f"  Dual-freq SVs per epoch: {', '.join(parts)}")
+
+        if 'gps' in (systems or set()) and sys_counts.get('gps', 0) == 0:
+            log.warning(
+                "  NO GPS dual-frequency observations! GPS L5 may not be enabled.\n"
+                "  The receiver needs GPS L5 health override for L5 tracking.\n"
+                "  Run: python scripts/configure_f9t.py <port> --port-type USB --skip-reset\n"
+                "  See u-blox App Note UBX-21038688.")
+        if 'gal' in (systems or set()) and sys_counts.get('gal', 0) == 0:
+            log.warning(
+                "  NO Galileo dual-frequency observations!\n"
+                "  Run: python scripts/configure_f9t.py <port> --port-type USB --skip-reset")
+        n_total = sum(sys_counts.values()) // 3
+        if n_total < 4:
+            log.warning(
+                f"  Only {n_total} dual-freq SVs per epoch — filter needs ≥4.\n"
+                "  Check antenna, receiver config, and sky view.")
+    else:
+        log.warning("  No observation epochs received in 30s. Check:\n"
+                    "  1. Serial port and baud rate\n"
+                    "  2. Receiver is in timing mode (run configure_f9t.py)\n"
+                    "  3. UBX messages enabled (RXM-RAWX, RXM-SFRBX)")
 
     # Initialize PPP filter
     filt = FixedPosFilter(known_ecef)
