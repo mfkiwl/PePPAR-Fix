@@ -425,12 +425,13 @@ class FixedPosFilter:
     IDX_CLK = 0
     IDX_CLK_RATE = 1
     IDX_ISB_GAL = 2
-    N_STATES = 3
+    IDX_ISB_BDS = 3
+    N_STATES = 4
 
     def __init__(self, pos_ecef):
         self.pos = np.array(pos_ecef)
-        self.x = np.zeros(self.N_STATES)     # [clock, clock_rate, isb_gal] in meters
-        self.P = np.diag([1e18, 1e6, 1e8])   # ISB starts uncertain (~100m)
+        self.x = np.zeros(self.N_STATES)     # [clock, clock_rate, isb_gal, isb_bds] in meters
+        self.P = np.diag([1e18, 1e6, 1e8, 1e8])  # ISBs start uncertain (~100m)
         self.prev_geo = {}  # sv → {rho_corr, sat_clk_m, phi_if_m, tropo}
         self.initialized = False  # Will seed clock from first epoch
 
@@ -446,7 +447,8 @@ class FixedPosFilter:
         Q = np.zeros((self.N_STATES, self.N_STATES))
         Q[0, 0] = 0.01 * dt      # phase noise (m²/s)
         Q[1, 1] = 0.01 * dt      # frequency noise (m²/s³)
-        Q[2, 2] = 1e-6 * dt      # ISB random walk (very slow — ~ns/hour)
+        Q[2, 2] = 1e-6 * dt      # GAL ISB random walk (very slow — ~ns/hour)
+        Q[3, 3] = 1e-6 * dt      # BDS ISB random walk
         self.P += Q
 
     def compute_geometry(self, sv, sp3, t, clk_file):
@@ -562,14 +564,23 @@ class FixedPosFilter:
             # Predicted range (without receiver clock)
             rho_corr = geo['rho'] - geo['sat_clk_m'] + geo['tropo']
 
-            # ISB column: 1 for Galileo, 0 for GPS
-            is_gal = 1.0 if obs.get('sys') == 'gal' else 0.0
+            # ISB: select the appropriate inter-system bias for this constellation
+            sys_name = obs.get('sys', 'gps')
+            isb_val = 0.0
+            isb_idx = None
+            if sys_name == 'gal':
+                isb_idx = self.IDX_ISB_GAL
+                isb_val = self.x[self.IDX_ISB_GAL]
+            elif sys_name == 'bds':
+                isb_idx = self.IDX_ISB_BDS
+                isb_val = self.x[self.IDX_ISB_BDS]
 
             # --- Pseudorange: absolute clock level ---
-            dz_pr = obs['pr_if'] - rho_corr - self.x[0] - is_gal * self.x[self.IDX_ISB_GAL]
+            dz_pr = obs['pr_if'] - rho_corr - self.x[0] - isb_val
             h_pr = np.zeros(self.N_STATES)
             h_pr[0] = 1.0
-            h_pr[self.IDX_ISB_GAL] = is_gal
+            if isb_idx is not None:
+                h_pr[isb_idx] = 1.0
             H_rows.append(h_pr)
             z_rows.append(dz_pr)
             R_diag.append((SIGMA_P_IF / w) ** 2)
