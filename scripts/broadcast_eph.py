@@ -288,6 +288,12 @@ class BroadcastEphemeris:
             prn = f"C{int(eph['sat_id']):02d}"
             eph['system'] = 'C'
             eph['gm'] = GM_BDS
+            # BDT = GPST - 14s. RTCM 1042 provides toe/toc in BDT.
+            # Convert to GPST so all computations use a single time scale.
+            if 'toe' in eph:
+                eph['toe'] += 14.0
+            if 'toc' in eph:
+                eph['toc'] += 14.0
             # pyrtcm bug (at least through 1.1.11): DF513 (BDS TGD1) scale
             # is 0.1 s/LSB but should be 1e-10 s/LSB per the BDS ICD.
             # Workaround: multiply by 1e-9 to correct.
@@ -318,11 +324,10 @@ class BroadcastEphemeris:
         return week, sow
 
     def _bds_seconds_of_week(self, t):
-        """Convert GPS-time datetime to BDS seconds-of-week.
+        """Convert GPS-time datetime to seconds-of-week for BDS computation.
 
-        BDS_EPOCH - GPS_EPOCH is an exact multiple of weeks (1356 weeks),
-        so GPS and BDS seconds-of-week are identical.  We delegate to
-        _gps_seconds_of_week for clarity.
+        BDS toe/toc are converted from BDT to GPST at ingestion time
+        (+14s), so we use GPS seconds-of-week here for consistency.
         """
         return self._gps_seconds_of_week(t)
 
