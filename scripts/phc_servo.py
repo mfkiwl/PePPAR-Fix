@@ -1010,6 +1010,7 @@ def run_servo(args):
             'source', 'source_error_ns', 'source_confidence_ns',
             'adjfine_ppb', 'phase', 'n_meas', 'gain_scale',
             'discipline_interval', 'n_accumulated', 'watchdog_alarm',
+            'isb_gal_ns', 'isb_bds_ns',
         ])
 
     start_time = time.time()
@@ -1061,6 +1062,14 @@ def run_servo(args):
             p_clk = filt.P[filt.IDX_CLK, filt.IDX_CLK]
             dt_rx_sigma = math.sqrt(max(0, p_clk)) / C * 1e9
             n_epochs += 1
+
+            # Extract ISBs (inter-system biases) for logging
+            # FixedPosFilter has IDX_ISB_GAL; future: IDX_ISB_BDS etc.
+            isb_ns = {}
+            if hasattr(filt, 'IDX_ISB_GAL') and filt.x.shape[0] > filt.IDX_ISB_GAL:
+                isb_ns['gal'] = filt.x[filt.IDX_ISB_GAL] / C * 1e9
+            if hasattr(filt, 'IDX_ISB_BDS') and filt.x.shape[0] > getattr(filt, 'IDX_ISB_BDS', 999):
+                isb_ns['bds'] = filt.x[filt.IDX_ISB_BDS] / C * 1e9
 
             # Once filter converges: save position and switch F9T to timing mode
             if n_epochs >= 300 and dt_rx_sigma < 100.0:
@@ -1135,6 +1144,7 @@ def run_servo(args):
                         best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
                         f'{adjfine_ppb:.3f}', phase, n_used, f'{gain_scale:.3f}',
                         scheduler.interval, 0, int(watchdog.alarmed),
+                        f'{isb_ns.get("gal", 0):.3f}', f'{isb_ns.get("bds", 0):.3f}',
                     ])
                 continue
 
@@ -1248,6 +1258,7 @@ def run_servo(args):
                     f'{adjfine_ppb:.3f}', phase, n_used, f'{gain_scale:.3f}',
                     scheduler.interval, scheduler.n_accumulated,
                     int(watchdog.alarmed),
+                    f'{isb_ns.get("gal", 0):.3f}', f'{isb_ns.get("bds", 0):.3f}',
                 ])
 
     except KeyboardInterrupt:
