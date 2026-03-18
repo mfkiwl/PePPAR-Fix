@@ -500,10 +500,9 @@ class FixedPosFilter:
 
         # Seed clock from first epoch's pseudorange residuals.
         # Prefer GPS (no ISB), but fall back to Galileo if GPS unavailable.
-        # When seeding from Galileo, also seed the ISB estimate.
+        # When seeding from GPS, also seed ISBs from other constellations.
         if not self.initialized:
-            gps_resid = []
-            gal_resid = []
+            sys_resid = {}  # sys_name → list of residuals
             for obs in observations:
                 sv = obs['sv']
                 geo = self.compute_geometry(sv, sp3, t, clk_file)
@@ -511,36 +510,44 @@ class FixedPosFilter:
                     continue
                 rho_corr = geo['rho'] - geo['sat_clk_m'] + geo['tropo']
                 r = obs['pr_if'] - rho_corr
-                if obs.get('sys') == 'gps':
-                    gps_resid.append(r)
-                elif obs.get('sys') == 'gal':
-                    gal_resid.append(r)
+                sys_name = obs.get('sys', 'gps')
+                sys_resid.setdefault(sys_name, []).append(r)
+
+            gps_resid = sys_resid.get('gps', [])
+            gal_resid = sys_resid.get('gal', [])
+            bds_resid = sys_resid.get('bds', [])
 
             if len(gps_resid) >= 3:
-                # Seed from GPS (no ISB needed)
+                # Seed from GPS (reference constellation, no ISB)
                 self.x[0] = float(np.median(gps_resid))
                 spread = np.std(gps_resid) if len(gps_resid) > 1 else 100.0
                 self.P[0, 0] = max(spread, 50.0) ** 2
                 log.info(f"Clock seeded from {len(gps_resid)} GPS PRs: "
                          f"{self.x[0]/C*1e6:.1f} µs "
                          f"(P[0,0] reset to {self.P[0,0]:.0f} m²)")
+                # Seed ISBs from other constellations: ISB = median(sys) - clock
+                if len(gal_resid) >= 2:
+                    self.x[self.IDX_ISB_GAL] = float(np.median(gal_resid)) - self.x[0]
+                    log.info(f"  ISB GAL seeded: {self.x[self.IDX_ISB_GAL]/C*1e9:+.1f} ns")
+                if len(bds_resid) >= 2:
+                    self.x[self.IDX_ISB_BDS] = float(np.median(bds_resid)) - self.x[0]
+                    log.info(f"  ISB BDS seeded: {self.x[self.IDX_ISB_BDS]/C*1e9:+.1f} ns")
                 self.initialized = True
             elif len(gal_resid) >= 3:
-                # Seed from Galileo — need to estimate ISB simultaneously.
-                # GAL PR residual = rx_clk + ISB_GAL, so we can't separate
-                # them from GAL alone. Set rx_clk = median(GAL residuals)
-                # and ISB = 0 initially; the filter will resolve the ISB
-                # from the PR measurements within a few epochs.
+                # Seed from Galileo — can't separate clock from ISB_GAL.
+                # Set clock = median(GAL), ISB_GAL = 0, resolve in filter.
                 self.x[0] = float(np.median(gal_resid))
                 self.x[self.IDX_ISB_GAL] = 0.0
                 spread = np.std(gal_resid) if len(gal_resid) > 1 else 100.0
                 self.P[0, 0] = max(spread, 50.0) ** 2
-                # ISB is unresolved — keep its uncertainty large
                 self.P[self.IDX_ISB_GAL, self.IDX_ISB_GAL] = 1e8
+                if len(bds_resid) >= 2:
+                    self.x[self.IDX_ISB_BDS] = float(np.median(bds_resid)) - self.x[0]
+                    log.info(f"  ISB BDS seeded: {self.x[self.IDX_ISB_BDS]/C*1e9:+.1f} ns")
                 log.info(f"Clock seeded from {len(gal_resid)} GAL PRs: "
                          f"{self.x[0]/C*1e6:.1f} µs "
                          f"(P[0,0] reset to {self.P[0,0]:.0f} m², "
-                         f"ISB unresolved)")
+                         f"ISB GAL unresolved)")
                 self.initialized = True
 
         for obs in observations:
