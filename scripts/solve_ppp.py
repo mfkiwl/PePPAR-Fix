@@ -240,8 +240,19 @@ class PPPFilter:
             dt = 1.0
         n = len(self.x)
         Q = np.zeros((n, n))
+        # Adaptive position process noise: large during convergence,
+        # small once converged. Prevents filter from freezing position
+        # before carrier phase has corrected the LS init error.
+        pos_var = max(self.P[0, 0], self.P[1, 1], self.P[2, 2])
+        pos_sigma = math.sqrt(pos_var)
+        if pos_sigma > 10.0:
+            q_pos = 1.0          # Early: allow large corrections
+        elif pos_sigma > 1.0:
+            q_pos = 0.01         # Converging: moderate
+        else:
+            q_pos = 1e-4         # Converged: static with breathing room
         for i in range(3):
-            Q[i, i] = 1e-6 * dt
+            Q[i, i] = q_pos * dt
         Q[IDX_CLK, IDX_CLK] = 1e6 * dt
         Q[IDX_ISB_GAL, IDX_ISB_GAL] = 1.0 * dt
         Q[IDX_ISB_BDS, IDX_ISB_BDS] = 1.0 * dt
