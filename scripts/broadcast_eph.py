@@ -289,6 +289,10 @@ class BroadcastEphemeris:
             prn = f"C{int(eph['sat_id']):02d}"
             eph['system'] = 'C'
             eph['gm'] = GM_BDS
+            # pyrtcm bug: DF513 (BDS TGD1) scale is 0.1 s/LSB but should
+            # be 1e-10 s/LSB per the BDS ICD.  Correct the 1e9 factor.
+            if 'tgd' in eph:
+                eph['tgd'] = eph['tgd'] * 1e-9
         else:
             return None
 
@@ -350,17 +354,6 @@ class BroadcastEphemeris:
 
         # Satellite clock
         clk = _sat_clock(eph, dt_clk, Ek)
-
-        # BDS time system correction: broadcast ephemeris clock parameters
-        # (af0/af1/af2) give the satellite clock offset from BDT.
-        # The PPP filter operates in GPST.  GPST = BDT + 14 s.
-        # The pseudorange measured by the GPST-based receiver includes an
-        # extra -c*14 term for BDS satellites because the satellite's clock
-        # reference (BDT) is behind GPST.  Adding 14 s to the broadcast
-        # clock makes it a GPST-referenced correction, so the ISB_BDS
-        # absorbs only the small residual inter-system bias (~ns).
-        if sys == 'C':
-            clk += BDT_GPST_OFFSET
 
         return pos, clk
 
