@@ -177,6 +177,8 @@ def run_find_position(args):
 
             # Initialize filter on first epoch with enough satellites
             if not filt_initialized:
+                init_isb_gal = 0.0
+                init_isb_bds = 0.0
                 if seed_ecef is not None:
                     init_pos = seed_ecef
                     init_clk = 0.0
@@ -189,9 +191,14 @@ def run_find_position(args):
                         continue
                     init_pos = x_ls[:3]
                     init_clk = x_ls[3]
-                    log.info(f"LS init: {n_sv} SVs, pos error ~km-level")
+                    init_isb_gal = x_ls[4]
+                    init_isb_bds = x_ls[5]
+                    log.info(f"LS init: {n_sv} SVs, "
+                             f"ISB GAL={init_isb_gal/C*1e9:+.1f}ns "
+                             f"BDS={init_isb_bds/C*1e9:+.1f}ns")
 
-                filt.initialize(init_pos, init_clk)
+                filt.initialize(init_pos, init_clk,
+                                isb_gal=init_isb_gal, isb_bds=init_isb_bds)
                 filt_initialized = True
                 prev_t = gps_time
                 log.info("PPPFilter initialized, starting convergence")
