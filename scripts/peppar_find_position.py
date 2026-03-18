@@ -357,9 +357,8 @@ Exit codes:
                     help="Convergence threshold in meters (default: 0.1)")
     ap.add_argument("--timeout", type=int, default=3600,
                     help="Timeout in seconds (default: 3600)")
-    ap.add_argument("--systems", default="gps,gal",
-                    help="GNSS systems (default: gps,gal; BDS disabled pending "
-                         "broadcast ephemeris decoding fix)")
+    ap.add_argument("--systems", default="gps,gal,bds",
+                    help="GNSS systems (default: gps,gal,bds)")
     ap.add_argument("--leap", type=int, default=18,
                     help="UTC-GPS leap seconds (default: 18)")
 
