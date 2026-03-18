@@ -1192,7 +1192,10 @@ def run_servo(args):
 
             # ── Continuous tracking with competitive error sources ──────
             # Outlier rejection
-            if abs(best.error_ns) > 5000:
+            # Outlier rejection: skip extreme errors in steady state.
+            # During convergence (scheduler._converging), allow large errors
+            # through — the convergence gains need them to pull in.
+            if abs(best.error_ns) > 5000 and not scheduler._converging:
                 log.warning(f"  Outlier: {best}, skipping")
                 continue
 
