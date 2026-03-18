@@ -288,9 +288,13 @@ class BroadcastEphemeris:
             prn = f"C{int(eph['sat_id']):02d}"
             eph['system'] = 'C'
             eph['gm'] = GM_BDS
-            # pyrtcm bug: DF513 (BDS TGD1) scale is 0.1 s/LSB but should
-            # be 1e-10 s/LSB per the BDS ICD.  Correct the 1e9 factor.
-            if 'tgd' in eph:
+            # pyrtcm bug (at least through 1.1.11): DF513 (BDS TGD1) scale
+            # is 0.1 s/LSB but should be 1e-10 s/LSB per the BDS ICD.
+            # Workaround: multiply by 1e-9 to correct.
+            # Guard: if TGD is already in the right range (< 1e-6 s),
+            # assume pyrtcm has been fixed and skip the correction.
+            # PR submitted: https://github.com/semuconsulting/pyrtcm
+            if 'tgd' in eph and abs(eph['tgd']) > 1e-6:
                 eph['tgd'] = eph['tgd'] * 1e-9
         else:
             return None
