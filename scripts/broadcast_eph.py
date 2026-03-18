@@ -351,6 +351,17 @@ class BroadcastEphemeris:
         # Satellite clock
         clk = _sat_clock(eph, dt_clk, Ek)
 
+        # BDS time system correction: broadcast ephemeris clock parameters
+        # (af0/af1/af2) give the satellite clock offset from BDT.
+        # The PPP filter operates in GPST.  GPST = BDT + 14 s.
+        # The pseudorange measured by the GPST-based receiver includes an
+        # extra -c*14 term for BDS satellites because the satellite's clock
+        # reference (BDT) is behind GPST.  Adding 14 s to the broadcast
+        # clock makes it a GPST-referenced correction, so the ISB_BDS
+        # absorbs only the small residual inter-system bias (~ns).
+        if sys == 'C':
+            clk += BDT_GPST_OFFSET
+
         return pos, clk
 
     def get_iod(self, prn):
