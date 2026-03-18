@@ -8,14 +8,14 @@
 #
 # Pattern copied from testAnt rig (99-ublox-gnss.rules) — see shared_files.toml.
 
-# u-blox ZED-F9T-3RD (EVK-F9T-20-00) — matched by USB physical path
-# because all F9T EVKs share VID:PID 1546:01a9 and identical serial descriptors.
-# To re-identify: watch `ls /dev/serial/by-path/` while unplugging.
-# Updated 2026-03-16: moved from xhci-hcd.0 port 2 to xhci-hcd.1 port 1
+# u-blox ZED-F9T (EVK) — matched by VID:PID only.
+# All F9T EVKs share VID:PID 1546:01a9 and have no unique serial descriptor,
+# so USB path matching breaks when cables, hubs, or isolators change.
+# This rule assumes only one F9T is connected. For multi-F9T setups,
+# use ID_PATH matching (run: udevadm info /dev/ttyACMx | grep ID_PATH).
 SUBSYSTEM=="tty", \
   ENV{ID_VENDOR_ID}=="1546", \
   ENV{ID_MODEL_ID}=="01a9", \
-  ENV{ID_PATH}=="platform-xhci-hcd.1-usb-0:1:1.0", \
   SYMLINK+="gnss-top", \
   MODE="0664", \
   GROUP="dialout"
