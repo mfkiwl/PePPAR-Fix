@@ -284,7 +284,7 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
             pos_stable = pos_delta < args.sigma
         prev_pos_ecef = pos_ecef.copy()
 
-        if sigma_3d < args.sigma and pos_stable and rms < 10.0:
+        if sigma_3d < args.sigma and pos_stable:
             if converged_at is None:
                 converged_at = n_epochs
             if n_epochs - converged_at >= 30:
