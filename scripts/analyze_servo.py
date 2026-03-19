@@ -102,7 +102,7 @@ def load_ticc(path: Path) -> pd.DataFrame:
     df["integer_sec"] = df["ref_sec"]
 
     if "host_timestamp" in df.columns:
-        host_ts = pd.to_datetime(df["host_timestamp"], utc=True)
+        host_ts = pd.to_datetime(df["host_timestamp"], utc=True, format="ISO8601")
         _epoch = pd.Timestamp("1970-01-01", tz="UTC")
         df["host_sec"] = (host_ts - _epoch).dt.total_seconds().astype("int64")
 

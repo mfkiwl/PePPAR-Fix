@@ -331,7 +331,7 @@ class PPPFilter:
                 sat_clk = sat_clk_sp3
             if sat_clk is None:
                 continue
-            if sat_clk > 0.9:
+            if abs(sat_clk) > 0.002:  # 2ms; normal GNSS clocks are < 1ms
                 continue
 
             dx = sat_pos - receiver_pos
@@ -473,7 +473,7 @@ class FixedPosFilter:
                 sat_clk = sat_clk_sp3
         else:
             sat_clk = sat_clk_sp3
-        if sat_clk is None or sat_clk > 0.9:
+        if sat_clk is None or abs(sat_clk) > 0.002:
             return None
 
         dx = sat_pos - self.pos
@@ -659,7 +659,9 @@ class FixedPosFilter:
 # ── LS init (multi-GNSS, IF pseudorange) ─────────────────────────────────── #
 def ls_init(observations, sp3, t, clk_file=None):
     """Weighted LS solve for initial position from IF pseudoranges.
-    Adaptively estimates ISBs for present systems."""
+    Adaptively estimates ISBs for present systems.
+    Includes residual-based outlier rejection to handle satellites
+    with inaccurate broadcast clocks (e.g. Galileo E11/E19)."""
     present = set(o['sys'] for o in observations)
     n_params = 4
     gal_col = bds_col = None
@@ -682,11 +684,16 @@ def ls_init(observations, sp3, t, clk_file=None):
         if r > 0:
             x[:3] = avg / r * 6371000.0
 
+    excluded_svs = set()
+
     for iteration in range(20):
         H = []
         dz = []
         W = []
+        sv_list = []
         for obs in observations:
+            if obs['sv'] in excluded_svs:
+                continue
             sat_pos, sat_clk_sp3 = sp3.sat_position(obs['sv'], t)
             if sat_pos is None:
                 continue
@@ -698,7 +705,7 @@ def ls_init(observations, sp3, t, clk_file=None):
                 sat_clk = sat_clk_sp3
             if sat_clk is None:
                 continue
-            if sat_clk > 0.9:
+            if abs(sat_clk) > 0.002:  # 2ms; normal GNSS clocks are < 1ms
                 continue
             dx = sat_pos - x[:3]
             rho = np.linalg.norm(dx)
@@ -732,6 +739,7 @@ def ls_init(observations, sp3, t, clk_file=None):
             H.append(h)
             dz.append(obs['pr_if'] - pr_pred)
             W.append(10 ** ((obs['cno'] - 30) / 20))
+            sv_list.append(obs['sv'])
 
         if len(H) < n_params:
             return np.zeros(6), False, len(H)
@@ -748,12 +756,23 @@ def ls_init(observations, sp3, t, clk_file=None):
             return result, False, len(H)
 
         x += dx
+
+        # Outlier rejection after position has roughly converged (iteration >= 5)
+        # Reject satellites with residuals > 50m (broadcast accuracy is ~2-5m)
+        if iteration >= 5 and np.linalg.norm(dx[:3]) < 1000:
+            post_resid = dz_arr - H @ dx
+            for i, sv in enumerate(sv_list):
+                if abs(post_resid[i]) > 50.0:
+                    excluded_svs.add(sv)
+                    log.debug(f"LS outlier: {sv} resid={post_resid[i]:.1f}m")
+
         if np.linalg.norm(dx[:3]) < 0.01:
             result = np.zeros(6)
             result[:4] = x[:4]
             if gal_col is not None: result[4] = x[gal_col]
             if bds_col is not None: result[5] = x[bds_col]
-            return result, True, len(H)
+            n_used = len(H) - len(excluded_svs)
+            return result, True, n_used
 
     result = np.zeros(6)
     result[:4] = x[:4]

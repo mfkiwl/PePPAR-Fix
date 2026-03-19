@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# peppar-fix — GNSS-disciplined PTP clock appliance
+#
+# Composes three tools with retry logic and exponential backoff:
+#   1. peppar-rx-config   — verify/configure receiver
+#   2. peppar-find-position — bootstrap antenna position (if needed)
+#   3. peppar-phc-servo   — discipline PHC using GNSS
+#
+# Exit codes from peppar-phc-servo drive retry behavior:
+#   0 = clean shutdown
+#   1 = error (fatal)
+#   2 = position moved (re-bootstrap position, then restart servo)
+#   3 = no PPS (retry with backoff)
+#   4 = divergence (fatal)
+#
+# Configuration via environment variables or command-line overrides:
+#   PEPPAR_SERIAL       Serial port (e.g. /dev/gnss-top)
+#   PEPPAR_BAUD         Baud rate (default: 9600)
+#   PEPPAR_PORT_TYPE    UART or USB (default: USB)
+#   PEPPAR_PTP_DEV      PTP device (default: /dev/ptp0)
+#   PEPPAR_NTRIP_CONF   NTRIP config file
+#   PEPPAR_EPH_MOUNT    Ephemeris mountpoint
+#   PEPPAR_SSR_MOUNT    SSR mountpoint (optional)
+#   PEPPAR_KNOWN_POS    Known position as lat,lon,alt (optional)
+#   PEPPAR_POSITION_FILE Position file (default: data/position.json)
+#   PEPPAR_SYSTEMS      GNSS systems (default: gps,gal,bds)
+#   PEPPAR_DURATION     Servo duration in seconds (optional)
+#   PEPPAR_LOG          CSV log file (optional)
+#
+# Usage:
+#   peppar-fix                              # use env vars
+#   peppar-fix --serial /dev/gnss-top ...   # override on CLI
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Defaults from environment ───────────────────────────────────────────── #
+
+SERIAL="${PEPPAR_SERIAL:-}"
+BAUD="${PEPPAR_BAUD:-9600}"
+PORT_TYPE="${PEPPAR_PORT_TYPE:-USB}"
+PTP_DEV="${PEPPAR_PTP_DEV:-/dev/ptp0}"
+NTRIP_CONF="${PEPPAR_NTRIP_CONF:-}"
+EPH_MOUNT="${PEPPAR_EPH_MOUNT:-}"
+SSR_MOUNT="${PEPPAR_SSR_MOUNT:-}"
+KNOWN_POS="${PEPPAR_KNOWN_POS:-}"
+POSITION_FILE="${PEPPAR_POSITION_FILE:-data/position.json}"
+SYSTEMS="${PEPPAR_SYSTEMS:-gps,gal,bds}"
+DURATION="${PEPPAR_DURATION:-}"
+LOG_FILE="${PEPPAR_LOG:-}"
+
+# ── Parse CLI overrides ─────────────────────────────────────────────────── #
+
+usage() {
+    cat <<'EOF'
+Usage: peppar-fix [options]
+
+GNSS-disciplined PTP clock appliance.
+
+Options:
+  --serial PORT        Serial port (e.g. /dev/gnss-top)
+  --baud RATE          Baud rate (default: 9600)
+  --port-type TYPE     UART or USB (default: USB)
+  --ptp-dev DEV        PTP device (default: /dev/ptp0)
+  --ntrip-conf FILE    NTRIP config file
+  --eph-mount MOUNT    Broadcast ephemeris mountpoint
+  --ssr-mount MOUNT    SSR corrections mountpoint
+  --known-pos LAT,LON,ALT  Known position (skips position bootstrap)
+  --position-file FILE Position file (default: data/position.json)
+  --systems SYS        GNSS systems (default: gps,gal,bds)
+  --duration SECS      Servo duration in seconds
+  --log FILE           CSV log file
+  -h, --help           Show this help
+
+Environment variables (PEPPAR_*) provide defaults. CLI overrides them.
+EOF
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --serial)       SERIAL="$2"; shift 2 ;;
+        --baud)         BAUD="$2"; shift 2 ;;
+        --port-type)    PORT_TYPE="$2"; shift 2 ;;
+        --ptp-dev)      PTP_DEV="$2"; shift 2 ;;
+        --ntrip-conf)   NTRIP_CONF="$2"; shift 2 ;;
+        --eph-mount)    EPH_MOUNT="$2"; shift 2 ;;
+        --ssr-mount)    SSR_MOUNT="$2"; shift 2 ;;
+        --known-pos)    KNOWN_POS="$2"; shift 2 ;;
+        --position-file) POSITION_FILE="$2"; shift 2 ;;
+        --systems)      SYSTEMS="$2"; shift 2 ;;
+        --duration)     DURATION="$2"; shift 2 ;;
+        --log)          LOG_FILE="$2"; shift 2 ;;
+        -h|--help)      usage ;;
+        *)              echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+# ── Validate required config ────────────────────────────────────────────── #
+
+if [[ -z "$SERIAL" ]]; then
+    echo "ERROR: --serial or PEPPAR_SERIAL required" >&2
+    exit 1
+fi
+
+if [[ -z "$EPH_MOUNT" && -z "$NTRIP_CONF" ]]; then
+    echo "ERROR: --eph-mount or --ntrip-conf required" >&2
+    exit 1
+fi
+
+# ── Helper: build common NTRIP args ─────────────────────────────────────── #
+
+ntrip_args() {
+    local args=()
+    if [[ -n "$NTRIP_CONF" ]]; then
+        args+=(--ntrip-conf "$NTRIP_CONF")
+    fi
+    if [[ -n "$EPH_MOUNT" ]]; then
+        args+=(--eph-mount "$EPH_MOUNT")
+    fi
+    if [[ -n "$SSR_MOUNT" ]]; then
+        args+=(--ssr-mount "$SSR_MOUNT")
+    fi
+    echo "${args[@]}"
+}
+
+# ── Step 1: Verify/configure receiver ───────────────────────────────────── #
+
+echo "=== peppar-fix: Step 1 — Receiver configuration ==="
+
+rx_backoff=5
+rx_max_retries=3
+for ((rx_try=1; rx_try<=rx_max_retries; rx_try++)); do
+    if python3 "$SCRIPT_DIR/peppar_rx_config.py" \
+        "$SERIAL" --baud "$BAUD" --port-type "$PORT_TYPE"; then
+        break
+    fi
+    if [[ $rx_try -eq $rx_max_retries ]]; then
+        echo "ERROR: Receiver configuration failed after $rx_max_retries attempts" >&2
+        exit 1
+    fi
+    echo "  Retry in ${rx_backoff}s..."
+    sleep "$rx_backoff"
+    rx_backoff=$((rx_backoff * 2))
+done
+
+# ── Step 2: Bootstrap position if needed ────────────────────────────────── #
+
+bootstrap_position() {
+    echo "=== peppar-fix: Step 2 — Position bootstrap ==="
+    local pos_args=(
+        --serial "$SERIAL" --baud "$BAUD"
+        --systems "$SYSTEMS"
+        --save --position-file "$POSITION_FILE"
+    )
+    if [[ -n "$KNOWN_POS" ]]; then
+        pos_args+=(--seed-pos "$KNOWN_POS")
+    fi
+    # shellcheck disable=SC2046
+    pos_args+=($(ntrip_args))
+
+    python3 "$SCRIPT_DIR/peppar_find_position.py" "${pos_args[@]}"
+}
+
+if [[ -n "$KNOWN_POS" ]]; then
+    echo "  Known position provided: $KNOWN_POS (skipping bootstrap)"
+elif [[ ! -f "$POSITION_FILE" ]]; then
+    bootstrap_position || exit 2
+else
+    echo "  Position file exists: $POSITION_FILE"
+fi
+
+# ── Step 3: Run servo with retry logic ──────────────────────────────────── #
+
+echo "=== peppar-fix: Step 3 — PHC servo ==="
+
+servo_backoff=5
+
+# ── Position file rotation ──────────────────────────────────────────────── #
+# When position moves, rotate the old file instead of deleting it.
+# Serial number increments monotonically.  At 300s retry cap, a week
+# produces ~2016 files — 4-digit serial covers that with margin.
+
+rotate_position_file() {
+    if [[ ! -f "$POSITION_FILE" ]]; then
+        return
+    fi
+    local dir base ext serial dest
+    dir="$(dirname "$POSITION_FILE")"
+    base="$(basename "$POSITION_FILE")"
+    # Split name.ext → name + .ext
+    if [[ "$base" == *.* ]]; then
+        ext=".${base##*.}"
+        base="${base%.*}"
+    else
+        ext=""
+    fi
+    # Find next serial number
+    serial=1
+    while [[ -f "${dir}/${base}.${serial}${ext}" ]]; do
+        serial=$((serial + 1))
+    done
+    dest="${dir}/${base}.${serial}${ext}"
+    mv "$POSITION_FILE" "$dest"
+    echo "  Rotated $POSITION_FILE → $dest"
+}
+
+build_servo_args() {
+    local args=(
+        --serial "$SERIAL" --baud "$BAUD"
+        --ptp-dev "$PTP_DEV"
+        --systems "$SYSTEMS"
+    )
+    if [[ -n "$KNOWN_POS" ]]; then
+        args+=(--known-pos "$KNOWN_POS")
+    elif [[ -f "$POSITION_FILE" ]]; then
+        args+=(--position-file "$POSITION_FILE")
+    fi
+    # shellcheck disable=SC2046
+    args+=($(ntrip_args))
+    if [[ -n "$DURATION" ]]; then
+        args+=(--duration "$DURATION")
+    fi
+    if [[ -n "$LOG_FILE" ]]; then
+        args+=(--log "$LOG_FILE")
+    fi
+    echo "${args[@]}"
+}
+
+while true; do
+    set +e
+    # shellcheck disable=SC2046
+    python3 "$SCRIPT_DIR/peppar_phc_servo.py" $(build_servo_args)
+    rc=$?
+    set -e
+
+    case $rc in
+        0)
+            echo "peppar-fix: clean shutdown"
+            exit 0
+            ;;
+        2)
+            echo "peppar-fix: position moved — re-bootstrapping"
+            rotate_position_file
+            bootstrap_position || exit 2
+            servo_backoff=5
+            continue
+            ;;
+        3)
+            echo "peppar-fix: no PPS — retry in ${servo_backoff}s"
+            sleep "$servo_backoff"
+            servo_backoff=$((servo_backoff * 2))
+            [[ $servo_backoff -gt 300 ]] && servo_backoff=300
+            continue
+            ;;
+        *)
+            echo "peppar-fix: fatal error (exit code $rc)" >&2
+            exit "$rc"
+            ;;
+    esac
+done

@@ -101,21 +101,39 @@ def run_find_position(args):
         t_ssr.start()
         log.info(f"SSR stream: {args.caster}:{args.port}/{args.ssr_mount}")
 
-    # Wait for initial ephemeris
+    # Parse systems filter (needed before warmup to know which systems to wait for)
+    systems = set(args.systems.split(',')) if args.systems else None
+    log.info(f"Systems: {systems}")
+
+    # Wait for initial ephemeris — each configured system must have sufficient
+    # broadcast ephemeris before LS init, otherwise ISBs are unconstrained.
+    # GPS is always required as the reference system for clock.
+    SYS_TO_PREFIX = {'gps': 'G', 'gal': 'E', 'bds': 'C'}
+    required_prefixes = {SYS_TO_PREFIX[s] for s in (systems or {'gps', 'gal', 'bds'})
+                         if s in SYS_TO_PREFIX}
+    required_prefixes.add('G')  # GPS always required
+
     if args.eph_mount:
-        log.info("Waiting for broadcast ephemeris...")
+        log.info(f"Waiting for broadcast ephemeris (need {required_prefixes})...")
         warmup_start = time.time()
-        while beph.n_satellites < 8 and time.time() - warmup_start < 120:
+
+        def _eph_by_sys():
+            by_sys = {}
+            for prn in beph.satellites:
+                s = prn[0]
+                by_sys[s] = by_sys.get(s, 0) + 1
+            return by_sys
+
+        while time.time() - warmup_start < 120:
             if stop_event.is_set():
                 return EXIT_ERROR
+            by_sys = _eph_by_sys()
+            if all(by_sys.get(p, 0) >= 8 for p in required_prefixes):
+                break
             time.sleep(1)
             if int(time.time() - warmup_start) % 10 == 0:
                 log.info(f"  Warmup: {beph.summary()}")
         log.info(f"Warmup complete: {beph.summary()}")
-
-    # Parse systems filter
-    systems = set(args.systems.split(',')) if args.systems else None
-    log.info(f"Systems: {systems}")
 
     # Start serial reader
     t_serial = threading.Thread(

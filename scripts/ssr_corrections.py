@@ -497,8 +497,9 @@ class RealtimeCorrections:
         cc = self.ssr.get_clock(prn)
         if cc is not None:
             # SSR clock correction is in meters, convert to seconds
-            # Convention: corrected = broadcast - delta_clock / C
-            bcast_clk = bcast_clk - cc.c0 / C
+            # Convention: corrected = broadcast + delta_clock / C
+            # (RTKLIB: dts[0] += corr->ssr.dclk[0]/CLIGHT)
+            bcast_clk = bcast_clk + cc.c0 / C
         # else: use broadcast clock as-is
 
         return bcast_pos, bcast_clk
