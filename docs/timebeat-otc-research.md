@@ -190,3 +190,21 @@ for the first session after group add, or re-login.
 2. Find the TDC measurement trigger and result registers
 3. Correlate TDC readings with TICC measurements
 4. Timebeat must be stopped before I2C access (`sudo systemctl stop timebeat`)
+
+### I2C hazard: page register corruption
+
+**WARNING**: Writing to the 8A34002 page register (0xFC) while Timebeat
+is stopped can leave the chip in a state that causes Timebeat to crash
+on restart. The `DPLLStatusMonitor.Update` function panics with an
+out-of-bounds index error, presumably because it reads a status register
+from the wrong page.
+
+Workaround: If Timebeat crash-loops after I2C probing:
+1. Try resetting page register: `bus.write_byte_data(0x58, 0xFC, 0x00)`
+2. If that doesn't help, the chip may need a power cycle (not just reboot)
+3. As a last resort, contact Timebeat support
+
+**The safe approach for Phase 1**: Stop Timebeat, configure the DPLL for
+phase measurement mode ourselves, read TDC, then restore the original
+DPLL configuration before restarting Timebeat. Or: coordinate with
+Timebeat to read phase data from their API rather than directly via I2C.
