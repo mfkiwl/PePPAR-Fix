@@ -142,3 +142,51 @@ the i226 PHC follows for free. Existing PTP functionality is preserved.
 - [ClockMatrix Oscillator Compensation](https://www.renesas.com/en/document/apn/clockmatrix-oscillator-compensation)
 - [ClockMatrix Phase Noise Contributors](https://www.renesas.com/en/document/apn/clockmatrix-phase-noise-contributors)
 - [ClockMatrix PHC Driver Compatibility](https://www.renesas.com/en/document/apn/clockmatrix-firmware-compatibility-linux-phc-driver)
+
+## I2C Access Findings (2026-03-20)
+
+### Bus discovery
+
+The 8A34002 is NOT directly on `/dev/i2c-1`. Address `0x70` on bus 1
+is a PCA9548 I2C mux owned by the kernel (shows as `UU`). The mux
+creates virtual buses `/dev/i2c-13` through `/dev/i2c-22`.
+
+**The 8A34002 is on `/dev/i2c-15` at address `0x58`.**
+
+### Register access
+
+The 8A34002 uses 1B addressing mode:
+- Page register at offset `0xFC`: write a single byte to set the upper
+  address byte
+- Then read/write at the lower address byte offset
+
+```python
+import smbus2
+bus = smbus2.SMBus(15)
+addr = 0x58
+
+# Set page to 0xC0 (status registers)
+bus.write_byte_data(addr, 0xFC, 0xC0)
+# Read DPLL0_FILTER_STATUS at offset 0x24
+data = bus.read_i2c_block_data(addr, 0x24, 12)
+```
+
+### Confirmed register reads
+
+| Register | Address | Sample Data | Notes |
+|---|---|---|---|
+| GENERAL_STATUS | 0xC014 | `06 00 55 00 00 13...` | Chip alive, DPLLs configured |
+| DPLL0_FILTER_STATUS | 0xC024 | `4B 4F EA E0 7B 01...` | Filter active with real values |
+| DPLL0_PHASE_STATUS | 0xC058 | `F0 C9 FA 9D F8 07...` | Phase measurement present |
+
+### Permissions
+
+Bob must be in the `i2c` group (added 2026-03-20). Use `sg i2c 'command'`
+for the first session after group add, or re-login.
+
+### Next steps
+
+1. Map the DPLL0_PHASE_STATUS register fields to extract phase offset in ps
+2. Find the TDC measurement trigger and result registers
+3. Correlate TDC readings with TICC measurements
+4. Timebeat must be stopped before I2C access (`sudo systemctl stop timebeat`)
