@@ -208,3 +208,27 @@ Workaround: If Timebeat crash-loops after I2C probing:
 phase measurement mode ourselves, read TDC, then restore the original
 DPLL configuration before restarting Timebeat. Or: coordinate with
 Timebeat to read phase data from their API rather than directly via I2C.
+
+### ptBoat findings (2026-03-20)
+
+- 8A34002 is on **bus 16** (not 15 like otcBob1 — different mux channel)
+- Timebeat configures DPLL0 in phase measurement mode (pll_mode=5)
+- Phase detector: ref=CLK14, fb=CLK10 (PPS vs OCXO-derived)
+- FBD integer=34, fbd_int_mode_en=1 → ITDC_UI ≈ 919 ps (not 50ps default)
+- DPLL halts when Timebeat stops — cannot read live phase without Timebeat running
+- Concurrent I2C reads with Timebeat return zeros/garbage ~80% of the time
+- Timebeat survived our probing (page register restore worked)
+
+### Revised approach for Phase 1
+
+The DPLL depends on Timebeat's software loop to stay active. Options:
+
+1. **Parse Timebeat's logs/API** for phase data (if it exposes TDC readings)
+2. **Implement our own clock tree initialization** — configure inputs, DPLL,
+   TDC from scratch without Timebeat. This is essentially Phase 2/3.
+3. **Use Timebeat's HTTP API** (if it has one) to query phase data
+
+The simplest path: ask Timebeat (the company) if they expose the
+ClockMatrix phase error via API. Their binary has Go functions like
+`ShowOpentimecardClockgenDpllStatus` that may be accessible via CLI
+or HTTP endpoint.
