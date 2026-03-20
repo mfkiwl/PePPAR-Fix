@@ -165,3 +165,31 @@ Once open, we:
 1. Read phase error from DPLL_2 phase status registers
 2. Run our EKF-based servo
 3. Write frequency corrections to DPLL_2's DCO via WRITE_FREQUENCY register
+
+## E810-XXVDA4T GNSS Integration Notes
+
+The E810's onboard ZED-F9T connects via **I2C** internally (not UART).
+The kernel ice driver exposes it as `/dev/gnss0` (type: UBX).
+
+Key differences from EVK F9T on serial port:
+
+| Aspect | EVK F9T (serial) | E810 F9T (kernel GNSS) |
+|---|---|---|
+| Device | /dev/ttyACMx or /dev/gnss-top | /dev/gnss0 |
+| Open method | pyserial Serial() | open("r+b") |
+| Port config | CFG_MSGOUT_*_UART1 | CFG_MSGOUT_*_I2C |
+| Baud rate | 115200-460800 | N/A (kernel handles) |
+| DTR reset | Yes (Arduino on same bus) | No |
+| UBX + NMEA | Both default | NMEA default, UBX on request |
+
+To enable RAWX observations on E810:
+```python
+messages = {
+    "CFG_MSGOUT_UBX_RXM_RAWX_I2C": 1,
+    "CFG_MSGOUT_UBX_RXM_SFRBX_I2C": 1,
+    "CFG_MSGOUT_UBX_NAV_PVT_I2C": 1,
+    "CFG_MSGOUT_UBX_TIM_TP_I2C": 1,
+}
+```
+
+SEC-UNIQID confirmed: `675836739647` (ZED-F9T, TIM 2.20, PROTVER 29.20)
