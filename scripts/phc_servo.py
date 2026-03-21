@@ -98,6 +98,7 @@ import queue
 import sys
 import threading
 import time
+import tomllib
 from datetime import datetime, timezone, timedelta
 
 import numpy as np
@@ -116,6 +117,38 @@ from peppar_fix import (
 from ntrip_caster import NtripCasterServer, rawx_to_caster_obs
 
 log = logging.getLogger("phc_servo")
+
+
+def apply_ptp_profile(args):
+    """Apply PTP defaults from config/receivers.toml when requested."""
+    if not args.ptp_profile:
+        return
+    try:
+        with open(args.device_config, "rb") as f:
+            cfg = tomllib.load(f)
+    except FileNotFoundError:
+        log.warning(f"PTP profile config not found: {args.device_config}")
+        return
+
+    profile = cfg.get("ptp", {}).get(args.ptp_profile)
+    if not profile:
+        log.warning(f"PTP profile not found: {args.ptp_profile}")
+        return
+
+    if args.ptp_dev is None:
+        args.ptp_dev = profile.get("device", args.ptp_dev)
+    if args.extts_pin is None:
+        args.extts_pin = profile.get("pps_pin", args.extts_pin)
+    if args.extts_channel is None:
+        args.extts_channel = profile.get("extts_channel", args.extts_channel)
+    if args.phc_timescale is None:
+        args.phc_timescale = profile.get("timescale", args.phc_timescale)
+    if getattr(args, "track_kp", None) == 0.3:
+        args.track_kp = profile.get("track_kp", args.track_kp)
+    if getattr(args, "track_ki", None) == 0.1:
+        args.track_ki = profile.get("track_ki", args.track_ki)
+    if not args.program_pin:
+        args.program_pin = bool(profile.get("program_pin", False))
 
 
 
@@ -206,11 +239,14 @@ def run_servo(args):
     log.info("PHC adjfine reset to 0")
 
     # Configure SDP pin for extts
-    extts_channel = 0  # extts channel (not the pin index)
-    try:
-        ptp.set_pin_function(args.extts_pin, PTP_PF_EXTTS, extts_channel)
-    except OSError:
-        log.info("Pin config not supported by driver (igc uses implicit mapping)")
+    extts_channel = args.extts_channel
+    if args.program_pin and caps['n_pins'] > 0:
+        try:
+            ptp.set_pin_function(args.extts_pin, PTP_PF_EXTTS, extts_channel)
+        except OSError:
+            log.info("Pin config not supported by driver")
+    else:
+        log.info("Skipping pin programming; using implicit EXTS mapping")
     ptp.enable_extts(extts_channel, rising_edge=True)
     log.info(f"EXTTS enabled: pin={args.extts_pin}, channel={extts_channel}")
 
@@ -450,6 +486,17 @@ def run_servo(args):
         phc_rounded = phc_sec if phc_nsec < 500_000_000 else phc_sec + 1
         return phc_rounded - gps_unix_sec
 
+    def target_timescale_sec(gps_time):
+        """Map a RAWX GPS epoch to the requested PHC timescale."""
+        gps_sec = int(round(gps_time.timestamp()))
+        if args.phc_timescale == 'gps':
+            return gps_sec
+        if args.phc_timescale == 'utc':
+            return gps_sec - args.leap
+        if args.phc_timescale == 'tai':
+            return gps_sec + args.tai_minus_gps
+        raise ValueError(f"Unsupported PHC timescale: {args.phc_timescale}")
+
     # Open log file
     log_f = None
     log_w = None
@@ -560,7 +607,7 @@ def run_servo(args):
                     log.info(f"  [{n_epochs}] No PPS event for this epoch")
                 continue
 
-            gps_unix_sec = int(round(gps_time.timestamp()))
+            target_sec = target_timescale_sec(gps_time)
             ts_str = gps_time.strftime('%Y-%m-%d %H:%M:%S')
             pps_error_ns = pps_fractional_error(phc_sec, phc_nsec)
 
@@ -576,7 +623,7 @@ def run_servo(args):
             # ── Bootstrap: warmup ──────────────────────────────────────
             if phase == 'warmup':
                 if n_epochs >= warmup_epochs:
-                    epoch_offset = phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec)
+                    epoch_offset = phc_gps_offset_s(phc_sec, phc_nsec, target_sec)
                     log.info(f"  Warmup complete ({n_epochs} epochs, "
                              f"best={best}, epoch_offset={epoch_offset}s)")
                     if epoch_offset != 0 or abs(best.error_ns) > STEP_THRESHOLD_NS:
@@ -590,7 +637,7 @@ def run_servo(args):
                 # Log but don't steer during warmup
                 if log_w:
                     log_w.writerow([
-                        ts_str, gps_unix_sec, phc_sec, phc_nsec,
+                        ts_str, target_sec, phc_sec, phc_nsec,
                         f'{dt_rx_ns:.3f}', f'{dt_rx_sigma:.3f}',
                         f'{pps_error_ns:.1f}', f'{qerr_ns:.3f}' if qerr_ns is not None else '',
                         best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
@@ -602,7 +649,7 @@ def run_servo(args):
 
             # ── Bootstrap: step ────────────────────────────────────────
             if phase == 'step':
-                epoch_offset = phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec)
+                epoch_offset = phc_gps_offset_s(phc_sec, phc_nsec, target_sec)
                 # Use the best available error source for the step
                 total_offset_ns = epoch_offset * 1_000_000_000 + best.error_ns
                 log.info(f"  STEP: epoch_offset={epoch_offset}s, "
@@ -706,7 +753,7 @@ def run_servo(args):
             # CSV log (every epoch, including coast)
             if log_w:
                 log_w.writerow([
-                    ts_str, gps_unix_sec, phc_sec, phc_nsec,
+                    ts_str, target_sec, phc_sec, phc_nsec,
                     f'{dt_rx_ns:.3f}', f'{dt_rx_sigma:.3f}',
                     f'{pps_error_ns:.1f}', f'{qerr_ns:.3f}' if qerr_ns is not None else '',
                     best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
@@ -755,7 +802,9 @@ def main():
     ap.add_argument("--watchdog-threshold", type=float, default=0.5,
                     help="Position watchdog threshold in meters (default: 0.5)")
     ap.add_argument("--leap", type=int, default=18,
-                    help="UTC-GPS leap seconds (default: 18)")
+                    help="GPS-UTC leap seconds (default: 18)")
+    ap.add_argument("--tai-minus-gps", type=int, default=19,
+                    help="TAI-GPS offset in seconds (default: 19)")
     ap.add_argument("--systems", default="gps,gal,bds",
                     help="GNSS systems to use (default: gps,gal)")
 
@@ -780,10 +829,20 @@ def main():
                     help="SSR corrections mountpoint (optional)")
 
     # PTP
-    ap.add_argument("--ptp-dev", default="/dev/ptp0",
-                    help="PTP device (default: /dev/ptp0)")
-    ap.add_argument("--extts-pin", type=int, default=1,
-                    help="SDP pin for PPS input (default: 1 = SDP1)")
+    ap.add_argument("--ptp-profile", choices=["i226", "e810"],
+                    help="PTP NIC profile for default PHC/pin/channel settings")
+    ap.add_argument("--device-config", default="config/receivers.toml",
+                    help="Device/profile config TOML (default: config/receivers.toml)")
+    ap.add_argument("--ptp-dev", default=None,
+                    help="PTP device (profile/default if omitted)")
+    ap.add_argument("--extts-pin", type=int, default=None,
+                    help="PTP pin index for PPS input (profile/default if omitted)")
+    ap.add_argument("--extts-channel", type=int, default=None,
+                    help="PTP EXTS channel for PPS input (profile/default if omitted)")
+    ap.add_argument("--program-pin", action="store_true",
+                    help="Explicitly program PTP pin function before enabling EXTS")
+    ap.add_argument("--phc-timescale", choices=["gps", "utc", "tai"], default=None,
+                    help="Target PHC timescale for PPS alignment (profile/default if omitted)")
 
     # Servo tuning
     ap.add_argument("--warmup", type=int, default=20,
@@ -821,6 +880,15 @@ def main():
                     help="Run duration in seconds")
 
     args = ap.parse_args()
+    apply_ptp_profile(args)
+    if args.ptp_dev is None:
+        args.ptp_dev = "/dev/ptp0"
+    if args.extts_pin is None:
+        args.extts_pin = 1
+    if args.extts_channel is None:
+        args.extts_channel = 0
+    if args.phc_timescale is None:
+        args.phc_timescale = "utc"
     run_servo(args)
 
 

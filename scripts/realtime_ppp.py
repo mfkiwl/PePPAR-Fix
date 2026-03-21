@@ -116,7 +116,7 @@ class QErrStore:
 def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                    ssr=None, qerr_store=None, config_queue=None, driver=None,
                    raw_callback=None):
-    """Read UBX messages from a u-blox serial port.
+    """Read UBX messages from a GNSS device.
 
     Puts (timestamp, observations_list) tuples onto obs_queue for each
     RXM-RAWX epoch. Also feeds RXM-SFRBX to broadcast ephemeris.
@@ -138,19 +138,24 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
     """
     try:
         from pyubx2 import UBXReader
-        import serial as pyserial
     except ImportError:
         log.error("pyubx2/pyserial not installed")
         stop_event.set()
         return
+
+    from peppar_fix.gnss_stream import open_gnss
 
     # Default to F9T for backward compatibility
     if driver is None:
         from peppar_fix.receiver import F9TDriver
         driver = F9TDriver()
 
-    log.info(f"Opening serial {port} at {baud} baud (driver: {driver.name})")
-    ser = pyserial.Serial(port, baud, timeout=2)
+    stream, device_type = open_gnss(port, baud)
+    log.info(
+        f"Opening GNSS device {port} at {baud} baud "
+        f"(type: {device_type}, driver: {driver.name})"
+    )
+    ser = stream
     ubr = UBXReader(ser, protfilter=2)  # UBX only
 
     # Signal name mapping from receiver driver
@@ -165,6 +170,8 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
     epoch_data = {}   # sv → {f1: {...}, f2: {...}}
     epoch_ts = None
     n_epochs = 0
+    live_gnss_synced = (device_type != 'gnss')
+    stale_epochs_dropped = 0
 
     while not stop_event.is_set():
         # Drain config queue: write pending UBX messages to the receiver
@@ -337,6 +344,32 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     # Compute GPS time from RAWX header
                     gps_epoch = datetime(1980, 1, 6, tzinfo=timezone.utc)
                     gps_time = gps_epoch + timedelta(weeks=week, seconds=rcvTow)
+
+                    # Kernel GNSS devices can replay buffered historical epochs
+                    # immediately after open. Drop those until the receiver's
+                    # GPS time is close to the host's current GPS time so PPS
+                    # events and RAWX epochs can pair 1:1 in the servo.
+                    if device_type == 'gnss' and not live_gnss_synced:
+                        leap_s = leapS if leapS is not None else 18
+                        host_gps_time = (
+                            datetime.now(timezone.utc) +
+                            timedelta(seconds=leap_s)
+                        )
+                        lag_s = (host_gps_time - gps_time).total_seconds()
+                        if lag_s > 2.0:
+                            stale_epochs_dropped += 1
+                            if stale_epochs_dropped == 1 or stale_epochs_dropped % 10 == 0:
+                                log.info(
+                                    f"Dropping stale GNSS backlog epoch "
+                                    f"(lag={lag_s:.1f}s, dropped={stale_epochs_dropped})"
+                                )
+                            continue
+                        live_gnss_synced = True
+                        if stale_epochs_dropped:
+                            log.info(
+                                f"Kernel GNSS stream caught up after dropping "
+                                f"{stale_epochs_dropped} stale epochs"
+                            )
                     obs_queue.put((gps_time, observations))
                     n_epochs += 1
 

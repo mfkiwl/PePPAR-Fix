@@ -57,6 +57,24 @@ SIGNAL_CONFIG = {
     "CFG_SIGNAL_QZSS_ENA": 0,
 }
 
+F9T_SIGNAL_CONFIG = {
+    "CFG_SIGNAL_GPS_ENA": 1,
+    "CFG_SIGNAL_GPS_L1CA_ENA": 1,
+    "CFG_SIGNAL_GPS_L2C_ENA": 1,
+    "CFG_SIGNAL_GPS_L5_ENA": 0,
+    "CFG_SIGNAL_GAL_ENA": 1,
+    "CFG_SIGNAL_GAL_E1_ENA": 1,
+    "CFG_SIGNAL_GAL_E5A_ENA": 0,
+    "CFG_SIGNAL_GAL_E5B_ENA": 1,
+    "CFG_SIGNAL_BDS_ENA": 1,
+    "CFG_SIGNAL_BDS_B1_ENA": 1,
+    "CFG_SIGNAL_BDS_B2_ENA": 1,
+    "CFG_SIGNAL_BDS_B2A_ENA": 0,
+    "CFG_SIGNAL_GLO_ENA": 0,
+    "CFG_SIGNAL_SBAS_ENA": 0,
+    "CFG_SIGNAL_QZSS_ENA": 0,
+}
+
 # Required UBX messages for peppar-fix operation
 REQUIRED_MESSAGES = {"RXM-RAWX", "RXM-SFRBX", "NAV-PVT", "TIM-TP"}
 
@@ -73,6 +91,93 @@ MESSAGE_TIMEOUTS = {
 
 # Port ID mapping
 PORT_SUFFIX = {1: "UART1", 2: "UART2", 3: "USB", 4: "SPI"}
+
+SIGNAL_NAMES = {
+    (0, 0): "GPS-L1CA",
+    (0, 3): "GPS-L2CL",
+    (0, 4): "GPS-L2CM",
+    (0, 6): "GPS-L5I",
+    (0, 7): "GPS-L5Q",
+    (2, 0): "GAL-E1C",
+    (2, 1): "GAL-E1B",
+    (2, 3): "GAL-E5aI",
+    (2, 4): "GAL-E5aQ",
+    (2, 5): "GAL-E5bI",
+    (2, 6): "GAL-E5bQ",
+    (3, 0): "BDS-B1I",
+    (3, 5): "BDS-B2aI",
+    (3, 2): "BDS-B2I",
+}
+
+SYS_MAP = {
+    0: "gps",
+    2: "gal",
+    3: "bds",
+}
+
+
+class ReceiverDriver:
+    """Receiver-specific signal and capability metadata."""
+
+    name = "Generic u-blox"
+    protver = "unknown"
+    default_baud = 115200
+    supports_timing_mode = False
+    supports_l5_health_override = False
+    signal_config = SIGNAL_CONFIG
+    signal_names = SIGNAL_NAMES
+    sys_map = SYS_MAP
+
+    def signal_name(self, gnss_id, sig_id):
+        return self.signal_names.get((gnss_id, sig_id))
+
+    def build_tmode_fixed_msg(self, ecef):
+        return None
+
+
+class F9TDriver(ReceiverDriver):
+    name = "ZED-F9T"
+    protver = "27"
+    default_baud = 460800
+    supports_timing_mode = True
+    supports_l5_health_override = True
+    signal_config = F9T_SIGNAL_CONFIG
+
+    def build_tmode_fixed_msg(self, ecef):
+        _ensure_imports()
+        x_cm = int(round(float(ecef[0]) * 100))
+        y_cm = int(round(float(ecef[1]) * 100))
+        z_cm = int(round(float(ecef[2]) * 100))
+        cfg_data = [
+            ("CFG_TMODE_MODE", 2),
+            ("CFG_TMODE_POS_TYPE", 0),
+            ("CFG_TMODE_ECEF_X", x_cm),
+            ("CFG_TMODE_ECEF_Y", y_cm),
+            ("CFG_TMODE_ECEF_Z", z_cm),
+            ("CFG_TMODE_ECEF_X_HP", 0),
+            ("CFG_TMODE_ECEF_Y_HP", 0),
+            ("CFG_TMODE_ECEF_Z_HP", 0),
+            ("CFG_TMODE_FIXED_POS_ACC", 100),
+        ]
+        return _UBXMessage.config_set(7, 0, cfg_data).serialize()
+
+
+class F10TDriver(ReceiverDriver):
+    name = "NEO-F10T"
+    protver = "32"
+    default_baud = 115200
+    supports_timing_mode = False
+    supports_l5_health_override = False
+
+
+def get_driver(name):
+    """Return the receiver driver for a CLI receiver name."""
+    key = (name or "f9t").strip().lower()
+    if key == "f9t":
+        return F9TDriver()
+    if key == "f10t":
+        return F10TDriver()
+    raise ValueError(f"Unknown receiver model: {name}")
 
 
 # ── Low-level UBX helpers ──────────────────────────────────────────────────── #

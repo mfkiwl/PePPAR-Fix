@@ -22,6 +22,7 @@ import argparse
 import logging
 import sys
 import time
+import tomllib
 
 from peppar_fix.receiver import (
     probe_baud, open_receiver, listen_for_messages,
@@ -39,7 +40,33 @@ EXIT_ERROR = 1
 EXIT_DRY_RUN_FAIL = 2
 
 
-def check_pps(ptp_dev, extts_pin, timeout_s=5):
+def apply_ptp_profile(args):
+    """Apply PTP defaults from config/receivers.toml when requested."""
+    if not args.ptp_profile:
+        return
+    try:
+        with open(args.device_config, "rb") as f:
+            cfg = tomllib.load(f)
+    except FileNotFoundError:
+        log.warning(f"PTP profile config not found: {args.device_config}")
+        return
+
+    profile = cfg.get("ptp", {}).get(args.ptp_profile)
+    if not profile:
+        log.warning(f"PTP profile not found: {args.ptp_profile}")
+        return
+
+    if args.ptp_dev is None:
+        args.ptp_dev = profile.get("device", args.ptp_dev)
+    if args.extts_pin is None:
+        args.extts_pin = profile.get("pps_pin", args.extts_pin)
+    if args.extts_channel is None:
+        args.extts_channel = profile.get("extts_channel", args.extts_channel)
+    if not args.program_pin:
+        args.program_pin = bool(profile.get("program_pin", False))
+
+
+def check_pps(ptp_dev, extts_pin, extts_channel=0, program_pin=True, timeout_s=5):
     """Check if PPS is arriving on the specified SDP pin.
 
     Returns True if at least one PPS event is received.
@@ -52,14 +79,14 @@ def check_pps(ptp_dev, extts_pin, timeout_s=5):
         return False
 
     ptp = PtpDevice(ptp_dev)
-    extts_channel = 0
-    try:
-        ptp.set_pin_function(extts_pin, PTP_PF_EXTTS, extts_channel)
-    except OSError:
-        pass  # igc uses implicit mapping
+    if program_pin:
+        try:
+            ptp.set_pin_function(extts_pin, PTP_PF_EXTTS, extts_channel)
+        except OSError:
+            pass
     ptp.enable_extts(extts_channel, rising_edge=True)
 
-    log.info(f"  Checking PPS on {ptp_dev} SDP{extts_pin} ({timeout_s}s)...")
+    log.info(f"  Checking PPS on {ptp_dev} pin={extts_pin} channel={extts_channel} ({timeout_s}s)...")
     event = ptp.read_extts(timeout_ms=timeout_s * 1000)
     ptp.disable_extts(extts_channel)
     ptp.close()
@@ -69,7 +96,7 @@ def check_pps(ptp_dev, extts_pin, timeout_s=5):
         log.info(f"  PPS detected: {phc_sec}.{phc_nsec:09d}")
         return True
     else:
-        log.warning(f"  No PPS detected on SDP{extts_pin} within {timeout_s}s")
+        log.warning(f"  No PPS detected on pin={extts_pin} channel={extts_channel} within {timeout_s}s")
         return False
 
 
@@ -138,7 +165,12 @@ def run(args):
     pps_ok = True
     if args.check_pps:
         ser.close()
-        pps_ok = check_pps(args.ptp_dev, args.extts_pin)
+        pps_ok = check_pps(
+            args.ptp_dev,
+            args.extts_pin,
+            extts_channel=args.extts_channel,
+            program_pin=args.program_pin,
+        )
         # Reopen serial
         ser, ubr = open_receiver(args.serial, baud)
 
@@ -271,13 +303,28 @@ Examples:
                     help="Factory reset before configuring")
     ap.add_argument("--check-pps", action="store_true",
                     help="Check PPS arriving on SDP pin")
-    ap.add_argument("--ptp-dev", default="/dev/ptp0",
-                    help="PTP device for PPS check (default: /dev/ptp0)")
-    ap.add_argument("--extts-pin", type=int, default=1,
-                    help="SDP pin for PPS check (default: 1)")
+    ap.add_argument("--ptp-profile", choices=["i226", "e810"],
+                    help="PTP NIC profile for default PHC/pin/channel settings")
+    ap.add_argument("--device-config", default="config/receivers.toml",
+                    help="Device/profile config TOML (default: config/receivers.toml)")
+    ap.add_argument("--ptp-dev", default=None,
+                    help="PTP device for PPS check (profile/default if omitted)")
+    ap.add_argument("--extts-pin", type=int, default=None,
+                    help="PTP pin index for PPS check (profile/default if omitted)")
+    ap.add_argument("--extts-channel", type=int, default=None,
+                    help="PTP EXTS channel for PPS check (profile/default if omitted)")
+    ap.add_argument("--program-pin", action="store_true",
+                    help="Explicitly program PTP pin function before enabling EXTS")
     ap.add_argument("-v", "--verbose", action="store_true")
 
     args = ap.parse_args()
+    apply_ptp_profile(args)
+    if args.ptp_dev is None:
+        args.ptp_dev = "/dev/ptp0"
+    if args.extts_pin is None:
+        args.extts_pin = 1
+    if args.extts_channel is None:
+        args.extts_channel = 0
     sys.exit(run(args))
 
 

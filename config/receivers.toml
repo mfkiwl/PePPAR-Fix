@@ -18,3 +18,23 @@ model = "Intel E810-XXVDA4T"
 status = "on order (2026-03-17)"
 gnss = "/dev/gnss0"             # onboard F9T via ice driver (I2C, GNSS_TYPE_UBX)
 note = "OCXO, 4x25G, SyncE, DPLL (ZL30795), onboard ZED-F9T. PHC and DPLL are independent clock domains — adjfine() works regardless of DPLL state."
+
+[ptp.i226]
+device = "/dev/ptp0"
+pps_pin = 1
+extts_channel = 0
+timescale = "utc"
+track_kp = 0.3
+track_ki = 0.1
+program_pin = true
+note = "Intel i226 / igc timing core with explicit SDP pin mapping"
+
+[ptp.e810]
+device = "/dev/ptp1"
+pps_pin = 0
+extts_channel = 0
+timescale = "tai"
+track_kp = 0.05
+track_ki = 0.01
+program_pin = false
+note = "Intel E810 timing PHC with EXTS channels exposed but no programmable pins via current driver"

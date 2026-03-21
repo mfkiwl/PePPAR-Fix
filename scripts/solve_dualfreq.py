@@ -36,24 +36,35 @@ from solve_pseudorange import (
 
 # ── Frequencies ────────────────────────────────────────────────────────────── #
 F_L1 = 1575.42e6    # GPS L1 / GAL E1 (Hz) — same frequency
+F_L2 = 1227.60e6    # GPS L2 (Hz)
 F_L5 = 1176.45e6    # GPS L5 / GAL E5a / BDS B2a (Hz) — same frequency
+F_E5B = 1207.14e6   # Galileo E5b (Hz)
 F_B1I = 1561.098e6  # BDS B1I (Hz) — slightly different from L1
+F_B2I = 1207.14e6   # BDS B2I (Hz)
 
-# IF combination coefficients (same for GPS L1+L5 and GAL E1+E5a)
+# IF combination coefficients
+ALPHA_L1_L2 = F_L1**2 / (F_L1**2 - F_L2**2)
+ALPHA_L2 = F_L2**2 / (F_L1**2 - F_L2**2)
 ALPHA_L1 = F_L1**2 / (F_L1**2 - F_L5**2)    # ≈ 2.261
 ALPHA_L5 = F_L5**2 / (F_L1**2 - F_L5**2)    # ≈ 1.261
 # P_IF = ALPHA_L1 * P_L1 - ALPHA_L5 * P_L5
 # Noise amplification factor: sqrt(ALPHA_L1² + ALPHA_L5²) ≈ 2.59
 
-# BDS B1I+B2a IF coefficients (different from GPS/GAL because B1I ≠ L1)
+# Galileo E1+E5b IF coefficients
+ALPHA_E1 = F_L1**2 / (F_L1**2 - F_E5B**2)
+ALPHA_E5B = F_E5B**2 / (F_L1**2 - F_E5B**2)
+
+# BDS IF coefficients
 ALPHA_B1I = F_B1I**2 / (F_B1I**2 - F_L5**2)    # ≈ 2.332
 ALPHA_B2A = F_L5**2 / (F_B1I**2 - F_L5**2)     # ≈ 1.332
+ALPHA_B1I_B2I = F_B1I**2 / (F_B1I**2 - F_B2I**2)
+ALPHA_B2I = F_B2I**2 / (F_B1I**2 - F_B2I**2)
 
 # Signal pairs for IF combination: (gnss_id, sig_f1, sig_f2, sv_prefix, alpha_f1, alpha_f2)
 IF_PAIRS = [
-    ('GPS', 'GPS-L1CA', 'GPS-L5Q', 'G', ALPHA_L1, ALPHA_L5),
-    ('GAL', 'GAL-E1C', 'GAL-E5aQ', 'E', ALPHA_L1, ALPHA_L5),
-    ('BDS', 'BDS-B1I', 'BDS-B2aI', 'C', ALPHA_B1I, ALPHA_B2A),
+    ('GPS', 'GPS-L1CA', 'GPS-L2CL', 'G', ALPHA_L1_L2, ALPHA_L2),
+    ('GAL', 'GAL-E1C', 'GAL-E5bQ', 'E', ALPHA_E1, ALPHA_E5B),
+    ('BDS', 'BDS-B1I', 'BDS-B2I', 'C', ALPHA_B1I_B2I, ALPHA_B2I),
 ]
 
 

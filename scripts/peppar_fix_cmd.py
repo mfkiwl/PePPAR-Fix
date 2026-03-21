@@ -38,6 +38,7 @@ import signal
 import sys
 import threading
 import time
+import tomllib
 
 import numpy as np
 
@@ -50,6 +51,38 @@ from realtime_ppp import serial_reader, ntrip_reader, QErrStore
 from peppar_fix import save_position, load_position, PositionWatchdog
 
 log = logging.getLogger("peppar-fix")
+
+
+def apply_ptp_profile(args):
+    """Apply PTP defaults from config/receivers.toml when requested."""
+    if not args.ptp_profile:
+        return
+    try:
+        with open(args.device_config, "rb") as f:
+            cfg = tomllib.load(f)
+    except FileNotFoundError:
+        log.warning(f"PTP profile config not found: {args.device_config}")
+        return
+
+    profile = cfg.get("ptp", {}).get(args.ptp_profile)
+    if not profile:
+        log.warning(f"PTP profile not found: {args.ptp_profile}")
+        return
+
+    if args.servo is None:
+        args.servo = profile.get("device", args.servo)
+    if args.pps_pin is None:
+        args.pps_pin = profile.get("pps_pin", args.pps_pin)
+    if args.extts_channel is None:
+        args.extts_channel = profile.get("extts_channel", args.extts_channel)
+    if args.phc_timescale is None:
+        args.phc_timescale = profile.get("timescale", args.phc_timescale)
+    if getattr(args, "track_kp", None) == 0.3:
+        args.track_kp = profile.get("track_kp", args.track_kp)
+    if getattr(args, "track_ki", None) == 0.1:
+        args.track_ki = profile.get("track_ki", args.track_ki)
+    if not args.program_pin:
+        args.program_pin = bool(profile.get("program_pin", False))
 
 
 # ── Convergence detection (from peppar_find_position) ─────────────────── #
@@ -446,11 +479,14 @@ def _setup_servo(args, known_ecef):
     # Import PTP constants for pin setup
     from peppar_fix.ptp_device import PTP_PF_EXTTS
 
-    extts_channel = 0
-    try:
-        ptp.set_pin_function(args.pps_pin, PTP_PF_EXTTS, extts_channel)
-    except OSError:
-        log.info("Pin config not supported by driver (igc uses implicit mapping)")
+    extts_channel = args.extts_channel
+    if args.program_pin and caps['n_pins'] > 0:
+        try:
+            ptp.set_pin_function(args.pps_pin, PTP_PF_EXTTS, extts_channel)
+        except OSError:
+            log.info("Pin config not supported by driver")
+    else:
+        log.info("Skipping pin programming; using implicit EXTS mapping")
     ptp.enable_extts(extts_channel, rising_edge=True)
     log.info(f"EXTTS enabled: pin={args.pps_pin}, channel={extts_channel}")
 
@@ -540,6 +576,18 @@ def _phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec):
     return phc_rounded - gps_unix_sec
 
 
+def _target_timescale_sec(gps_time, args):
+    """Map a RAWX GPS epoch to the requested PHC timescale."""
+    gps_sec = int(round(gps_time.timestamp()))
+    if args.phc_timescale == "gps":
+        return gps_sec
+    if args.phc_timescale == "utc":
+        return gps_sec - args.leap
+    if args.phc_timescale == "tai":
+        return gps_sec + args.tai_minus_gps
+    raise ValueError(f"Unsupported PHC timescale: {args.phc_timescale}")
+
+
 def _servo_epoch(ctx, args, filt, gps_time, n_epochs,
                  dt_rx_ns, dt_rx_sigma, n_used, known_ecef,
                  resid_rms, isb_gal_ns, isb_bds_ns):
@@ -598,7 +646,7 @@ def _servo_epoch(ctx, args, filt, gps_time, n_epochs,
             log.info(f"  [{n_epochs}] No PPS event for this epoch")
         return
 
-    gps_unix_sec = int(round(gps_time.timestamp()))
+    target_sec = _target_timescale_sec(gps_time, args)
     ts_str = gps_time.strftime('%Y-%m-%d %H:%M:%S')
     pps_error_ns = _pps_fractional_error(phc_nsec)
 
@@ -612,7 +660,7 @@ def _servo_epoch(ctx, args, filt, gps_time, n_epochs,
     # Warmup phase
     if ctx['phase'] == 'warmup':
         if n_epochs >= ctx['warmup_epochs']:
-            epoch_offset = _phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec)
+            epoch_offset = _phc_gps_offset_s(phc_sec, phc_nsec, target_sec)
             log.info(f"  Servo warmup complete ({n_epochs} epochs, "
                      f"best={best}, epoch_offset={epoch_offset}s)")
             if epoch_offset != 0 or abs(best.error_ns) > STEP_THRESHOLD_NS:
@@ -623,7 +671,7 @@ def _servo_epoch(ctx, args, filt, gps_time, n_epochs,
         elif n_epochs % 10 == 0:
             log.info(f"  [{n_epochs}] servo warmup: best={best} "
                      f"dt_rx={dt_rx_ns:+.1f}±{dt_rx_sigma:.1f}ns")
-        _log_servo(log_w, ts_str, gps_unix_sec, phc_sec, phc_nsec,
+        _log_servo(log_w, ts_str, target_sec, phc_sec, phc_nsec,
                    dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, best,
                    ctx['adjfine_ppb'], ctx['phase'], n_used,
                    ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns)
@@ -631,7 +679,7 @@ def _servo_epoch(ctx, args, filt, gps_time, n_epochs,
 
     # Step phase
     if ctx['phase'] == 'step':
-        epoch_offset = _phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec)
+        epoch_offset = _phc_gps_offset_s(phc_sec, phc_nsec, target_sec)
         total_offset_ns = epoch_offset * 1_000_000_000 + best.error_ns
         log.info(f"  STEP: epoch_offset={epoch_offset}s, "
                  f"source={best}, total={total_offset_ns:+.0f}ns")
@@ -720,7 +768,7 @@ def _servo_epoch(ctx, args, filt, gps_time, n_epochs,
                      f"coast ({scheduler.n_accumulated}/{scheduler.interval}) "
                      f"adj={ctx['adjfine_ppb']:+.1f}ppb")
 
-    _log_servo(log_w, ts_str, gps_unix_sec, phc_sec, phc_nsec,
+    _log_servo(log_w, ts_str, target_sec, phc_sec, phc_nsec,
                dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, best,
                ctx['adjfine_ppb'], ctx['phase'], n_used,
                ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns)
@@ -961,7 +1009,9 @@ Two-phase operation:
     gnss.add_argument("--systems", default="gps,gal,bds",
                       help="GNSS systems (default: gps,gal,bds)")
     gnss.add_argument("--leap", type=int, default=18,
-                      help="UTC-GPS leap seconds (default: 18)")
+                      help="GPS-UTC leap seconds (default: 18)")
+    gnss.add_argument("--tai-minus-gps", type=int, default=19,
+                      help="TAI-GPS offset in seconds (default: 19)")
 
     # NTRIP (corrections input)
     ntrip = ap.add_argument_group("NTRIP corrections")
@@ -976,10 +1026,20 @@ Two-phase operation:
 
     # PHC servo (optional)
     servo = ap.add_argument_group("PHC servo (optional)")
+    servo.add_argument("--ptp-profile", choices=["i226", "e810"],
+                       help="PTP NIC profile for default PHC/pin/channel settings")
+    servo.add_argument("--device-config", default="config/receivers.toml",
+                       help="Device/profile config TOML (default: config/receivers.toml)")
     servo.add_argument("--servo", default=None,
                        help="PTP device for PHC servo (e.g. /dev/ptp0)")
-    servo.add_argument("--pps-pin", type=int, default=1,
-                       help="SDP pin for PPS input (default: 1 = SDP1)")
+    servo.add_argument("--pps-pin", type=int, default=None,
+                       help="PTP pin index for PPS input (profile/default if omitted)")
+    servo.add_argument("--extts-channel", type=int, default=None,
+                       help="PTP EXTS channel for PPS input (profile/default if omitted)")
+    servo.add_argument("--program-pin", action="store_true",
+                       help="Explicitly program PTP pin function before enabling EXTS")
+    servo.add_argument("--phc-timescale", choices=["gps", "utc", "tai"], default=None,
+                       help="Target PHC timescale for PPS alignment (profile/default if omitted)")
     servo.add_argument("--warmup", type=int, default=20,
                        help="Servo warmup epochs (default: 20)")
     servo.add_argument("--track-kp", type=float, default=0.3,
@@ -1012,6 +1072,13 @@ Two-phase operation:
     out.add_argument("-v", "--verbose", action="store_true")
 
     args = ap.parse_args()
+    apply_ptp_profile(args)
+    if args.pps_pin is None:
+        args.pps_pin = 1
+    if args.extts_channel is None:
+        args.extts_channel = 0
+    if args.phc_timescale is None:
+        args.phc_timescale = "utc"
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
