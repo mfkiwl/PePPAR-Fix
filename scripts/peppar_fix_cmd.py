@@ -55,6 +55,7 @@ from peppar_fix import (
     CorrectionFreshnessGate,
     PositionWatchdog,
     StrictCorrelationGate,
+    match_pps_event_from_history,
     load_position,
     save_position,
 )
@@ -737,25 +738,13 @@ def _match_pps_event_from_history(ctx, obs_event, target_sec,
                                   min_window_s=0.5, max_window_s=11.0):
     """Return the best PPS history match for an observation, if any."""
     with ctx['pps_history_lock']:
-        history = list(ctx['pps_history'])
-
-    if not history:
-        return None, None, None, None
-
-    candidates = []
-    for event in history:
-        recv_dt = obs_event.recv_mono - event.recv_mono
-        if recv_dt < min_window_s or recv_dt > max_window_s:
-            continue
-        delta = event.rounded_sec() - target_sec
-        candidates.append((abs(delta), abs(recv_dt - 1.0), event, delta, recv_dt))
-
-    if not candidates:
-        return None, None, None, history[-1].recv_mono
-
-    candidates.sort(key=lambda item: (item[0], item[1]))
-    _, _, event, delta, recv_dt = candidates[0]
-    return event, delta, recv_dt, history[-1].recv_mono
+        return match_pps_event_from_history(
+            ctx['pps_history'],
+            obs_event,
+            target_sec,
+            min_window_s=min_window_s,
+            max_window_s=max_window_s,
+        )
 
 
 def _servo_epoch(ctx, args, filt, obs_event, n_epochs,
@@ -1025,6 +1014,7 @@ def _append_queue_history(history, qobj, timeout=0.5):
 def run(args):
     """Main entry point: bootstrap → steady state."""
     stop_event = threading.Event()
+    gate_stats = None
     driver = get_driver(args.receiver)
     log.info(f"Receiver: {driver.name} (PROTVER {driver.protver})")
 

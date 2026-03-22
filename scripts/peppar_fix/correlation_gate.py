@@ -130,17 +130,19 @@ def match_pps_event_from_history(
     while len(pps_history) > 1 and obs_event.recv_mono - pps_history[0].recv_mono > max_window_s:
         pps_history.popleft()
 
-    for pps_event in pps_history:
+    for idx, pps_event in enumerate(pps_history):
         recv_dt_s = obs_event.recv_mono - pps_event.recv_mono
         if recv_dt_s < min_window_s or recv_dt_s > max_window_s:
             continue
         delta_s = pps_event.rounded_sec() - target_sec
-        candidate = (abs(delta_s), abs(recv_dt_s - 1.0), pps_event, delta_s, recv_dt_s)
+        candidate = (abs(delta_s), abs(recv_dt_s - 1.0), idx, pps_event, delta_s, recv_dt_s)
         if best is None or candidate < best:
             best = candidate
 
     if best is None:
         return None, None, None, latest_pps_mono
 
-    _, _, pps_event, delta_s, recv_dt_s = best
+    _, _, matched_idx, pps_event, delta_s, recv_dt_s = best
+    for _ in range(matched_idx + 1):
+        pps_history.popleft()
     return pps_event, delta_s, recv_dt_s, latest_pps_mono

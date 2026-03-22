@@ -302,6 +302,7 @@ These environment variables control independent per-thread delays:
 - `THREAD_DELAY_PROB_PCT`
 - `THREAD_DELAY_MEAN_MS`
 - `THREAD_DELAY_RANGE_MS`
+- `THREAD_DELAY_SOURCES`
 
 Interpretation:
 
@@ -314,6 +315,17 @@ Interpretation:
 
 If `THREAD_DELAY_PROB_PCT` is unset, no per-thread injected delay occurs.
 
+`THREAD_DELAY_SOURCES` is optional and should be a comma-separated list of
+source-name substrings.
+
+Examples:
+
+- `gnss:/dev/gnss0`
+- `ptp:/dev/ptp1`
+- `ntrip:EPH`
+
+If set, per-thread delays are only injected for matching sources.
+
 #### System-correlated delay variables
 
 These environment variables control time-correlated delays across all reader
@@ -322,6 +334,7 @@ threads:
 - `SYS_DELAY_PROB_PCT`
 - `SYS_DELAY_MEAN_MS`
 - `SYS_DELAY_RANGE_MS`
+- `SYS_DELAY_SOURCES`
 
 Intended design:
 
@@ -331,6 +344,10 @@ Intended design:
   same or closely related delay before delivery
 
 If `SYS_DELAY_PROB_PCT` is unset, no correlated delay occurs.
+
+`SYS_DELAY_SOURCES` is optional and uses the same comma-separated substring
+matching model as `THREAD_DELAY_SOURCES`. If set, only matching sources apply
+the triggered correlated delay.
 
 This simulates:
 
@@ -391,6 +408,31 @@ This fits the current architecture:
 - the delay hook lives at the reader boundary
 - the existing move toward event envelopes and timing metadata makes the
   resulting behavior diagnosable
+
+### What the first meaningful gate-forcing run looked like
+
+After adding targeted delay injection, the most useful forcing case on `oxco`
+was:
+
+- keep NTRIP healthy
+- inject multi-second delays only on:
+  - `gnss:/dev/gnss0`
+  - `ptp:/dev/ptp1`
+
+That produced the first run where the strict sink gate clearly did the right
+thing instead of merely surviving:
+
+- `strict_correlation.consumed_correlated = 0`
+- `strict_correlation.dropped_outside_window = 1`
+- `strict_correlation.dropped_unmatched = 1`
+- `correction_freshness.consumed_fresh = 0`
+
+Interpretation:
+
+- the servo sink refused to consume bad GNSS/PPS pairings
+- the correction gate was not the limiting factor in that run
+- this is the kind of test that exercises the sink contract we actually care
+  about
 
 ## What we learned on `oxco`
 

@@ -22,6 +22,110 @@ This document also assumes a design direction:
 - this codebase does not currently need a general event bus or YAML dataflow
   registry to stay understandable
 
+## Working map
+
+The most useful visualization is no longer a single line-drawing diagram.
+There are too many queues, state stores, gates, and sink-specific policies.
+
+The better combination is:
+
+- one compact structural map that shows where queues and gates sit
+- one matrix that shows which sinks consume which sources and under what policy
+
+Use the map for orientation and the matrix for truth.
+
+```mermaid
+flowchart LR
+    subgraph Sources
+        S1["S1 RTCM Broadcast"]
+        S2["S2 RTCM SSR"]
+        S3["S3 GNSS UBX<br/>RAWX/SFRBX/PVT/SAT/TIM-TP"]
+        S4["S4 PHC EXTS / PPS"]
+        S5["S5 TICC Lines"]
+    end
+
+    subgraph Readers["Reader Threads / Adapters"]
+        R1["NTRIP reader<br/>recv_mono + queue state"]
+        R2["GNSS reader<br/>recv_mono + queue state"]
+        R3["PTP EXTS reader<br/>recv_mono + queue state"]
+        R4["TICC reader<br/>recv_mono + queue state"]
+    end
+
+    subgraph Stores["State Stores / Histories"]
+        B["BroadcastEphemeris"]
+        C["SSRState"]
+        O["Observation history"]
+        P["PPS history"]
+        Q["QErr freshness store"]
+        T["TICC history"]
+    end
+
+    subgraph Gates["Sink-local gates"]
+        G1["CorrectionFreshnessGate"]
+        G2["StrictCorrelationGate"]
+        G3["Future TICC correlation gate"]
+    end
+
+    subgraph Sinks
+        K4["K4 Bootstrap EKF"]
+        K5["K5 Steady-state clock EKF"]
+        K6["K6 PHC servo"]
+        K7["K7 Servo diagnostics"]
+        K10["K10 TICC analysis"]
+        L["Loss-free loggers"]
+    end
+
+    S1 --> R1 --> B
+    S2 --> R1 --> C
+    S3 --> R2 --> O
+    R2 --> Q
+    S4 --> R3 --> P
+    S5 --> R4 --> T
+
+    B --> G1
+    C --> G1
+    O --> G1
+    G1 --> K4
+    G1 --> K5
+
+    O --> G2
+    P --> G2
+    Q --> G2
+    G2 --> K6
+    K6 --> K7
+
+    T --> G3
+    P --> G3
+    O --> G3
+    G3 --> K10
+
+    O --> L
+    P --> L
+    T --> L
+    B --> L
+    C --> L
+```
+
+## Source to sink policy matrix
+
+`L` means loss-free is preferred. `F` means freshest/current state is preferred.
+`CW` means correlated-window delivery is required. `Soft` means freshness gate,
+not strict one-to-one event matching. `Strict` means explicit sink gate before
+consumption.
+
+| Sink | S1 RTCM Broadcast | S2 RTCM SSR | S3 GNSS Obs | S4 PPS/EXTTS | S5 TICC | Policy |
+| --- | --- | --- | --- | --- | --- | --- |
+| K1 Narrow GNSS loggers |  |  | Yes |  |  | `L`, no cross-stream correlation |
+| K2 Broadcast ephemeris store | Yes |  |  |  |  | `F`, state cache |
+| K3 SSR state store |  | Yes |  |  |  | `F`, state cache |
+| K4 Bootstrap EKF | Yes | Optional | Yes |  |  | `Soft`, time-consistent corrections |
+| K5 Steady-state clock EKF | Yes | Optional | Yes | Optional indirect |  | `Soft` alone, `Strict` when feeding servo |
+| K6 PHC servo | Indirect via K5 | Indirect via K5 | Yes | Yes | Future | `CW`, `Strict` |
+| K7 Servo diagnostics | Indirect | Indirect | Indirect | Indirect |  | inherited from upstream |
+| K8 NTRIP caster output |  |  | Yes |  |  | freshest epoch, low correlation need |
+| K9 PPS/TIM-TP diagnostics |  |  | TIM-TP subset | Yes |  | mixed, usually `L` with explicit joins |
+| K10 TICC-based analysis | Optional overlay | Optional overlay | Optional overlay | Optional overlay | Yes | mostly `L` today, future `CW` |
+
 ## Why this complexity is justified
 
 A simple read-and-deliver event model is still correct for some sinks.

@@ -15,9 +15,11 @@ _ENV_LOG_PATH = "DELAY_LOG_PATH"
 _ENV_THREAD_PCT = "THREAD_DELAY_PROB_PCT"
 _ENV_THREAD_MEAN = "THREAD_DELAY_MEAN_MS"
 _ENV_THREAD_RANGE = "THREAD_DELAY_RANGE_MS"
+_ENV_THREAD_SOURCES = "THREAD_DELAY_SOURCES"
 _ENV_SYS_PCT = "SYS_DELAY_PROB_PCT"
 _ENV_SYS_MEAN = "SYS_DELAY_MEAN_MS"
 _ENV_SYS_RANGE = "SYS_DELAY_RANGE_MS"
+_ENV_SYS_SOURCES = "SYS_DELAY_SOURCES"
 
 
 def _env_float(name):
@@ -42,6 +44,13 @@ def _sample_delay_s(mean_ms, range_ms):
     return max(0.0, delay_ms / 1000.0)
 
 
+def _env_source_filters(name):
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return ()
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
 class DelayInjector:
     """Global timing fault injector driven by environment variables."""
 
@@ -49,9 +58,11 @@ class DelayInjector:
         self.thread_prob_pct = _env_float(_ENV_THREAD_PCT)
         self.thread_mean_ms = _env_float(_ENV_THREAD_MEAN)
         self.thread_range_ms = _env_float(_ENV_THREAD_RANGE)
+        self.thread_sources = _env_source_filters(_ENV_THREAD_SOURCES)
         self.sys_prob_pct = _env_float(_ENV_SYS_PCT)
         self.sys_mean_ms = _env_float(_ENV_SYS_MEAN)
         self.sys_range_ms = _env_float(_ENV_SYS_RANGE)
+        self.sys_sources = _env_source_filters(_ENV_SYS_SOURCES)
         self.enabled = bool(
             (self.thread_prob_pct is not None and self.thread_prob_pct > 0.0)
             or (self.sys_prob_pct is not None and self.sys_prob_pct > 0.0)
@@ -126,6 +137,12 @@ class DelayInjector:
         self._log_delay(source_name, kind, start_mono, end_mono, delay_s)
         return end_mono - start_mono
 
+    @staticmethod
+    def _source_enabled(source_name, filters):
+        if not filters:
+            return True
+        return any(part in source_name for part in filters)
+
     def _sys_controller(self):
         interval_s = 0.1
         while not self._stop.is_set():
@@ -151,7 +168,12 @@ class DelayInjector:
         total_s = 0.0
 
         pct = self.thread_prob_pct
-        if pct is not None and pct > 0.0 and random.random() < (pct / 100.0):
+        if (
+            pct is not None
+            and pct > 0.0
+            and self._source_enabled(source_name, self.thread_sources)
+            and random.random() < (pct / 100.0)
+        ):
             total_s += self._maybe_sleep(
                 source_name,
                 "THREAD",
@@ -162,9 +184,11 @@ class DelayInjector:
         with self._sys_lock:
             generation = self._sys_generation
             duration_s = self._sys_duration_s if generation > seen_generation else 0.0
-        if generation > seen_generation:
+        if generation > seen_generation and self._source_enabled(source_name, self.sys_sources):
             self._tls.sys_generation = generation
             total_s += self._maybe_sleep(source_name, "SYS", duration_s)
+        elif generation > seen_generation:
+            self._tls.sys_generation = generation
 
         return total_s
 

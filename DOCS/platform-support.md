@@ -13,6 +13,13 @@ The important conclusion is that these are not just two copies of the same platf
 - PPS capture wiring model
 - what the software can assume about buffering and correlation
 
+Reference:
+
+- TimeHAT project page: <https://github.com/Time-Appliances-Project/TimeHAT>
+  - the `Testing PPS` section documents the post-power-cycle `testptp`
+    commands that restore the expected SDP PPS input/output setup on the
+    board
+
 ## Current support status
 
 ### `oxco` / E810
@@ -54,24 +61,64 @@ Working:
   - GPS `L1CA + L5Q`
   - Galileo `E1C + E5aQ`
   - BeiDou `B1I + B2aI`
+- PPS input can be restored after a power cycle using the documented TimeHAT
+  `testptp` SDP setup commands
+- the unified path now runs end-to-end on `timehat` when:
+  - `/dev/ttyACM0` is not already owned by `satpulse@ttyACM0.service`
+  - the TimeHAT SDP pins have been restored after a power cycle
+  - `--receiver f9t-l5` is used
+  - the PHC timescale is treated as `tai`
 
-Not yet working:
+Current caveats:
 
-- PPS capture into the i226 PHC
+- `satpulse@ttyACM0.service` will occupy `/dev/ttyACM0` and prevent
+  `PePPAR-Fix` from opening the receiver unless it is stopped first
+- the current `i226` profile should default to `tai` for PTP-GM-style use
+  cases, and the live `timehat` testing supported that choice
+- the strict sink gate still had to defer and drop some early epochs before
+  settling:
+  - `consumed_correlated = 34`
+  - `deferred_waiting = 12`
+  - `dropped_outside_window = 1`
+  - `dropped_unmatched = 1`
 
-Observed behavior:
+Wiring and board behavior:
 
-- no PPS events were detected on any tested SDP/channel mapping
-- software reaches phase 2, but the servo reports `No PPS event for this epoch`
-- the remaining blocker on `timehat` is hardware routing or SDP mapping, not GNSS parsing
+- earlier, no PPS events were detected until after a full power cycle plus the
+  documented SDP recovery commands
 - wiring was later confirmed unchanged in the lab:
   - F9T PPS OUT goes to the TimeHAT v5 PPS IN SMA
   - the same PPS also reaches TICC #1 chB
   - TICC trigger indication is present there
   - TimeHAT PPS OUT to TICC #3 chA does not currently show activity
 
-This strengthens the case that the current blocker is in the i226/PHC capture
-path or its board-level handling, not in the upstream F9T PPS wiring.
+This means the earlier “no PPS on TimeHAT” conclusion is obsolete. The real
+issue was board/driver state after power-up, not missing upstream PPS wiring.
+
+Later lab finding:
+
+- after a full power cycle, `timehat` may come back with the i226 SDP state in
+  a bad configuration even when the PPS wiring is physically correct
+- the TimeHAT project page points to the recovery sequence under `Testing PPS`
+- the two documented commands are:
+  - `sudo testptp -d /dev/ptp0 -L 0,2`
+  - `sudo testptp -d /dev/ptp0 -L 1,1`
+
+Interpretation:
+
+- `pin 0` is configured for PPS output (`perout`)
+- `pin 1` is configured for PPS input (`extts`)
+
+This is important because the earlier conclusion that `timehat` had no PPS
+input was made before this power-cycle-specific SDP recovery behavior was
+known.
+
+Additional operational note:
+
+- on the tested `timehat` host, `satpulse@ttyACM0.service` also grabs the same
+  GNSS serial device used by `PePPAR-Fix`
+- for direct PePPAR-Fix testing, that service must be inactive so `/dev/gnss-top`
+  can be opened exclusively
 
 ## GNSS transport differences
 
