@@ -250,6 +250,11 @@ What is still future work:
 
 - a slow-moving estimator such as an EMA can track the nominal relationship,
   while sample confidence expresses how much to trust each new update
+- first pass is now in place for GNSS and PPS via
+  [`timebase_estimator.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/timebase_estimator.py)
+  and is propagated as `estimator_residual_s`
+- RTCM and TICC still only have first-pass confidence and should use the same
+  estimator pattern next
 
 ## Testing strategy
 

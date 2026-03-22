@@ -75,6 +75,7 @@ from peppar_fix.event_time import (
     RtcmEvent,
     estimate_correlation_confidence,
 )
+from peppar_fix.timebase_estimator import TimebaseRelationEstimator
 from peppar_fix.fault_injection import get_delay_injector
 
 log = logging.getLogger(__name__)
@@ -231,6 +232,12 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
     n_epochs = 0
     delay_injector = get_delay_injector()
     source_name = f"gnss:{port}"
+    # GNSS delivery can legitimately batch by seconds on some hosts
+    # (notably the kernel-GNSS path on oxco), so keep this estimator broad.
+    recv_estimator = TimebaseRelationEstimator(
+        min_sigma_s=4.0,
+        sigma_scale=4.0,
+    )
     while not stop_event.is_set():
         # Drain config queue: write pending UBX messages to the receiver
         if config_queue is not None:
@@ -418,9 +425,17 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         queue_remains = bool(getattr(stream, 'in_waiting', 0))
                     recv_utc = datetime.now(timezone.utc)
                     parse_age_s = max(0.0, now_mono - recv_mono)
-                    confidence = estimate_correlation_confidence(
+                    base_confidence = estimate_correlation_confidence(
                         queue_remains=queue_remains,
                         parse_age_s=parse_age_s,
+                    )
+                    estimator_sample = recv_estimator.update(
+                        gps_time.timestamp(),
+                        recv_mono,
+                    )
+                    confidence = max(
+                        0.05,
+                        min(1.0, base_confidence * estimator_sample["confidence"]),
                     )
                     obs_queue.put(ObservationEvent(
                         gps_time=gps_time,
@@ -430,6 +445,7 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         queue_remains=queue_remains,
                         parse_age_s=parse_age_s,
                         correlation_confidence=confidence,
+                        estimator_residual_s=estimator_sample["residual_s"],
                     ))
                     n_epochs += 1
 

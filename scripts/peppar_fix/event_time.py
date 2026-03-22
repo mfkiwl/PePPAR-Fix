@@ -48,6 +48,7 @@ class ObservationEvent:
     queue_remains: Optional[bool] = None
     parse_age_s: Optional[float] = None
     correlation_confidence: Optional[float] = None
+    estimator_residual_s: Optional[float] = None
 
     def __iter__(self):
         yield self.gps_time
@@ -65,6 +66,7 @@ class PpsEvent:
     queue_remains: Optional[bool] = None
     parse_age_s: Optional[float] = None
     correlation_confidence: Optional[float] = None
+    estimator_residual_s: Optional[float] = None
 
     def rounded_sec(self):
         return self.phc_sec if self.phc_nsec < 500_000_000 else self.phc_sec + 1
@@ -86,6 +88,7 @@ class RtcmEvent:
     queue_remains: Optional[bool] = None
     parse_age_s: Optional[float] = None
     correlation_confidence: Optional[float] = None
+    estimator_residual_s: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -100,3 +103,4 @@ class TiccEvent:
     queue_remains: Optional[bool] = None
     parse_age_s: Optional[float] = None
     correlation_confidence: Optional[float] = None
+    estimator_residual_s: Optional[float] = None

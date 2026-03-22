@@ -15,6 +15,7 @@ from peppar_fix.event_time import (
     estimate_correlation_confidence,
     merge_correlation_confidence,
 )
+from peppar_fix.timebase_estimator import TimebaseRelationEstimator
 from peppar_fix import receiver
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     'match_pps_event_from_history',
     'estimate_correlation_confidence',
     'merge_correlation_confidence',
+    'TimebaseRelationEstimator',
     'save_position', 'load_position',
     'receiver',
 ]

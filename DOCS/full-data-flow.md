@@ -1159,27 +1159,40 @@ Highest-risk sinks:
 - K6 PHC servo
 - K12 future quality metrics
 
-### G5. No explicit source-timescale relationship estimator exists
+### G5. Source-timescale relationship estimation is only partially implemented
 
 Impact:
 
-- each sink either hard-codes ad hoc freshness logic or ignores the problem
-- there is no shared confidence model for mapping source-native time to host monotonic
+- without an estimator, queued samples and prompt samples are treated too similarly
+- sinks need a stable nominal source-time to host-monotonic relationship as a baseline
 
-Missing:
+Current state:
 
-- a per-source estimator of source-time to host-monotonic offset or drift
-- sample confidence inputs such as:
-  - queue-remains state
-  - packet age inside userspace
-  - known batching behavior
-- a way for sinks to consume correlation confidence instead of raw receive deltas alone
+- [`scripts/peppar_fix/timebase_estimator.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/timebase_estimator.py)
+  now provides a slow-moving EMA estimator of source-time to host-monotonic
+  offset and residual sigma
+- GNSS observation ingest in
+  [`scripts/realtime_ppp.py`](/home/bob/git/PePPAR-Fix/scripts/realtime_ppp.py)
+  now blends queue/age heuristics with estimator confidence
+- PPS ingest in
+  [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+  now does the same for EXTS events before they reach the strict gate
+
+Still missing:
+
+- RTCM ingest using the same estimator path instead of first-pass confidence only
+- TICC ingest using the same estimator path instead of first-pass confidence only
+- per-platform/profile tuning of estimator parameters
+- consistent exposure of estimator residuals in sink logs and diagnostics
+- a way for sinks to consume both nominal alignment and residual confidence explicitly
 
 Where it should be fixed first:
 
-- event envelope types in [`scripts/peppar_fix/event_time.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/event_time.py)
-- GNSS parse path in [`scripts/realtime_ppp.py`](/home/bob/git/PePPAR-Fix/scripts/realtime_ppp.py)
-- PPS ingest path in [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+- RTCM ingest in [`scripts/ntrip_client.py`](/home/bob/git/PePPAR-Fix/scripts/ntrip_client.py)
+- correction stores in [`scripts/broadcast_eph.py`](/home/bob/git/PePPAR-Fix/scripts/broadcast_eph.py)
+  and [`scripts/ssr_corrections.py`](/home/bob/git/PePPAR-Fix/scripts/ssr_corrections.py)
+- TICC ingest in [`scripts/ticc.py`](/home/bob/git/PePPAR-Fix/scripts/ticc.py)
+- sink logging in [`scripts/servo_fault_smoke.py`](/home/bob/git/PePPAR-Fix/scripts/servo_fault_smoke.py)
 
 Highest-risk sinks:
 
@@ -1421,6 +1434,12 @@ Progress so far:
   and a first-pass confidence estimate
 - PPS/EXTTS events carry `recv_mono`, `queue_remains`, and a first-pass
   confidence estimate
+- [`scripts/peppar_fix/timebase_estimator.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/timebase_estimator.py)
+  now provides a shared EMA-based relationship estimator
+- GNSS ingest now blends first-pass queue/age heuristics with estimator
+  residual confidence before handing observations to sinks
+- unified PPS ingest now blends first-pass queue/age heuristics with
+  estimator residual confidence before events reach the strict gate
 - RTCM ingest now carries host-side timing metadata alongside decoded messages
   and stores that metadata in SSR correction objects
 - TICC events now carry `recv_mono`, `queue_remains`, and a first-pass

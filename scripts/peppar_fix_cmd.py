@@ -55,6 +55,7 @@ from peppar_fix import (
     CorrectionFreshnessGate,
     PositionWatchdog,
     StrictCorrelationGate,
+    TimebaseRelationEstimator,
     estimate_correlation_confidence,
     match_pps_event_from_history,
     load_position,
@@ -634,6 +635,7 @@ def _setup_servo(args, known_ecef):
     pps_history_lock = threading.Lock()
     stop_pps = threading.Event()
     delay_injector = get_delay_injector()
+    pps_recv_estimator = TimebaseRelationEstimator()
 
     def extts_reader():
         while not stop_pps.is_set():
@@ -642,6 +644,14 @@ def _setup_servo(args, known_ecef):
                 continue
             delay_injector.maybe_inject_delay(f"ptp:{args.servo}")
             phc_sec, phc_nsec, index, recv_mono, queue_remains, parse_age_s = event
+            base_confidence = estimate_correlation_confidence(
+                queue_remains=queue_remains,
+                parse_age_s=parse_age_s,
+            )
+            estimator_sample = pps_recv_estimator.update(
+                phc_sec + (phc_nsec / 1_000_000_000.0),
+                recv_mono,
+            )
             pps_event = PpsEvent(
                 phc_sec=phc_sec,
                 phc_nsec=phc_nsec,
@@ -649,10 +659,11 @@ def _setup_servo(args, known_ecef):
                 recv_mono=recv_mono,
                 queue_remains=queue_remains,
                 parse_age_s=parse_age_s,
-                correlation_confidence=estimate_correlation_confidence(
-                    queue_remains=queue_remains,
-                    parse_age_s=parse_age_s,
+                correlation_confidence=max(
+                    0.05,
+                    min(1.0, base_confidence * estimator_sample["confidence"]),
                 ),
+                estimator_residual_s=estimator_sample["residual_s"],
             )
             with pps_history_lock:
                 pps_history.append(pps_event)
