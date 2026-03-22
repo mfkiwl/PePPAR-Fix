@@ -264,6 +264,9 @@ What is still future work:
 - RTCM now uses the same estimator only for message families with a usable
   stream epoch, chiefly SSR; broadcast ephemeris toe/toc remain excluded
   because they are model epochs, not transport timestamps
+- unified servo logs now emit observation, PPS, match, and correction
+  confidence/residual fields so gate outcomes can be diagnosed from the sink
+  output instead of inferred only from counters
 
 ## Testing strategy
 

@@ -58,14 +58,38 @@ def add_env(env, key, value):
 
 def summarize_servo_log(path):
     rows = list(csv.DictReader(open(path)))
+    scalar_fields = [
+        "obs_confidence",
+        "obs_estimator_residual_s",
+        "pps_confidence",
+        "pps_estimator_residual_s",
+        "match_confidence",
+        "broadcast_confidence",
+        "ssr_confidence",
+    ]
     summary = {
         "rows": len(rows),
         "epoch_offsets": Counter(),
+        "scalars": {},
     }
     if rows:
         summary["epoch_offsets"] = Counter(
             r["epoch_offset_s"] for r in rows if r.get("epoch_offset_s")
         )
+        for field in scalar_fields:
+            values = []
+            for row in rows:
+                value = row.get(field)
+                if value in ("", None):
+                    continue
+                values.append(float(value))
+            if values:
+                values.sort()
+                summary["scalars"][field] = {
+                    "min": values[0],
+                    "median": values[len(values) // 2],
+                    "max": values[-1],
+                }
     return summary
 
 
@@ -162,6 +186,8 @@ def main():
     servo_summary = summarize_servo_log(args.servo_log)
     print(f"servo_rows={servo_summary['rows']}")
     print(f"epoch_offsets={dict(servo_summary['epoch_offsets'])}")
+    if servo_summary["scalars"]:
+        print(f"servo_scalars={servo_summary['scalars']}")
     if servo_summary["rows"] < args.min_servo_rows:
         print(
             f"servo rows {servo_summary['rows']} below minimum {args.min_servo_rows}",

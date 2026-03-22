@@ -544,7 +544,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
 
             # Feed servo if active
             if servo_ctx is not None:
-                _servo_epoch(servo_ctx, args, filt, obs_event, n_epochs,
+                _servo_epoch(servo_ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                              dt_rx_ns, dt_rx_sigma, n_used, known_ecef,
                              resid_rms, isb_gal_ns, isb_bds_ns,
                              pps_match=pps_match)
@@ -690,6 +690,9 @@ def _setup_servo(args, known_ecef):
             'timestamp', 'gps_second', 'phc_sec', 'phc_nsec',
             'phc_rounded_sec', 'epoch_offset_s', 'timescale_error_ns',
             'extts_index', 'pps_match_delta_s', 'pps_match_recv_dt_s', 'pps_queue_depth',
+            'obs_confidence', 'obs_estimator_residual_s',
+            'pps_confidence', 'pps_estimator_residual_s', 'match_confidence',
+            'broadcast_confidence', 'ssr_confidence',
             'dt_rx_ns', 'dt_rx_sigma_ns', 'pps_error_ns', 'qerr_ns',
             'source', 'source_error_ns', 'source_confidence_ns',
             'adjfine_ppb', 'phase', 'n_meas', 'gain_scale',
@@ -785,7 +788,7 @@ def _match_pps_event_from_history(ctx, obs_event, target_sec,
         )
 
 
-def _servo_epoch(ctx, args, filt, obs_event, n_epochs,
+def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                  dt_rx_ns, dt_rx_sigma, n_used, known_ecef,
                  resid_rms, isb_gal_ns, isb_bds_ns, pps_match=None):
     """Process one servo epoch: read PPS, compute error, steer PHC."""
@@ -880,6 +883,7 @@ def _servo_epoch(ctx, args, filt, obs_event, n_epochs,
         _log_servo(log_w, ctx['log_f'], ts_str, target_sec, phc_sec, phc_nsec,
                    phc_rounded_sec, epoch_offset, timescale_error_ns,
                    extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
+                   obs_event, pps_event, _match_confidence, corr_snapshot,
                    dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, best,
                    ctx['adjfine_ppb'], ctx['phase'], n_used,
                    ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns)
@@ -971,6 +975,7 @@ def _servo_epoch(ctx, args, filt, obs_event, n_epochs,
     _log_servo(log_w, ctx['log_f'], ts_str, target_sec, phc_sec, phc_nsec,
                phc_rounded_sec, epoch_offset, timescale_error_ns,
                extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
+               obs_event, pps_event, _match_confidence, corr_snapshot,
                dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, best,
                ctx['adjfine_ppb'], ctx['phase'], n_used,
                ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns)
@@ -979,17 +984,34 @@ def _servo_epoch(ctx, args, filt, obs_event, n_epochs,
 def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
                phc_rounded_sec, epoch_offset_s, timescale_error_ns,
                extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
+               obs_event, pps_event, match_confidence, corr_snapshot,
                dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, best,
                adjfine_ppb, phase, n_used, gain_scale, scheduler,
                isb_gal_ns, isb_bds_ns):
     """Write one servo log row."""
     if log_w is None:
         return
+    obs_confidence = getattr(obs_event, 'correlation_confidence', None)
+    obs_residual_s = getattr(obs_event, 'estimator_residual_s', None)
+    pps_confidence = getattr(pps_event, 'correlation_confidence', None)
+    pps_residual_s = getattr(pps_event, 'estimator_residual_s', None)
+    broadcast_confidence = None
+    ssr_confidence = None
+    if corr_snapshot is not None:
+        broadcast_confidence = corr_snapshot.get('broadcast_confidence')
+        ssr_confidence = corr_snapshot.get('ssr_confidence')
     log_w.writerow([
         ts_str, gps_unix_sec, phc_sec, phc_nsec,
         phc_rounded_sec, epoch_offset_s, f'{timescale_error_ns:.1f}',
         extts_index, pps_match_delta_s,
         f'{pps_match_recv_dt_s:.3f}', pps_queue_depth,
+        f'{obs_confidence:.3f}' if obs_confidence is not None else '',
+        f'{obs_residual_s:.6f}' if obs_residual_s is not None else '',
+        f'{pps_confidence:.3f}' if pps_confidence is not None else '',
+        f'{pps_residual_s:.6f}' if pps_residual_s is not None else '',
+        f'{match_confidence:.3f}' if match_confidence is not None else '',
+        f'{broadcast_confidence:.3f}' if broadcast_confidence is not None else '',
+        f'{ssr_confidence:.3f}' if ssr_confidence is not None else '',
         f'{dt_rx_ns:.3f}', f'{dt_rx_sigma:.3f}',
         f'{pps_error_ns:.1f}', f'{qerr_ns:.3f}' if qerr_ns is not None else '',
         best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
