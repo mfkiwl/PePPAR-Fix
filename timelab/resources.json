@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Time lab hardware inventory. Machine-readable resource list for Mayor scheduling of hardware-dependent work. See docs/hw-labels.md for the hw: bead label convention.",
-  "updated": "2026-03-19",
+  "updated": "2026-03-22",
 
   "hosts": {
     "TimeHat": {
@@ -11,6 +11,16 @@
       "platform": "Raspberry Pi 5",
       "os": "Raspberry Pi OS (Debian)",
       "interfaces": ["eth0 (igc, i226, 2.5G)"],
+      "location": "lab rack",
+      "status": "active"
+    },
+    "oxco": {
+      "description": "x86 host with Intel E810 OCXO NIC and onboard F9T",
+      "hw_label": "hw:oxco",
+      "hostname": "oxco",
+      "platform": "x86_64",
+      "os": "Linux",
+      "interfaces": ["eno1", "enp1s0f1np1", "E810 PHC /dev/ptp1"],
       "location": "lab rack",
       "status": "active"
     }
@@ -36,14 +46,14 @@
       "description": "Intel E810-XXVDA4T — OCXO, sub-ns timestamping, onboard F9T",
       "hw_label": "hw:E810",
       "model": "Intel E810-XXVDA4T",
-      "host": null,
+      "host": "oxco",
       "oscillator": "OCXO (4h holdover)",
       "phc_resolution": "sub-ns (7-bit)",
       "pps_io": ["2 SMA", "U.FL"],
-      "driver": "ice (out-of-tree DKMS required for PPS)",
+      "driver": "ice (in-tree works for EXTS/PPS in; PPS out likely needs Intel out-of-tree driver)",
       "gnss": "/dev/gnss0 (onboard ZED-F9T via I2C)",
       "interface": "PCIe 4.0 x16, 4x25G SFP28",
-      "status": "on_order",
+      "status": "installed",
       "ordered": "2026-03-17"
     },
     "SFN6322F-1": {
@@ -129,10 +139,10 @@
       "description": "Onboard ZED-F9T on E810-XXVDA4T (via ice driver I2C)",
       "hw_label": "hw:E810",
       "model": "u-blox ZED-F9T",
-      "host": null,
+      "host": "oxco",
       "port": "/dev/gnss0",
-      "notes": "Onboard receiver accessed via ice driver. On order with E810.",
-      "status": "on_order"
+      "notes": "Onboard receiver accessed via ice driver.",
+      "status": "installed"
     }
   },
 
@@ -141,16 +151,17 @@
       "description": "TAPR TICC #3 — time interval counter for validation",
       "hw_label": "hw:TICC-3",
       "model": "TAPR TICC",
-      "host": "TimeHat",
-      "port": "/dev/ticc",
+      "host": "oxco",
+      "port": "/dev/ticc3",
       "baud": 115200,
-      "serial": "95037323535351803130",
+      "serial": "44236313835351B0A091",
       "channels": {
-        "chA": "TimeHAT PHC PPS OUT (SDP0, disciplined)",
-        "chB": "F9T-3RD PPS (raw GPS reference)"
+        "chA": "oxco E810 upper SMA (intended PHC PPS OUT; currently inactive with in-tree ice driver)",
+        "chB": "not yet documented after the 2026-03-22 move"
       },
       "reference": "10 MHz from SV1AFN distribution amp (fed by Geppetto GPSDO)",
-      "status": "installed"
+      "status": "installed",
+      "notes": "Moved to oxco on 2026-03-22. Device appears as /dev/ticc3 on oxco via 99-timelab.rules. chA is wired to the E810 upper SMA. No live PPS seen yet because PPS out is not active on the current in-tree driver path."
     }
   },
 
@@ -181,16 +192,10 @@
       "signal": "1PPS (raw GPS, closes discipline loop)"
     },
     {
-      "from": "TimeHAT SDP0 (SMA1 J4)",
+      "from": "oxco E810 upper SMA",
       "to": "TICC-3 chA",
       "cable": "SMA",
-      "signal": "1PPS (disciplined PHC output)"
-    },
-    {
-      "from": "F9T-3RD (PPS out)",
-      "to": "TICC-3 chB",
-      "cable": "SMA (tee or split)",
-      "signal": "1PPS (raw GPS reference)"
+      "signal": "intended 1PPS (disciplined PHC output); currently inactive on in-tree ice driver"
     },
     {
       "from": "SV1AFN distribution amp",
@@ -206,7 +211,7 @@
     },
     {
       "from": "TICC-3 (USB)",
-      "to": "TimeHat (USB port)",
+      "to": "oxco (USB port)",
       "cable": "USB",
       "signal": "serial data (time interval measurements)"
     }

@@ -81,6 +81,20 @@ Current caveats:
   - `deferred_waiting = 12`
   - `dropped_outside_window = 1`
   - `dropped_unmatched = 1`
+- a later bug was found in the servo step path:
+  - PPS history captured before a PHC step was being reused after the step
+  - that caused `timehat` to keep matching against stale pre-step PPS events
+    and hold the wrong whole-second offset
+  - clearing PPS history after each PHC step fixed that failure mode
+
+Latest validated result on `timehat` after the PPS-history purge:
+
+- a patched 5-minute run stayed at `epoch_offset = 0` for all `83` logged
+  epochs
+- self-reported `pps_error_ns` TDEV improved from about `176 ms` at `τ = 1s`
+  in the bad run to about `18.4 ms` at `τ = 1s`
+- the path is still not “good,” but it is no longer obviously broken at the
+  whole-second level
 
 Wiring and board behavior:
 
@@ -119,6 +133,37 @@ Additional operational note:
   GNSS serial device used by `PePPAR-Fix`
 - for direct PePPAR-Fix testing, that service must be inactive so `/dev/gnss-top`
   can be opened exclusively
+
+## TICC move status
+
+As of `2026-03-22`, `TICC #3` has been moved to `oxco`.
+
+Current verified state on `oxco`:
+
+- udev naming works:
+  - `/dev/ticc3 -> /dev/ttyACM0`
+  - `ID_SERIAL_SHORT=44236313835351B0A091`
+- `bob` has been added to the `dialout` group on `oxco`
+- the lab-wide udev rule has been installed at:
+  - `/etc/udev/rules.d/99-timelab.rules`
+- `TICC #3 chA` is wired to the E810 upper SMA on `oxco`
+
+Current unverified state after the move:
+
+- live PPS timestamps on `TICC #3 chA/chB`
+- `TICC #3 chB` cabling after the move
+
+A boot-aware probe of `/dev/ticc3` on `oxco` completed with zero timestamp
+events, so the device is present and named correctly but the post-move PPS
+wiring has not yet been confirmed by measurement.
+
+Current interpretation:
+
+- the lack of `TICC #3 chA` activity is consistent with the present software
+  path on `oxco`
+- E810 PPS input / EXTS works with the in-tree `ice` driver
+- E810 PPS output appears to require Intel's out-of-tree timing driver path
+  before the upper SMA will emit a disciplined 1 PPS signal
 
 ## GNSS transport differences
 
@@ -191,6 +236,8 @@ Current practical behavior:
 - PPS capture works
 - PHC can be disciplined
 - PHC should be treated as `tai` when used as a PTP-facing clock
+- PPS output on the SMA connectors is not currently active through the in-tree
+  `ice` path we are using
 
 ### i226 on `timehat`
 

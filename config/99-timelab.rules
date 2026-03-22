@@ -1,0 +1,22 @@
+# Lab-wide GNSS and instrument udev rules
+# Only devices with unique serial numbers get stable symlinks.
+# Devices without unique serials (PX1125T, Prolific console, F9T EVKs)
+# must be identified by applications at runtime.
+#
+# Deploy to lab hosts:
+#   sudo cp 99-timelab.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# -- TICCs (Arduino Mega, unique serial per unit) --
+# TICC #1
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="2341", ENV{ID_SERIAL_SHORT}=="95037323535351803130", SYMLINK+="ticc1", MODE="0664", GROUP="dialout"
+# TICC #2
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="2341", ENV{ID_SERIAL_SHORT}=="44236313835351B02001", SYMLINK+="ticc2", MODE="0664", GROUP="dialout"
+# TICC #3
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="2341", ENV{ID_SERIAL_SHORT}=="44236313835351B0A091", SYMLINK+="ticc3", MODE="0664", GROUP="dialout"
+
+# -- NEO-F10T on ArduSimple (FTDI FT230X, unique serial) --
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="0403", ENV{ID_SERIAL_SHORT}=="D30GD1PE", SYMLINK+="f10t", MODE="0664", GROUP="dialout"
+
+# -- PTP hardware clocks (igc driver, TimeHAT / OTC boards) --
+SUBSYSTEM=="ptp", KERNEL=="ptp[0-9]*", DRIVERS=="igc", MODE="0664", GROUP="dialout"

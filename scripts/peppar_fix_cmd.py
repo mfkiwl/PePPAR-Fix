@@ -907,6 +907,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         else:
             log.error(f"  phc_ctl adj failed: {result.stderr.strip()}")
 
+        _purge_pps_state(ctx)
+
         # Reset servo and scheduler
         from peppar_fix import PIServo, DisciplineScheduler
         ctx['servo'] = PIServo(BASE_KP, BASE_KI, max_ppb=ctx['caps']['max_adj'])
@@ -1036,6 +1038,21 @@ def _cleanup_servo(ctx):
     if ctx['log_f']:
         ctx['log_f'].close()
     log.info("PHC servo cleaned up")
+
+
+def _purge_pps_state(ctx):
+    """Drop PPS events captured before a PHC step.
+
+    Historical EXTS events are invalid after stepping the PHC because they were
+    timestamped on the old PHC timescale.
+    """
+    with ctx['pps_history_lock']:
+        ctx['pps_history'].clear()
+    while True:
+        try:
+            ctx['pps_queue'].get_nowait()
+        except queue.Empty:
+            break
 
 
 def _queue_put_drop_oldest(qobj, item):

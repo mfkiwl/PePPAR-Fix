@@ -659,6 +659,13 @@ def run_steady_state(obs_queue, stop_event, corrections, known_ecef, args,
                     else:
                         log.error(f"  phc_ctl adj failed: {result.stderr.strip()}")
 
+                    pps_history.clear()
+                    while True:
+                        try:
+                            pps_queue.get_nowait()
+                        except queue.Empty:
+                            break
+
                     servo = PIServo(BASE_KP, BASE_KI, max_ppb=caps['max_adj'])
                     scheduler = DisciplineScheduler(base_interval=1)
                     phase = 'tracking'

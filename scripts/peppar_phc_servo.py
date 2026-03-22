@@ -577,6 +577,13 @@ def run_servo(args):
                     log.error(f"  phc_ctl adj failed (rc={result.returncode}): "
                               f"{result.stderr.strip()} {result.stdout.strip()}")
 
+                pps_history.clear()
+                while True:
+                    try:
+                        pps_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
                 servo = PIServo(BASE_KP, BASE_KI, max_ppb=caps['max_adj'])
                 scheduler = DisciplineScheduler(
                     base_interval=args.discipline_interval,
