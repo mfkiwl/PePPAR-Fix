@@ -1,7 +1,40 @@
 """Event envelopes for cross-stream correlation by local monotonic time."""
 
 from dataclasses import dataclass
+import math
 from typing import Optional
+
+
+def estimate_correlation_confidence(
+    *,
+    queue_remains: Optional[bool],
+    parse_age_s: Optional[float],
+    queued_base: float = 0.65,
+    clear_base: float = 1.0,
+    age_half_life_s: float = 0.5,
+    min_confidence: float = 0.05,
+) -> float:
+    """Estimate confidence of source-time to host-monotonic mapping.
+
+    Confidence is highest when the reader consumed an event without any queued
+    bytes/events remaining and the event was handed to user mode immediately.
+    It falls when backlog is visible or when the event sits in user space long
+    enough for that receive timestamp to become stale.
+    """
+    base = clear_base if not queue_remains else queued_base
+    if parse_age_s is None or parse_age_s <= 0.0:
+        return max(min_confidence, min(1.0, base))
+    age_half_life_s = max(1e-3, age_half_life_s)
+    decay = math.exp(-math.log(2.0) * (parse_age_s / age_half_life_s))
+    return max(min_confidence, min(1.0, base * decay))
+
+
+def merge_correlation_confidence(*values: Optional[float]) -> float:
+    """Combine per-stream confidence values conservatively."""
+    present = [float(v) for v in values if v is not None]
+    if not present:
+        return 1.0
+    return max(0.0, min(present))
 
 
 @dataclass(frozen=True)

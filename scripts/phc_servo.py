@@ -114,7 +114,8 @@ from realtime_ppp import serial_reader, ntrip_reader, QErrStore
 from peppar_fix import (
     CorrectionFreshnessGate, PtpDevice, PIServo, ErrorSource, compute_error_sources,
     DisciplineScheduler, PositionWatchdog, StrictCorrelationGate,
-    match_pps_event_from_history, save_position, load_position,
+    estimate_correlation_confidence, match_pps_event_from_history,
+    save_position, load_position,
 )
 from peppar_fix.event_time import PpsEvent
 from ntrip_caster import NtripCasterServer, rawx_to_caster_obs
@@ -160,6 +161,18 @@ def apply_ptp_profile(args):
         args.require_ssr = profile.get("require_ssr", args.require_ssr)
     if args.max_ssr_age_s is None:
         args.max_ssr_age_s = profile.get("max_ssr_age_s", args.max_ssr_age_s)
+    if args.min_correlation_confidence is None:
+        args.min_correlation_confidence = profile.get(
+            "min_correlation_confidence", args.min_correlation_confidence
+        )
+    if args.min_broadcast_confidence is None:
+        args.min_broadcast_confidence = profile.get(
+            "min_broadcast_confidence", args.min_broadcast_confidence
+        )
+    if args.min_ssr_confidence is None:
+        args.min_ssr_confidence = profile.get(
+            "min_ssr_confidence", args.min_ssr_confidence
+        )
 
 
 
@@ -508,13 +521,18 @@ def run_servo(args):
             event = ptp.read_extts(timeout_ms=1500)
             if event is None:
                 continue
-            phc_sec, phc_nsec, index, queue_remains = event
+            phc_sec, phc_nsec, index, recv_mono, queue_remains, parse_age_s = event
             pps_event = PpsEvent(
                 phc_sec=phc_sec,
                 phc_nsec=phc_nsec,
                 index=index,
-                recv_mono=time.monotonic(),
+                recv_mono=recv_mono,
                 queue_remains=queue_remains,
+                parse_age_s=parse_age_s,
+                correlation_confidence=estimate_correlation_confidence(
+                    queue_remains=queue_remains,
+                    parse_age_s=parse_age_s,
+                ),
             )
             dropped = queue_put_drop_oldest(
                 pps_queue, pps_event
@@ -601,6 +619,7 @@ def run_servo(args):
                         min_window_s=min_window_s,
                         max_window_s=max_window_s,
                     ),
+                min_confidence=args.min_correlation_confidence,
             )
             if obs_event is None:
                 if n_epochs % 10 == 0 and obs_history:
@@ -614,6 +633,8 @@ def run_servo(args):
                 max_broadcast_age_s=args.max_broadcast_age_s,
                 require_ssr=args.require_ssr,
                 max_ssr_age_s=args.max_ssr_age_s,
+                min_broadcast_confidence=args.min_broadcast_confidence,
+                min_ssr_confidence=args.min_ssr_confidence,
             )
             if not ok_corr:
                 if n_epochs % 10 == 0:
@@ -699,7 +720,7 @@ def run_servo(args):
                         log.info(f"{driver.name} → fixed-position timing mode "
                                  f"({lat:.6f}, {lon:.6f}, {alt:.1f}m)")
 
-            pps_event, _epoch_delta_s, pps_match_recv_dt_s = pps_match
+            pps_event, _epoch_delta_s, pps_match_recv_dt_s, _pps_match_confidence = pps_match
             phc_sec, phc_nsec, extts_index = pps_event
             target_sec = target_timescale_sec(gps_time)
             phc_rounded_sec = pps_event.rounded_sec()
@@ -929,6 +950,10 @@ def main():
                     help="Require fresh SSR state before EKF updates")
     ap.add_argument("--max-ssr-age-s", type=float, default=None,
                     help="Maximum host-monotonic age for SSR state when --require-ssr is set (default: 30)")
+    ap.add_argument("--min-broadcast-confidence", type=float, default=None,
+                    help="Minimum acceptable confidence for broadcast correction timing")
+    ap.add_argument("--min-ssr-confidence", type=float, default=None,
+                    help="Minimum acceptable confidence for SSR correction timing")
 
     # PTP
     ap.add_argument("--ptp-profile", choices=["i226", "e810"],
@@ -945,6 +970,8 @@ def main():
                     help="Explicitly program PTP pin function before enabling EXTS")
     ap.add_argument("--phc-timescale", choices=["gps", "utc", "tai"], default=None,
                     help="Target PHC timescale for PPS alignment (profile/default if omitted)")
+    ap.add_argument("--min-correlation-confidence", type=float, default=None,
+                    help="Minimum acceptable confidence for observation/PPS correlation")
 
     # Servo tuning
     ap.add_argument("--warmup", type=int, default=20,
@@ -997,6 +1024,12 @@ def main():
         args.require_ssr = False
     if args.max_ssr_age_s is None:
         args.max_ssr_age_s = 30.0
+    if args.min_correlation_confidence is None:
+        args.min_correlation_confidence = 0.5
+    if args.min_broadcast_confidence is None:
+        args.min_broadcast_confidence = 0.0
+    if args.min_ssr_confidence is None:
+        args.min_ssr_confidence = 0.0
     run_servo(args)
 
 

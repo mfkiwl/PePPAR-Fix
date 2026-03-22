@@ -32,6 +32,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+from peppar_fix.event_time import estimate_correlation_confidence
+
 log = logging.getLogger(__name__)
 
 # RTCM3 frame constants
@@ -274,7 +276,10 @@ class NtripStream:
                     parsed = result[1]
                 else:
                     parsed = result
-                confidence = 1.0 if not queue_remains else 0.5
+                confidence = estimate_correlation_confidence(
+                    queue_remains=queue_remains,
+                    parse_age_s=0.0,
+                )
                 self._msgs_decoded += 1
                 yield parsed, {
                     "recv_mono": parse_mono,

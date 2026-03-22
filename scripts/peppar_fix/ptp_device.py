@@ -7,6 +7,7 @@ import fcntl
 import os
 import select
 import struct
+import time
 
 # ── PTP ioctl constants (from linux/ptp_clock.h) ─────────────────────── #
 
@@ -111,17 +112,18 @@ class PtpDevice:
     def read_extts(self, timeout_ms=1500):
         """Read one external timestamp event.
 
-        Returns (sec, nsec, index, queue_remains) or None.
+        Returns (sec, nsec, index, recv_mono, queue_remains, parse_age_s) or None.
         """
         r, _, _ = select.select([self.fd], [], [], timeout_ms / 1000.0)
         if not r:
             return None
         data = os.read(self.fd, PTP_EXTTS_EVENT_SIZE)
+        recv_mono = time.monotonic()
         if len(data) < 20:
             return None
         sec, nsec, _reserved, index = struct.unpack_from('<qIII', data, 0)
         r_more, _, _ = select.select([self.fd], [], [], 0.0)
-        return (sec, nsec, index, bool(r_more))
+        return (sec, nsec, index, recv_mono, bool(r_more), 0.0)
 
     def adjfine(self, ppb):
         """Adjust PHC frequency by ppb (parts per billion)."""

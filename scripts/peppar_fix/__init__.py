@@ -11,6 +11,10 @@ from peppar_fix.correlation_gate import (
     StrictCorrelationGate,
     match_pps_event_from_history,
 )
+from peppar_fix.event_time import (
+    estimate_correlation_confidence,
+    merge_correlation_confidence,
+)
 from peppar_fix import receiver
 
 __all__ = [
@@ -22,6 +26,8 @@ __all__ = [
     'StrictCorrelationGate',
     'CorrectionFreshnessGate',
     'match_pps_event_from_history',
+    'estimate_correlation_confidence',
+    'merge_correlation_confidence',
     'save_position', 'load_position',
     'receiver',
 ]

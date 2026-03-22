@@ -235,12 +235,19 @@ The confidence of a sample should depend on:
 - whether the packet or line was read promptly
 - whether the parse layer can estimate packet age inside userspace
 
-This suggests a future shared mechanism:
+This is now partly implemented:
 
 - each reader returns `recv_mono` plus a `queue_remains` boolean
 - the parser combines embedded source time with that read metadata
 - the code derives a confidence score for that sample's source-time to
   host-monotonic relationship
+- GNSS, PPS/EXTTS, RTCM, and TICC now all carry a first-pass
+  `correlation_confidence`
+- the strict observation/PPS gate now treats low-confidence matches
+  differently from prompt ones instead of treating them all as equal
+
+What is still future work:
+
 - a slow-moving estimator such as an EMA can track the nominal relationship,
   while sample confidence expresses how much to trust each new update
 
@@ -540,11 +547,15 @@ What happens:
   - consume a valid matched observation/PPS pair
   - defer while waiting for more companion events
   - drop an observation once the window proves it can no longer match
+- the gate now also enforces a configurable minimum correlation confidence,
+  so queued or aged samples can be rejected even when they are nominally
+  in-window
 - candidate PPS events are chosen from history using:
   - observation `recv_mono`
   - PPS `recv_mono`
   - acceptable receive-time window
   - closeness of rounded PHC second to target GNSS/UTC/TAI second
+  - combined sample confidence from the observation and PPS readers
 
 Why it matters:
 
@@ -552,8 +563,30 @@ Why it matters:
 - the sink contract is explicit and measurable through gate stats:
   - `consumed_correlated`
   - `deferred_waiting`
+  - `dropped_low_confidence`
   - `dropped_unmatched`
   - `dropped_outside_window`
+
+Recent `oxco` result:
+
+- baseline run:
+  - `consumed_correlated=15`
+  - `dropped_low_confidence=0`
+- targeted GNSS/PTP stutter run:
+  - `consumed_correlated=1`
+  - `deferred_waiting=8`
+  - `dropped_low_confidence=4`
+  - `dropped_unmatched=1`
+  - `dropped_outside_window=1`
+
+Current knobs:
+
+- `min_correlation_confidence`
+- `min_broadcast_confidence`
+- `min_ssr_confidence`
+
+Those are now explicit CLI/profile settings in the live entrypoints rather
+than hidden constants in the gate logic.
 
 ### F. Servo timescale correlation
 

@@ -192,6 +192,8 @@ class SSRState:
         self._update_counts = defaultdict(int)
         self._iod_ssr = None
         self._last_update_mono = None
+        self._last_update_queue_remains = None
+        self._last_update_correlation_confidence = None
         self._last_orbit_update_mono = None
         self._last_clock_update_mono = None
         self._last_bias_update_mono = None
@@ -266,6 +268,8 @@ class SSRState:
             self._last_bias_update_mono = rx_mono
 
         self._last_update_mono = rx_mono
+        self._last_update_queue_remains = queue_remains
+        self._last_update_correlation_confidence = correlation_confidence
         self._update_counts[subtype] += 1
         return subtype
 
@@ -502,6 +506,14 @@ class SSRState:
         return self._last_update_mono
 
     @property
+    def last_update_queue_remains(self):
+        return self._last_update_queue_remains
+
+    @property
+    def last_update_correlation_confidence(self):
+        return self._last_update_correlation_confidence
+
+    @property
     def last_orbit_update_mono(self):
         return self._last_orbit_update_mono
 
@@ -642,6 +654,10 @@ class RealtimeCorrections:
             "ssr_age_s": _age(self.ssr.last_update_mono),
             "ssr_orbit_age_s": _age(self.ssr.last_orbit_update_mono),
             "ssr_clock_age_s": _age(self.ssr.last_clock_update_mono),
+            "broadcast_queue_remains": self.beph.last_update_queue_remains,
+            "ssr_queue_remains": self.ssr.last_update_queue_remains,
+            "broadcast_confidence": self.beph.last_update_correlation_confidence,
+            "ssr_confidence": self.ssr.last_update_correlation_confidence,
             "broadcast_ready": self.beph.n_satellites > 0 and self.beph.last_update_mono is not None,
             "ssr_ready": self.ssr.last_update_mono is not None,
         }

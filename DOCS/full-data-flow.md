@@ -1423,6 +1423,15 @@ Progress so far:
   confidence estimate
 - RTCM ingest now carries host-side timing metadata alongside decoded messages
   and stores that metadata in SSR correction objects
+- TICC events now carry `recv_mono`, `queue_remains`, and a first-pass
+  confidence estimate
+- strict observation/PPS gates now enforce a minimum confidence floor instead
+  of treating all in-window matches as equally trustworthy
+- sink-side confidence floors are now explicit configuration, not only code
+  constants:
+  - `min_correlation_confidence`
+  - `min_broadcast_confidence`
+  - `min_ssr_confidence`
 
 ### M5. Make sink policy explicit at consumption points
 
@@ -1557,6 +1566,12 @@ Why it matters:
   false confidence in event matches
 - for strict sinks, the meaningful pass criterion is not “the sink ran” but
   “the gate consumed only correlated data and deferred or dropped the rest”
+- the current implementation can now distinguish:
+  - matched and consumed
+  - deferred waiting for a better match
+  - dropped outside window
+  - dropped unmatched
+  - dropped for low confidence
 
 ## Recommended target model
 

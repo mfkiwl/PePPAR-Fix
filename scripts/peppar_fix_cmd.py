@@ -55,6 +55,7 @@ from peppar_fix import (
     CorrectionFreshnessGate,
     PositionWatchdog,
     StrictCorrelationGate,
+    estimate_correlation_confidence,
     match_pps_event_from_history,
     load_position,
     save_position,
@@ -104,6 +105,18 @@ def apply_ptp_profile(args):
         args.require_ssr = profile.get("require_ssr", args.require_ssr)
     if args.max_ssr_age_s is None:
         args.max_ssr_age_s = profile.get("max_ssr_age_s", args.max_ssr_age_s)
+    if args.min_correlation_confidence is None:
+        args.min_correlation_confidence = profile.get(
+            "min_correlation_confidence", args.min_correlation_confidence
+        )
+    if args.min_broadcast_confidence is None:
+        args.min_broadcast_confidence = profile.get(
+            "min_broadcast_confidence", args.min_broadcast_confidence
+        )
+    if args.min_ssr_confidence is None:
+        args.min_ssr_confidence = profile.get(
+            "min_ssr_confidence", args.min_ssr_confidence
+        )
 
 
 # ── Convergence detection (from peppar_find_position) ─────────────────── #
@@ -254,6 +267,8 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
             max_broadcast_age_s=args.max_broadcast_age_s,
             require_ssr=args.require_ssr,
             max_ssr_age_s=args.max_ssr_age_s,
+            min_broadcast_confidence=args.min_broadcast_confidence,
+            min_ssr_confidence=args.min_ssr_confidence,
         )
         run_bootstrap.last_correction_gate_stats = correction_gate.stats.as_dict()
         if not ok_corr:
@@ -432,6 +447,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                             min_window_s=min_window_s,
                             max_window_s=max_window_s,
                         ),
+                    min_confidence=args.min_correlation_confidence,
                 )
                 dropped_obs = gate.stats.dropped_unmatched - dropped_before
                 if obs_event is None:
@@ -449,6 +465,8 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 max_broadcast_age_s=args.max_broadcast_age_s,
                 require_ssr=args.require_ssr,
                 max_ssr_age_s=args.max_ssr_age_s,
+                min_broadcast_confidence=args.min_broadcast_confidence,
+                min_ssr_confidence=args.min_ssr_confidence,
             )
             if not ok_corr:
                 if n_epochs % 10 == 0:
@@ -623,14 +641,18 @@ def _setup_servo(args, known_ecef):
             if event is None:
                 continue
             delay_injector.maybe_inject_delay(f"ptp:{args.servo}")
-            phc_sec, phc_nsec, index, queue_remains = event
+            phc_sec, phc_nsec, index, recv_mono, queue_remains, parse_age_s = event
             pps_event = PpsEvent(
                 phc_sec=phc_sec,
                 phc_nsec=phc_nsec,
                 index=index,
-                recv_mono=time.monotonic(),
+                recv_mono=recv_mono,
                 queue_remains=queue_remains,
-                correlation_confidence=1.0 if not queue_remains else 0.5,
+                parse_age_s=parse_age_s,
+                correlation_confidence=estimate_correlation_confidence(
+                    queue_remains=queue_remains,
+                    parse_age_s=parse_age_s,
+                ),
             )
             with pps_history_lock:
                 pps_history.append(pps_event)
@@ -720,7 +742,7 @@ def _find_pps_event_for_obs(ctx, obs_event, target_sec, timeout=0.5,
     deadline = time.monotonic() + timeout
 
     while True:
-        event, delta, recv_dt, _ = _match_pps_event_from_history(
+        event, delta, recv_dt, _, _ = _match_pps_event_from_history(
             ctx, obs_event, target_sec,
             min_window_s=min_window_s,
             max_window_s=max_window_s,
@@ -800,7 +822,7 @@ def _servo_epoch(ctx, args, filt, obs_event, n_epochs,
     gps_time = obs_event.gps_time
     target_sec = _target_timescale_sec(gps_time, args)
     if pps_match is not None:
-        pps_event, pps_match_delta_s, pps_match_recv_dt_s = pps_match
+        pps_event, pps_match_delta_s, pps_match_recv_dt_s, _match_confidence = pps_match
     else:
         try:
             pps_event, pps_match_delta_s, pps_match_recv_dt_s = _find_pps_event_for_obs(
@@ -1247,6 +1269,10 @@ Two-phase operation:
                        help="Require fresh SSR state before EKF updates")
     ntrip.add_argument("--max-ssr-age-s", type=float, default=None,
                        help="Maximum host-monotonic age for SSR state when --require-ssr is set (default: 30)")
+    ntrip.add_argument("--min-broadcast-confidence", type=float, default=None,
+                       help="Minimum acceptable confidence for broadcast correction timing")
+    ntrip.add_argument("--min-ssr-confidence", type=float, default=None,
+                       help="Minimum acceptable confidence for SSR correction timing")
 
     # PHC servo (optional)
     servo = ap.add_argument_group("PHC servo (optional)")
@@ -1264,6 +1290,8 @@ Two-phase operation:
                        help="Explicitly program PTP pin function before enabling EXTS")
     servo.add_argument("--phc-timescale", choices=["gps", "utc", "tai"], default=None,
                        help="Target PHC timescale for PPS alignment (profile/default if omitted)")
+    servo.add_argument("--min-correlation-confidence", type=float, default=None,
+                       help="Minimum acceptable confidence for observation/PPS correlation")
     servo.add_argument("--warmup", type=int, default=20,
                        help="Servo warmup epochs (default: 20)")
     servo.add_argument("--track-kp", type=float, default=0.3,
@@ -1310,6 +1338,12 @@ Two-phase operation:
         args.require_ssr = False
     if args.max_ssr_age_s is None:
         args.max_ssr_age_s = 30.0
+    if args.min_correlation_confidence is None:
+        args.min_correlation_confidence = 0.5
+    if args.min_broadcast_confidence is None:
+        args.min_broadcast_confidence = 0.0
+    if args.min_ssr_confidence is None:
+        args.min_ssr_confidence = 0.0
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

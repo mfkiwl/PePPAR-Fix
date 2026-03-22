@@ -70,7 +70,11 @@ from ppp_corrections import OSBParser, CLKFile
 from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections
 from ntrip_client import NtripStream
-from peppar_fix.event_time import ObservationEvent, RtcmEvent
+from peppar_fix.event_time import (
+    ObservationEvent,
+    RtcmEvent,
+    estimate_correlation_confidence,
+)
 from peppar_fix.fault_injection import get_delay_injector
 
 log = logging.getLogger(__name__)
@@ -414,7 +418,10 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         queue_remains = bool(getattr(stream, 'in_waiting', 0))
                     recv_utc = datetime.now(timezone.utc)
                     parse_age_s = max(0.0, now_mono - recv_mono)
-                    confidence = 1.0 if not queue_remains else 0.5
+                    confidence = estimate_correlation_confidence(
+                        queue_remains=queue_remains,
+                        parse_age_s=parse_age_s,
+                    )
                     obs_queue.put(ObservationEvent(
                         gps_time=gps_time,
                         observations=observations,

@@ -49,6 +49,7 @@ from realtime_ppp import serial_reader, ntrip_reader, QErrStore
 from peppar_fix import (
     CorrectionFreshnessGate,
     StrictCorrelationGate,
+    estimate_correlation_confidence,
     load_position,
     match_pps_event_from_history,
     save_position,
@@ -231,6 +232,8 @@ def run_bootstrap(obs_queue, stop_event, corrections, beph, args, systems):
                 max_broadcast_age_s=args.max_broadcast_age_s,
                 require_ssr=args.require_ssr,
                 max_ssr_age_s=args.max_ssr_age_s,
+                min_broadcast_confidence=args.min_broadcast_confidence,
+                min_ssr_confidence=args.min_ssr_confidence,
             )
             if not ok_corr:
                 if n_epochs % 10 == 0:
@@ -418,13 +421,18 @@ def run_steady_state(obs_queue, stop_event, corrections, known_ecef, args,
                 event = ptp.read_extts(timeout_ms=1500)
                 if event is None:
                     continue
-                phc_sec, phc_nsec, index, queue_remains = event
+                phc_sec, phc_nsec, index, recv_mono, queue_remains, parse_age_s = event
                 pps_event = PpsEvent(
                     phc_sec=phc_sec,
                     phc_nsec=phc_nsec,
                     index=index,
-                    recv_mono=time.monotonic(),
+                    recv_mono=recv_mono,
                     queue_remains=queue_remains,
+                    parse_age_s=parse_age_s,
+                    correlation_confidence=estimate_correlation_confidence(
+                        queue_remains=queue_remains,
+                        parse_age_s=parse_age_s,
+                    ),
                 )
                 dropped = queue_put_drop_oldest(pps_queue, pps_event)
                 if dropped:
@@ -523,6 +531,7 @@ def run_steady_state(obs_queue, stop_event, corrections, known_ecef, args,
                             min_window_s=min_window_s,
                             max_window_s=max_window_s,
                         ),
+                    min_confidence=args.min_correlation_confidence,
                 )
                 if obs_event is None:
                     if n_epochs % 10 == 0 and obs_history:
@@ -536,6 +545,8 @@ def run_steady_state(obs_queue, stop_event, corrections, known_ecef, args,
                 max_broadcast_age_s=args.max_broadcast_age_s,
                 require_ssr=args.require_ssr,
                 max_ssr_age_s=args.max_ssr_age_s,
+                min_broadcast_confidence=args.min_broadcast_confidence,
+                min_ssr_confidence=args.min_ssr_confidence,
             )
             if not ok_corr:
                 if n_epochs % 10 == 0:
@@ -596,7 +607,7 @@ def run_steady_state(obs_queue, stop_event, corrections, known_ecef, args,
             source_error_ns = 0.0
 
             if servo_enabled:
-                pps_event, _epoch_delta_s, _pps_match_recv_dt_s = pps_match
+                pps_event, _epoch_delta_s, _pps_match_recv_dt_s, _pps_match_confidence = pps_match
                 phc_sec = pps_event.phc_sec
                 phc_nsec = pps_event.phc_nsec
 
@@ -917,6 +928,10 @@ Examples:
                        help="Require fresh SSR state before EKF updates")
     ntrip.add_argument("--max-ssr-age-s", type=float, default=30.0,
                        help="Maximum host-monotonic age for SSR state when --require-ssr is set (default: 30)")
+    ntrip.add_argument("--min-broadcast-confidence", type=float, default=0.0,
+                       help="Minimum acceptable confidence for broadcast correction timing")
+    ntrip.add_argument("--min-ssr-confidence", type=float, default=0.0,
+                       help="Minimum acceptable confidence for SSR correction timing")
 
     # Position
     pos = ap.add_argument_group("Position")
@@ -937,6 +952,8 @@ Examples:
                      help="PTP device to discipline (e.g. /dev/ptp0)")
     phc.add_argument("--pps-pin", type=int, default=1,
                      help="SDP pin for PPS input (default: 1)")
+    phc.add_argument("--min-correlation-confidence", type=float, default=0.5,
+                     help="Minimum acceptable confidence for observation/PPS correlation")
 
     # Caster output (future)
     ap.add_argument("--caster", dest="caster_out", default=None, metavar="PORT",

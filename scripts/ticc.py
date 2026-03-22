@@ -51,7 +51,7 @@ import time as _time
 
 import serial
 
-from peppar_fix.event_time import TiccEvent
+from peppar_fix.event_time import TiccEvent, estimate_correlation_confidence
 
 # Integer part DOT 11-or-12 fractional digits whitespace ch followed by A or B.
 _LINE_RE = re.compile(r"^(\d+)\.(\d{11,12})\s+(ch[AB])$")
@@ -140,6 +140,7 @@ class Ticc:
         """Yield TiccEvent records with host receive timestamps."""
         for raw in self._ser:
             recv_mono = _time.monotonic()
+            queue_remains = bool(getattr(self._ser, "in_waiting", 0))
             line = raw.decode(errors="replace").strip()
             m = _LINE_RE.match(line)
             if not m:
@@ -151,4 +152,10 @@ class Ticc:
                 ref_sec=ref_sec,
                 ref_ps=ref_ps,
                 recv_mono=recv_mono,
+                queue_remains=queue_remains,
+                parse_age_s=0.0,
+                correlation_confidence=estimate_correlation_confidence(
+                    queue_remains=queue_remains,
+                    parse_age_s=0.0,
+                ),
             )
