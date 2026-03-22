@@ -174,6 +174,18 @@ def build_tmode_fixed_msg(ecef, driver=None):
     return driver.build_tmode_fixed_msg(ecef)
 
 
+def get_latest_pps_event(pps_queue, timeout=0.5):
+    """Return the newest queued PPS event, discarding older stale ones."""
+    event = pps_queue.get(timeout=timeout)
+    dropped = 0
+    while True:
+        try:
+            event = pps_queue.get_nowait()
+            dropped += 1
+        except queue.Empty:
+            return event, dropped
+
+
 # ── Main servo loop ──────────────────────────────────────────────────────── #
 
 def run_servo(args):
@@ -455,16 +467,16 @@ def run_servo(args):
             event = ptp.read_extts(timeout_ms=1500)
             if event is None:
                 continue
-            phc_sec, phc_nsec, _idx = event
+            phc_sec, phc_nsec, index = event
             try:
-                pps_queue.put_nowait((phc_sec, phc_nsec))
+                pps_queue.put_nowait((phc_sec, phc_nsec, index))
             except queue.Full:
                 while not pps_queue.empty():
                     try:
                         pps_queue.get_nowait()
                     except queue.Empty:
                         break
-                pps_queue.put_nowait((phc_sec, phc_nsec))
+                pps_queue.put_nowait((phc_sec, phc_nsec, index))
 
     t_extts = threading.Thread(target=extts_reader, daemon=True)
     t_extts.start()
@@ -505,6 +517,8 @@ def run_servo(args):
         log_w = csv.writer(log_f)
         log_w.writerow([
             'timestamp', 'gps_second', 'phc_sec', 'phc_nsec',
+            'phc_rounded_sec', 'epoch_offset_s', 'timescale_error_ns',
+            'extts_index', 'stale_pps_dropped', 'pps_queue_depth',
             'dt_rx_ns', 'dt_rx_sigma_ns', 'pps_error_ns', 'qerr_ns',
             'source', 'source_error_ns', 'source_confidence_ns',
             'adjfine_ppb', 'phase', 'n_meas', 'gain_scale',
@@ -601,15 +615,21 @@ def run_servo(args):
 
             # Get the PPS event for this epoch (1:1 pairing)
             try:
-                phc_sec, phc_nsec = pps_queue.get(timeout=0.5)
+                (phc_sec, phc_nsec, extts_index), stale_pps_dropped = get_latest_pps_event(
+                    pps_queue, timeout=0.5
+                )
             except queue.Empty:
                 if n_epochs % 10 == 0:
                     log.info(f"  [{n_epochs}] No PPS event for this epoch")
                 continue
 
             target_sec = target_timescale_sec(gps_time)
+            phc_rounded_sec = phc_sec if phc_nsec < 500_000_000 else phc_sec + 1
+            epoch_offset = phc_rounded_sec - target_sec
             ts_str = gps_time.strftime('%Y-%m-%d %H:%M:%S')
             pps_error_ns = pps_fractional_error(phc_sec, phc_nsec)
+            timescale_error_ns = epoch_offset * 1_000_000_000 + pps_error_ns
+            pps_queue_depth = pps_queue.qsize()
 
             # Get qErr from TIM-TP (None if stale or unavailable)
             qerr_ns, _ = qerr_store.get()
@@ -623,7 +643,6 @@ def run_servo(args):
             # ── Bootstrap: warmup ──────────────────────────────────────
             if phase == 'warmup':
                 if n_epochs >= warmup_epochs:
-                    epoch_offset = phc_gps_offset_s(phc_sec, phc_nsec, target_sec)
                     log.info(f"  Warmup complete ({n_epochs} epochs, "
                              f"best={best}, epoch_offset={epoch_offset}s)")
                     if epoch_offset != 0 or abs(best.error_ns) > STEP_THRESHOLD_NS:
@@ -638,6 +657,8 @@ def run_servo(args):
                 if log_w:
                     log_w.writerow([
                         ts_str, target_sec, phc_sec, phc_nsec,
+                        phc_rounded_sec, epoch_offset, f'{timescale_error_ns:.1f}',
+                        extts_index, stale_pps_dropped, pps_queue_depth,
                         f'{dt_rx_ns:.3f}', f'{dt_rx_sigma:.3f}',
                         f'{pps_error_ns:.1f}', f'{qerr_ns:.3f}' if qerr_ns is not None else '',
                         best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
@@ -649,7 +670,6 @@ def run_servo(args):
 
             # ── Bootstrap: step ────────────────────────────────────────
             if phase == 'step':
-                epoch_offset = phc_gps_offset_s(phc_sec, phc_nsec, target_sec)
                 # Use the best available error source for the step
                 total_offset_ns = epoch_offset * 1_000_000_000 + best.error_ns
                 log.info(f"  STEP: epoch_offset={epoch_offset}s, "
@@ -754,6 +774,8 @@ def run_servo(args):
             if log_w:
                 log_w.writerow([
                     ts_str, target_sec, phc_sec, phc_nsec,
+                    phc_rounded_sec, epoch_offset, f'{timescale_error_ns:.1f}',
+                    extts_index, stale_pps_dropped, pps_queue_depth,
                     f'{dt_rx_ns:.3f}', f'{dt_rx_sigma:.3f}',
                     f'{pps_error_ns:.1f}', f'{qerr_ns:.3f}' if qerr_ns is not None else '',
                     best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',

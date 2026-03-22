@@ -69,13 +69,17 @@ class PtpDevice:
         fcntl.ioctl(self.fd, PTP_CLOCK_GETCAPS, buf, True)
         raw = buf.tobytes()
         max_adj = struct.unpack_from('<i', raw, 0)[0]
-        n_ext_ts = struct.unpack_from('<i', raw, 12)[0]
-        n_per_out = struct.unpack_from('<i', raw, 16)[0]
-        n_pins = struct.unpack_from('<i', raw, 24)[0]
+        n_alarm = struct.unpack_from('<i', raw, 4)[0]
+        n_ext_ts = struct.unpack_from('<i', raw, 8)[0]
+        n_per_out = struct.unpack_from('<i', raw, 12)[0]
+        pps = struct.unpack_from('<i', raw, 16)[0]
+        n_pins = struct.unpack_from('<i', raw, 20)[0]
         return {
             'max_adj': max_adj,
+            'n_alarm': n_alarm,
             'n_ext_ts': n_ext_ts,
             'n_per_out': n_per_out,
+            'pps': pps,
             'n_pins': n_pins,
         }
 
@@ -105,7 +109,10 @@ class PtpDevice:
             fcntl.ioctl(self.fd, PTP_EXTTS_REQUEST, buf)
 
     def read_extts(self, timeout_ms=1500):
-        """Read one external timestamp event. Returns (sec, nsec, index) or None."""
+        """Read one external timestamp event.
+
+        Returns (sec, nsec, index, queue_remains) or None.
+        """
         r, _, _ = select.select([self.fd], [], [], timeout_ms / 1000.0)
         if not r:
             return None
@@ -113,7 +120,8 @@ class PtpDevice:
         if len(data) < 20:
             return None
         sec, nsec, _reserved, index = struct.unpack_from('<qIII', data, 0)
-        return (sec, nsec, index)
+        r_more, _, _ = select.select([self.fd], [], [], 0.0)
+        return (sec, nsec, index, bool(r_more))
 
     def adjfine(self, ppb):
         """Adjust PHC frequency by ppb (parts per billion)."""

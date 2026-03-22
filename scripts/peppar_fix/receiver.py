@@ -75,6 +75,24 @@ F9T_SIGNAL_CONFIG = {
     "CFG_SIGNAL_QZSS_ENA": 0,
 }
 
+F9T_L5_SIGNAL_CONFIG = {
+    "CFG_SIGNAL_GPS_ENA": 1,
+    "CFG_SIGNAL_GPS_L1CA_ENA": 1,
+    "CFG_SIGNAL_GPS_L2C_ENA": 0,
+    "CFG_SIGNAL_GPS_L5_ENA": 1,
+    "CFG_SIGNAL_GAL_ENA": 1,
+    "CFG_SIGNAL_GAL_E1_ENA": 1,
+    "CFG_SIGNAL_GAL_E5A_ENA": 1,
+    "CFG_SIGNAL_GAL_E5B_ENA": 0,
+    "CFG_SIGNAL_BDS_ENA": 1,
+    "CFG_SIGNAL_BDS_B1_ENA": 1,
+    "CFG_SIGNAL_BDS_B2_ENA": 0,
+    "CFG_SIGNAL_BDS_B2A_ENA": 1,
+    "CFG_SIGNAL_GLO_ENA": 0,
+    "CFG_SIGNAL_SBAS_ENA": 0,
+    "CFG_SIGNAL_QZSS_ENA": 0,
+}
+
 # Required UBX messages for peppar-fix operation
 REQUIRED_MESSAGES = {"RXM-RAWX", "RXM-SFRBX", "NAV-PVT", "TIM-TP"}
 
@@ -127,6 +145,7 @@ class ReceiverDriver:
     signal_config = SIGNAL_CONFIG
     signal_names = SIGNAL_NAMES
     sys_map = SYS_MAP
+    if_pairs = ()
 
     def signal_name(self, gnss_id, sig_id):
         return self.signal_names.get((gnss_id, sig_id))
@@ -142,6 +161,11 @@ class F9TDriver(ReceiverDriver):
     supports_timing_mode = True
     supports_l5_health_override = True
     signal_config = F9T_SIGNAL_CONFIG
+    if_pairs = (
+        ('GPS', 'GPS-L1CA', 'GPS-L2CL', 'G'),
+        ('GAL', 'GAL-E1C', 'GAL-E5bQ', 'E'),
+        ('BDS', 'BDS-B1I', 'BDS-B2I', 'C'),
+    )
 
     def build_tmode_fixed_msg(self, ecef):
         _ensure_imports()
@@ -162,6 +186,16 @@ class F9TDriver(ReceiverDriver):
         return _UBXMessage.config_set(7, 0, cfg_data).serialize()
 
 
+class F9TL5Driver(F9TDriver):
+    name = "ZED-F9T (L1/L5 profile)"
+    signal_config = F9T_L5_SIGNAL_CONFIG
+    if_pairs = (
+        ('GPS', 'GPS-L1CA', 'GPS-L5Q', 'G'),
+        ('GAL', 'GAL-E1C', 'GAL-E5aQ', 'E'),
+        ('BDS', 'BDS-B1I', 'BDS-B2aI', 'C'),
+    )
+
+
 class F10TDriver(ReceiverDriver):
     name = "NEO-F10T"
     protver = "32"
@@ -175,6 +209,8 @@ def get_driver(name):
     key = (name or "f9t").strip().lower()
     if key == "f9t":
         return F9TDriver()
+    if key in {"f9t-l5", "f9t_l5"}:
+        return F9TL5Driver()
     if key == "f10t":
         return F10TDriver()
     raise ValueError(f"Unknown receiver model: {name}")

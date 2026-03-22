@@ -10,7 +10,9 @@ Returns a file-like object that pyubx2's UBXReader can wrap.
 
 import logging
 import os
+import select
 import time
+from collections import deque
 
 log = logging.getLogger(__name__)
 
@@ -24,11 +26,16 @@ class KernelGnssStream:
     """
 
     def __init__(self, path):
-        self._fh = open(path, "r+b", buffering=0)
+        self._fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
         self.name = path
         self._buf = bytearray()
         self._out = bytearray()
         self._read_chunk = 4096
+        self._pending_packet_sizes = deque()
+        self._pending_packet_timestamps = deque()
+        self._last_packet_timestamp = None
+        self._last_packet_queue_remains = None
+        self._last_fill_mono = None
 
     def _fill_raw(self, want=1):
         """Read a larger kernel chunk and retain leftovers for packet parsing.
@@ -40,11 +47,16 @@ class KernelGnssStream:
         of the retained bytes instead.
         """
         while len(self._buf) < want:
-            chunk = self._fh.read(max(self._read_chunk, want - len(self._buf)))
-            if chunk:
-                self._buf.extend(chunk)
+            r, _, _ = select.select([self._fd], [], [], 0.5)
+            if not r:
                 continue
-            time.sleep(0.01)
+            try:
+                chunk = os.read(self._fd, max(self._read_chunk, want - len(self._buf)))
+            except BlockingIOError:
+                chunk = b""
+            if chunk:
+                self._last_fill_mono = time.monotonic()
+                self._buf.extend(chunk)
 
     def _fill_ubx(self, want=1):
         """Populate the output buffer with complete UBX packets only.
@@ -76,6 +88,8 @@ class KernelGnssStream:
             self._fill_raw(packet_len)
 
             self._out.extend(self._buf[:packet_len])
+            self._pending_packet_sizes.append(packet_len)
+            self._pending_packet_timestamps.append(self._last_fill_mono)
             del self._buf[:packet_len]
 
     def read(self, size=-1):
@@ -83,14 +97,44 @@ class KernelGnssStream:
             self._fill_ubx(1)
             data = bytes(self._out)
             self._out.clear()
+            self._consume_packet_bytes(len(data))
             return data
         self._fill_ubx(size)
         data = bytes(self._out[:size])
         del self._out[:size]
+        self._consume_packet_bytes(len(data))
         return data
 
+    def _consume_packet_bytes(self, nbytes):
+        """Advance packet accounting for bytes handed to pyubx2."""
+        while nbytes > 0 and self._pending_packet_sizes:
+            head = self._pending_packet_sizes[0]
+            if nbytes < head:
+                self._pending_packet_sizes[0] = head - nbytes
+                return
+            nbytes -= head
+            self._pending_packet_sizes.popleft()
+            self._last_packet_timestamp = self._pending_packet_timestamps.popleft()
+            self._last_packet_queue_remains = bool(
+                self._pending_packet_sizes or self._buf or self._out
+            )
+
+    def pop_packet_timestamp(self):
+        """Return the receive-monotonic timestamp for the last complete packet."""
+        ts = self._last_packet_timestamp
+        self._last_packet_timestamp = None
+        return ts
+
+    def pop_packet_metadata(self):
+        """Return metadata for the last complete packet handed to pyubx2."""
+        ts = self._last_packet_timestamp
+        queue_remains = self._last_packet_queue_remains
+        self._last_packet_timestamp = None
+        self._last_packet_queue_remains = None
+        return ts, queue_remains
+
     def write(self, data):
-        return self._fh.write(data)
+        return os.write(self._fd, data)
 
     def readline(self, size=-1):
         if size is None or size < 0:
@@ -106,10 +150,47 @@ class KernelGnssStream:
         return bytes(line)
 
     def flush(self):
-        return self._fh.flush()
+        return None
+
+    def discard_input(self, idle_s=0.2, max_s=2.0):
+        """Drop queued kernel GNSS bytes so subsequent reads start near live data.
+
+        The kernel device can accumulate a large backlog while no userspace
+        reader is attached. Drain any immediately available bytes in
+        nonblocking mode until the device stays idle for a short interval.
+        """
+        self._buf.clear()
+        self._out.clear()
+
+        start = time.monotonic()
+        idle_start = None
+        drained = 0
+        try:
+            while time.monotonic() - start < max_s:
+                try:
+                    chunk = os.read(self._fd, self._read_chunk)
+                except BlockingIOError:
+                    chunk = b""
+
+                if chunk:
+                    drained += len(chunk)
+                    idle_start = None
+                    continue
+
+                if idle_start is None:
+                    idle_start = time.monotonic()
+                elif time.monotonic() - idle_start >= idle_s:
+                    break
+                time.sleep(0.01)
+        finally:
+            pass
+        return drained
 
     def close(self):
-        return self._fh.close()
+        return os.close(self._fd)
+
+    def fileno(self):
+        return self._fd
 
 
 def open_gnss(device, baud=115200):

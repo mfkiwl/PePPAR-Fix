@@ -30,6 +30,7 @@ Usage:
 """
 
 import argparse
+from collections import deque
 import csv
 import logging
 import math
@@ -39,6 +40,7 @@ import sys
 import threading
 import time
 import tomllib
+from datetime import datetime, timezone, timedelta
 
 import numpy as np
 
@@ -49,6 +51,8 @@ from ssr_corrections import SSRState, RealtimeCorrections
 from ntrip_client import NtripStream
 from realtime_ppp import serial_reader, ntrip_reader, QErrStore
 from peppar_fix import save_position, load_position, PositionWatchdog
+from peppar_fix.event_time import PpsEvent
+from peppar_fix.receiver import get_driver
 
 log = logging.getLogger("peppar-fix")
 
@@ -357,7 +361,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
     prev_t = None
     n_epochs = 0
     start_time = time.time()
-
+    obs_history = deque()
     try:
         while not stop_event.is_set():
             if args.duration and (time.time() - start_time) > args.duration:
@@ -365,9 +369,27 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 break
 
             try:
-                gps_time, observations = obs_queue.get(timeout=5)
+                added_obs = _append_queue_history(obs_history, obs_queue, timeout=5)
             except queue.Empty:
                 continue
+
+            if servo_ctx is not None:
+                obs_event, pps_match, dropped_obs = _pop_correlatable_observation(
+                    servo_ctx, args, obs_history,
+                )
+                if obs_event is None:
+                    if added_obs and n_epochs % 10 == 0:
+                        log.info(f"  [{n_epochs}] Awaiting correlatable observation "
+                                 f"(queued={len(obs_history)})")
+                    continue
+            else:
+                obs_event = obs_history.popleft()
+                pps_match = None
+                dropped_obs = 0
+
+            if dropped_obs and n_epochs % 10 == 0:
+                log.info(f"  [{n_epochs}] Dropped {dropped_obs} expired observation epochs")
+            gps_time, observations = obs_event
 
             # EKF predict
             if prev_t is not None:
@@ -427,9 +449,10 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
 
             # Feed servo if active
             if servo_ctx is not None:
-                _servo_epoch(servo_ctx, args, filt, gps_time, n_epochs,
+                _servo_epoch(servo_ctx, args, filt, obs_event, n_epochs,
                              dt_rx_ns, dt_rx_sigma, n_used, known_ecef,
-                             resid_rms, isb_gal_ns, isb_bds_ns)
+                             resid_rms, isb_gal_ns, isb_bds_ns,
+                             pps_match=pps_match)
 
             # Console status every 10 epochs
             if n_epochs % 10 == 0:
@@ -503,6 +526,8 @@ def _setup_servo(args, known_ecef):
 
     # PPS event queue
     pps_queue = queue.Queue(maxsize=10)
+    pps_history = deque(maxlen=32)
+    pps_history_lock = threading.Lock()
     stop_pps = threading.Event()
 
     def extts_reader():
@@ -510,16 +535,26 @@ def _setup_servo(args, known_ecef):
             event = ptp.read_extts(timeout_ms=1500)
             if event is None:
                 continue
-            phc_sec, phc_nsec, _idx = event
+            phc_sec, phc_nsec, index, queue_remains = event
+            pps_event = PpsEvent(
+                phc_sec=phc_sec,
+                phc_nsec=phc_nsec,
+                index=index,
+                recv_mono=time.monotonic(),
+                queue_remains=queue_remains,
+                correlation_confidence=1.0 if not queue_remains else 0.5,
+            )
+            with pps_history_lock:
+                pps_history.append(pps_event)
             try:
-                pps_queue.put_nowait((phc_sec, phc_nsec))
+                pps_queue.put_nowait(pps_event)
             except queue.Full:
                 while not pps_queue.empty():
                     try:
                         pps_queue.get_nowait()
                     except queue.Empty:
                         break
-                pps_queue.put_nowait((phc_sec, phc_nsec))
+                pps_queue.put_nowait(pps_event)
 
     t_extts = threading.Thread(target=extts_reader, daemon=True)
     t_extts.start()
@@ -533,6 +568,8 @@ def _setup_servo(args, known_ecef):
         log_w = csv.writer(log_f)
         log_w.writerow([
             'timestamp', 'gps_second', 'phc_sec', 'phc_nsec',
+            'phc_rounded_sec', 'epoch_offset_s', 'timescale_error_ns',
+            'extts_index', 'pps_match_delta_s', 'pps_match_recv_dt_s', 'pps_queue_depth',
             'dt_rx_ns', 'dt_rx_sigma_ns', 'pps_error_ns', 'qerr_ns',
             'source', 'source_error_ns', 'source_confidence_ns',
             'adjfine_ppb', 'phase', 'n_meas', 'gain_scale',
@@ -546,6 +583,8 @@ def _setup_servo(args, known_ecef):
         'scheduler': scheduler,
         'qerr_store': qerr_store,
         'pps_queue': pps_queue,
+        'pps_history': pps_history,
+        'pps_history_lock': pps_history_lock,
         'stop_pps': stop_pps,
         'extts_channel': extts_channel,
         'caps': caps,
@@ -588,9 +627,59 @@ def _target_timescale_sec(gps_time, args):
     raise ValueError(f"Unsupported PHC timescale: {args.phc_timescale}")
 
 
-def _servo_epoch(ctx, args, filt, gps_time, n_epochs,
+def _find_pps_event_for_obs(ctx, obs_event, target_sec, timeout=0.5,
+                            min_window_s=0.5, max_window_s=11.0):
+    """Correlate one observation epoch against PPS history.
+
+    Prefer PPS events whose receive-monotonic timestamp is within an acceptable
+    correlation window of the observation event. Among those, choose the event
+    whose rounded PHC second best matches the target timescale second.
+    """
+    deadline = time.monotonic() + timeout
+
+    while True:
+        event, delta, recv_dt, _ = _match_pps_event_from_history(
+            ctx, obs_event, target_sec,
+            min_window_s=min_window_s,
+            max_window_s=max_window_s,
+        )
+        if event is not None:
+            return event, delta, recv_dt
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise queue.Empty
+        ctx['pps_queue'].get(timeout=remaining)
+
+
+def _match_pps_event_from_history(ctx, obs_event, target_sec,
+                                  min_window_s=0.5, max_window_s=11.0):
+    """Return the best PPS history match for an observation, if any."""
+    with ctx['pps_history_lock']:
+        history = list(ctx['pps_history'])
+
+    if not history:
+        return None, None, None, None
+
+    candidates = []
+    for event in history:
+        recv_dt = obs_event.recv_mono - event.recv_mono
+        if recv_dt < min_window_s or recv_dt > max_window_s:
+            continue
+        delta = event.rounded_sec() - target_sec
+        candidates.append((abs(delta), abs(recv_dt - 1.0), event, delta, recv_dt))
+
+    if not candidates:
+        return None, None, None, history[-1].recv_mono
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    _, _, event, delta, recv_dt = candidates[0]
+    return event, delta, recv_dt, history[-1].recv_mono
+
+
+def _servo_epoch(ctx, args, filt, obs_event, n_epochs,
                  dt_rx_ns, dt_rx_sigma, n_used, known_ecef,
-                 resid_rms, isb_gal_ns, isb_bds_ns):
+                 resid_rms, isb_gal_ns, isb_bds_ns, pps_match=None):
     """Process one servo epoch: read PPS, compute error, steer PHC."""
     ptp = ctx['ptp']
     servo = ctx['servo']
@@ -638,17 +727,27 @@ def _servo_epoch(ctx, args, filt, gps_time, n_epochs,
             except ImportError:
                 ctx['tmode_set'] = True
 
-    # Get PPS event
-    try:
-        phc_sec, phc_nsec = pps_queue.get(timeout=0.5)
-    except queue.Empty:
-        if n_epochs % 10 == 0:
-            log.info(f"  [{n_epochs}] No PPS event for this epoch")
-        return
-
+    gps_time = obs_event.gps_time
     target_sec = _target_timescale_sec(gps_time, args)
+    if pps_match is not None:
+        pps_event, pps_match_delta_s, pps_match_recv_dt_s = pps_match
+    else:
+        try:
+            pps_event, pps_match_delta_s, pps_match_recv_dt_s = _find_pps_event_for_obs(
+                ctx, obs_event, target_sec, timeout=0.5
+            )
+        except queue.Empty:
+            if n_epochs % 10 == 0:
+                log.info(f"  [{n_epochs}] No PPS event for this epoch")
+            return
+
+    phc_sec, phc_nsec, extts_index = pps_event
+    phc_rounded_sec = phc_sec if phc_nsec < 500_000_000 else phc_sec + 1
+    epoch_offset = phc_rounded_sec - target_sec
     ts_str = gps_time.strftime('%Y-%m-%d %H:%M:%S')
     pps_error_ns = _pps_fractional_error(phc_nsec)
+    timescale_error_ns = epoch_offset * 1_000_000_000 + pps_error_ns
+    pps_queue_depth = pps_queue.qsize()
 
     qerr_ns, _ = qerr_store.get()
 
@@ -660,7 +759,6 @@ def _servo_epoch(ctx, args, filt, gps_time, n_epochs,
     # Warmup phase
     if ctx['phase'] == 'warmup':
         if n_epochs >= ctx['warmup_epochs']:
-            epoch_offset = _phc_gps_offset_s(phc_sec, phc_nsec, target_sec)
             log.info(f"  Servo warmup complete ({n_epochs} epochs, "
                      f"best={best}, epoch_offset={epoch_offset}s)")
             if epoch_offset != 0 or abs(best.error_ns) > STEP_THRESHOLD_NS:
@@ -671,7 +769,9 @@ def _servo_epoch(ctx, args, filt, gps_time, n_epochs,
         elif n_epochs % 10 == 0:
             log.info(f"  [{n_epochs}] servo warmup: best={best} "
                      f"dt_rx={dt_rx_ns:+.1f}±{dt_rx_sigma:.1f}ns")
-        _log_servo(log_w, ts_str, target_sec, phc_sec, phc_nsec,
+        _log_servo(log_w, ctx['log_f'], ts_str, target_sec, phc_sec, phc_nsec,
+                   phc_rounded_sec, epoch_offset, timescale_error_ns,
+                   extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
                    dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, best,
                    ctx['adjfine_ppb'], ctx['phase'], n_used,
                    ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns)
@@ -679,7 +779,6 @@ def _servo_epoch(ctx, args, filt, gps_time, n_epochs,
 
     # Step phase
     if ctx['phase'] == 'step':
-        epoch_offset = _phc_gps_offset_s(phc_sec, phc_nsec, target_sec)
         total_offset_ns = epoch_offset * 1_000_000_000 + best.error_ns
         log.info(f"  STEP: epoch_offset={epoch_offset}s, "
                  f"source={best}, total={total_offset_ns:+.0f}ns")
@@ -768,13 +867,17 @@ def _servo_epoch(ctx, args, filt, gps_time, n_epochs,
                      f"coast ({scheduler.n_accumulated}/{scheduler.interval}) "
                      f"adj={ctx['adjfine_ppb']:+.1f}ppb")
 
-    _log_servo(log_w, ts_str, target_sec, phc_sec, phc_nsec,
+    _log_servo(log_w, ctx['log_f'], ts_str, target_sec, phc_sec, phc_nsec,
+               phc_rounded_sec, epoch_offset, timescale_error_ns,
+               extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
                dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, best,
                ctx['adjfine_ppb'], ctx['phase'], n_used,
                ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns)
 
 
-def _log_servo(log_w, ts_str, gps_unix_sec, phc_sec, phc_nsec,
+def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
+               phc_rounded_sec, epoch_offset_s, timescale_error_ns,
+               extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
                dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, best,
                adjfine_ppb, phase, n_used, gain_scale, scheduler,
                isb_gal_ns, isb_bds_ns):
@@ -783,6 +886,9 @@ def _log_servo(log_w, ts_str, gps_unix_sec, phc_sec, phc_nsec,
         return
     log_w.writerow([
         ts_str, gps_unix_sec, phc_sec, phc_nsec,
+        phc_rounded_sec, epoch_offset_s, f'{timescale_error_ns:.1f}',
+        extts_index, pps_match_delta_s,
+        f'{pps_match_recv_dt_s:.3f}', pps_queue_depth,
         f'{dt_rx_ns:.3f}', f'{dt_rx_sigma:.3f}',
         f'{pps_error_ns:.1f}', f'{qerr_ns:.3f}' if qerr_ns is not None else '',
         best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
@@ -790,6 +896,8 @@ def _log_servo(log_w, ts_str, gps_unix_sec, phc_sec, phc_nsec,
         scheduler.interval, scheduler.n_accumulated, 0,
         f'{isb_gal_ns:.3f}', f'{isb_bds_ns:.3f}',
     ])
+    if log_f is not None:
+        log_f.flush()
 
 
 def _cleanup_servo(ctx):
@@ -807,11 +915,77 @@ def _cleanup_servo(ctx):
     log.info("PHC servo cleaned up")
 
 
+def _drain_queue(qobj):
+    """Drop any queued items and return how many were removed."""
+    drained = 0
+    while True:
+        try:
+            qobj.get_nowait()
+            drained += 1
+        except queue.Empty:
+            return drained
+
+
+def _append_queue_history(history, qobj, timeout=0.5):
+    """Append one or more queued items into a history deque."""
+    history.append(qobj.get(timeout=timeout))
+    added = 1
+    while True:
+        try:
+            history.append(qobj.get_nowait())
+            added += 1
+        except queue.Empty:
+            return added
+
+
+def _get_latest_queue_item(qobj, timeout=0.5):
+    """Return the newest queued item, discarding older stale ones."""
+    item = qobj.get(timeout=timeout)
+    dropped = 0
+    while True:
+        try:
+            item = qobj.get_nowait()
+            dropped += 1
+        except queue.Empty:
+            return item, dropped
+
+
+def _pop_correlatable_observation(ctx, args, obs_history,
+                                  min_window_s=0.5, max_window_s=11.0):
+    """Return the oldest observation that can be matched to PPS history.
+
+    Observations are retained in receive order until a matching PPS event is
+    available or until they age beyond the accepted correlation window.
+    """
+    dropped = 0
+    while obs_history:
+        obs_event = obs_history[0]
+        target_sec = _target_timescale_sec(obs_event.gps_time, args)
+        pps_event, delta_s, recv_dt_s, latest_pps_mono = _match_pps_event_from_history(
+            ctx, obs_event, target_sec,
+            min_window_s=min_window_s,
+            max_window_s=max_window_s,
+        )
+        if pps_event is not None:
+            obs_history.popleft()
+            return obs_event, (pps_event, delta_s, recv_dt_s), dropped
+        if latest_pps_mono is None:
+            return None, None, dropped
+        if latest_pps_mono - obs_event.recv_mono > max_window_s:
+            obs_history.popleft()
+            dropped += 1
+            continue
+        return None, None, dropped
+    return None, None, dropped
+
+
 # ── Main ──────────────────────────────────────────────────────────────── #
 
 def run(args):
     """Main entry point: bootstrap → steady state."""
     stop_event = threading.Event()
+    driver = get_driver(args.receiver)
+    log.info(f"Receiver: {driver.name} (PROTVER {driver.protver})")
 
     def on_signal(signum, frame):
         log.info("Signal received, shutting down")
@@ -852,7 +1026,7 @@ def run(args):
     t_serial = threading.Thread(
         target=serial_reader,
         args=(args.serial, args.baud, obs_queue, stop_event, beph, systems, ssr),
-        kwargs=serial_kwargs,
+        kwargs={**serial_kwargs, 'driver': driver},
         daemon=True,
     )
     t_serial.start()
@@ -954,6 +1128,10 @@ def run(args):
         if stop_event.is_set():
             return 0
 
+        drained_obs = _drain_queue(obs_queue)
+        if drained_obs:
+            log.info(f"Drained {drained_obs} queued observation epochs before steady state")
+
         # Phase 2: Steady state
         run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                          stop_event, out_w=out_w)
@@ -1003,6 +1181,8 @@ Two-phase operation:
     serial.add_argument("--serial", required=True,
                         help="Serial port for F9T (e.g. /dev/gnss-top)")
     serial.add_argument("--baud", type=int, default=115200)
+    serial.add_argument("--receiver", default="f9t",
+                        help="Receiver model/profile: f9t, f9t-l5, f10t (default: f9t)")
 
     # GNSS
     gnss = ap.add_argument_group("GNSS")

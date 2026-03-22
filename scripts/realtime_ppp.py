@@ -55,7 +55,12 @@ import numpy as np
 from solve_pseudorange import (
     SP3, C, OMEGA_E, lla_to_ecef, timestamp_to_gpstime,
 )
-from solve_dualfreq import IF_PAIRS
+from solve_dualfreq import (
+    IF_PAIRS, F_L1, F_L2, F_L5, F_E5B, F_B1I, F_B2I,
+    ALPHA_L1_L2, ALPHA_L2, ALPHA_L1, ALPHA_L5,
+    ALPHA_E1, ALPHA_E5B, ALPHA_B1I, ALPHA_B2A,
+    ALPHA_B1I_B2I, ALPHA_B2I,
+)
 from solve_ppp import (
     FixedPosFilter, SIG_TO_RINEX, IF_WL, ELEV_MASK,
     SIGMA_P_IF, SIGMA_PHI_IF, BDS_MIN_PRN,
@@ -65,6 +70,7 @@ from ppp_corrections import OSBParser, CLKFile
 from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections
 from ntrip_client import NtripStream
+from peppar_fix.event_time import ObservationEvent
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +89,34 @@ for _mt in range(1057, 1069):
     SSR_MSG_TYPES.add(str(_mt))
 for _mt in range(1240, 1264):
     SSR_MSG_TYPES.add(str(_mt))
+
+
+SIG_WAVELENGTH = {
+    'GPS-L1CA': C / F_L1,
+    'GPS-L2CL': C / F_L2,
+    'GPS-L2CM': C / F_L2,
+    'GPS-L5I': C / F_L5,
+    'GPS-L5Q': C / F_L5,
+    'GAL-E1C': C / F_L1,
+    'GAL-E1B': C / F_L1,
+    'GAL-E5aI': C / F_L5,
+    'GAL-E5aQ': C / F_L5,
+    'GAL-E5bI': C / F_E5B,
+    'GAL-E5bQ': C / F_E5B,
+    'BDS-B1I': C / F_B1I,
+    'BDS-B2I': C / F_B2I,
+    'BDS-B2aI': C / F_L5,
+    'BDS-B2aQ': C / F_L5,
+}
+
+IF_PAIR_PARAMS = {
+    ('GPS-L1CA', 'GPS-L2CL'): ('G', ALPHA_L1_L2, ALPHA_L2),
+    ('GPS-L1CA', 'GPS-L5Q'): ('G', ALPHA_L1, ALPHA_L5),
+    ('GAL-E1C', 'GAL-E5bQ'): ('E', ALPHA_E1, ALPHA_E5B),
+    ('GAL-E1C', 'GAL-E5aQ'): ('E', ALPHA_L1, ALPHA_L5),
+    ('BDS-B1I', 'BDS-B2I'): ('C', ALPHA_B1I_B2I, ALPHA_B2I),
+    ('BDS-B1I', 'BDS-B2aI'): ('C', ALPHA_B1I, ALPHA_B2A),
+}
 
 
 # ── Serial observation reader ──────────────────────────────────────────────── #
@@ -162,17 +196,19 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
     SIG_NAMES = driver.signal_names
     SYS_MAP = driver.sys_map
 
+    pair_config = getattr(driver, 'if_pairs', None) or IF_PAIRS
     sig_lookup = {}
-    for gnss_id, sig_f1, sig_f2, prefix, a1, a2 in IF_PAIRS:
+    for gnss_id, sig_f1, sig_f2, prefix in pair_config:
+        pair_params = IF_PAIR_PARAMS.get((sig_f1, sig_f2))
+        if pair_params is None:
+            raise ValueError(f"Unsupported IF pair for {driver.name}: {sig_f1} + {sig_f2}")
+        _, a1, a2 = pair_params
         sig_lookup[sig_f1] = (gnss_id, prefix, 'f1', a1, a2, sig_f1)
         sig_lookup[sig_f2] = (gnss_id, prefix, 'f2', a1, a2, sig_f2)
 
     epoch_data = {}   # sv → {f1: {...}, f2: {...}}
     epoch_ts = None
     n_epochs = 0
-    live_gnss_synced = (device_type != 'gnss')
-    stale_epochs_dropped = 0
-
     while not stop_event.is_set():
         # Drain config queue: write pending UBX messages to the receiver
         if config_queue is not None:
@@ -306,7 +342,8 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                                 pr_f2 -= cb_f2
 
                     pr_if = a1 * pr_f1 - a2 * pr_f2
-                    wl_f1, wl_f2, _, _ = IF_WL[prefix]
+                    wl_f1 = SIG_WAVELENGTH[f1['sig_name']]
+                    wl_f2 = SIG_WAVELENGTH[f2['sig_name']]
                     phi_if_m = a1 * wl_f1 * cp_f1 - a2 * wl_f2 * cp_f2
 
                     observations.append({
@@ -345,32 +382,29 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     gps_epoch = datetime(1980, 1, 6, tzinfo=timezone.utc)
                     gps_time = gps_epoch + timedelta(weeks=week, seconds=rcvTow)
 
-                    # Kernel GNSS devices can replay buffered historical epochs
-                    # immediately after open. Drop those until the receiver's
-                    # GPS time is close to the host's current GPS time so PPS
-                    # events and RAWX epochs can pair 1:1 in the servo.
-                    if device_type == 'gnss' and not live_gnss_synced:
-                        leap_s = leapS if leapS is not None else 18
-                        host_gps_time = (
-                            datetime.now(timezone.utc) +
-                            timedelta(seconds=leap_s)
-                        )
-                        lag_s = (host_gps_time - gps_time).total_seconds()
-                        if lag_s > 2.0:
-                            stale_epochs_dropped += 1
-                            if stale_epochs_dropped == 1 or stale_epochs_dropped % 10 == 0:
-                                log.info(
-                                    f"Dropping stale GNSS backlog epoch "
-                                    f"(lag={lag_s:.1f}s, dropped={stale_epochs_dropped})"
-                                )
-                            continue
-                        live_gnss_synced = True
-                        if stale_epochs_dropped:
-                            log.info(
-                                f"Kernel GNSS stream caught up after dropping "
-                                f"{stale_epochs_dropped} stale epochs"
-                            )
-                    obs_queue.put((gps_time, observations))
+                    recv_mono = None
+                    queue_remains = None
+                    if hasattr(stream, 'pop_packet_metadata'):
+                        recv_mono, queue_remains = stream.pop_packet_metadata()
+                    elif hasattr(stream, 'pop_packet_timestamp'):
+                        recv_mono = stream.pop_packet_timestamp()
+                    now_mono = time.monotonic()
+                    if recv_mono is None:
+                        recv_mono = now_mono
+                    if queue_remains is None:
+                        queue_remains = bool(getattr(stream, 'in_waiting', 0))
+                    recv_utc = datetime.now(timezone.utc)
+                    parse_age_s = max(0.0, now_mono - recv_mono)
+                    confidence = 1.0 if not queue_remains else 0.5
+                    obs_queue.put(ObservationEvent(
+                        gps_time=gps_time,
+                        observations=observations,
+                        recv_mono=recv_mono,
+                        recv_utc=recv_utc,
+                        queue_remains=queue_remains,
+                        parse_age_s=parse_age_s,
+                        correlation_confidence=confidence,
+                    ))
                     n_epochs += 1
 
                     if n_epochs % 60 == 0:
