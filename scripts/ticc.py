@@ -51,6 +51,8 @@ import time as _time
 
 import serial
 
+from peppar_fix.event_time import TiccEvent
+
 # Integer part DOT 11-or-12 fractional digits whitespace ch followed by A or B.
 _LINE_RE = re.compile(r"^(\d+)\.(\d{11,12})\s+(ch[AB])$")
 
@@ -133,3 +135,20 @@ class Ticc:
             ref_sec = int(m.group(1))
             ref_ps  = int(m.group(2).ljust(12, '0'))   # normalise 11→12 digits
             yield m.group(3), ref_sec, ref_ps
+
+    def iter_events(self):
+        """Yield TiccEvent records with host receive timestamps."""
+        for raw in self._ser:
+            recv_mono = _time.monotonic()
+            line = raw.decode(errors="replace").strip()
+            m = _LINE_RE.match(line)
+            if not m:
+                continue
+            ref_sec = int(m.group(1))
+            ref_ps = int(m.group(2).ljust(12, '0'))
+            yield TiccEvent(
+                channel=m.group(3),
+                ref_sec=ref_sec,
+                ref_ps=ref_ps,
+                recv_mono=recv_mono,
+            )

@@ -22,6 +22,49 @@ This document also assumes a design direction:
 - this codebase does not currently need a general event bus or YAML dataflow
   registry to stay understandable
 
+## Why this complexity is justified
+
+A simple read-and-deliver event model is still correct for some sinks.
+
+Examples:
+
+- narrow loggers
+- state caches
+- some simple diagnostics
+
+Those sinks may want freshness or completeness, but they do not depend on
+precise cross-stream timing.
+
+Other sinks are fundamentally different.
+
+Examples:
+
+- the PHC servo
+- future PPS deviation metrics
+- future always-on dual-filter operation
+- future tiny-motion position tracking
+
+For these sinks, a mis-correlated event can be worse than silence.
+
+Examples:
+
+- a servo may steer the PHC the wrong way
+- a timing metric may report false phase error
+- a filter may absorb bad state and take many epochs to recover
+
+So the added complexity is not for its own sake. It exists because:
+
+- multiple source-native timescales are present
+- queueing can occur at startup and in steady state
+- different sinks need different loss/freshness/correlation policies
+- one global policy would either lose important data or accept bad matches
+
+That is why this design favors:
+
+- source metadata that preserves timing ambiguity instead of hiding it
+- sink-local policy at the point of consumption
+- dropping at the correlation edge rather than blindly at ingress
+
 ## Core design rule
 
 Every source should eventually provide:
@@ -790,6 +833,24 @@ Examples:
 
 These sinks should reject unmatched or ambiguously matched data rather than ingest it optimistically.
 
+For these sinks, silence is usually safer than a wrong match.
+
+Implementation direction:
+
+- put an explicit correlation gate in front of each strict sink
+- the gate may only:
+  - consume correlated events
+  - defer delivery while waiting for a valid companion event
+  - drop events that can no longer be matched inside policy
+- the sink itself should not read raw source queues directly
+
+For EKF updates that do not consume PPS directly, the gate is softer:
+
+- observations still define the epoch
+- correction state must be fresh enough for that epoch
+- stale correction state should defer or drop the EKF update before
+  `filt.update(...)`, even when no PPS correlation is involved
+
 ## Freshest-only vs loss-free vs correlated-window
 
 There are really three policies, not two.
@@ -834,6 +895,13 @@ Examples:
 - some future K12 metrics
 
 This is the policy the servo should use. It should not confuse “newest” with “best,” and it should not confuse “all queued data” with “all useful data.”
+
+This is also why one-size-fits-all queue handling is the wrong design.
+
+- forcing freshest-only would destroy long-horizon scientific sinks
+- forcing loss-free would feed stale or ambiguous matches into strict sinks
+- forcing one global correlation window would be wrong for both
+  low-latency control and long-horizon analysis
 
 ## Reader contract
 
@@ -1027,8 +1095,11 @@ Missing:
 - code-local declaration of:
   - required sources
   - optional sources
-  - queue depth tolerance
-  - decimation policy
+- queue depth tolerance
+- decimation policy
+
+For strict sinks, this contract should be implemented by a gate ahead of the
+sink, not by ad hoc checks scattered through the sink body.
   - freshness/loss policy
   - correlation window
   - minimum acceptable confidence
@@ -1210,6 +1281,14 @@ This milestone addresses:
 - G4
 - G6
 
+Progress so far:
+
+- unified path no longer drains the observation queue when entering steady state
+- unified PPS notification queue now drops one oldest notification on overflow
+  instead of draining the whole queue
+- legacy servo entry points now use the same bounded overflow pattern, though
+  some still retain newest-wins consume logic
+
 ### M4. Add source-timescale relationship estimators
 
 Goal:
@@ -1231,6 +1310,15 @@ This milestone addresses:
 - G5
 - G8
 - G9
+
+Progress so far:
+
+- GNSS observation events carry `recv_mono`, `queue_remains`, `parse_age_s`,
+  and a first-pass confidence estimate
+- PPS/EXTTS events carry `recv_mono`, `queue_remains`, and a first-pass
+  confidence estimate
+- RTCM ingest now carries host-side timing metadata alongside decoded messages
+  and stores that metadata in SSR correction objects
 
 ### M5. Make sink policy explicit at consumption points
 
@@ -1303,6 +1391,68 @@ Required work:
 This milestone addresses:
 
 - all remaining gaps
+
+Progress so far:
+
+- TICC live capture now exposes `TiccEvent` with host monotonic receive time
+- RTCM and TICC streams are no longer completely outside the shared event
+  metadata model
+- the unified servo path now places a strict correlation gate in front of the
+  PHC servo sink and records gate outcomes instead of relying only on
+  downstream proxy symptoms
+- the legacy steady-state servo paths now use the same gate pattern:
+  - [`scripts/phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/phc_servo.py)
+  - [`scripts/peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_phc_servo.py)
+  - [`scripts/peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_main.py)
+- `oxco` validation now includes two live checks:
+  - baseline: gate consumed correlated epochs without defers or drops
+  - injected system-delay run: gate produced explicit defer and unmatched-drop
+    outcomes under synthetic GNSS/PTP queueing
+
+### M8. Add timing fault-injection and correlation robustness tests
+
+Goal:
+
+- make queuing failures reproducible without requiring real host overload
+
+Required work:
+
+- add post-read, pre-delivery delay injection hooks in each live source thread
+- support two delay modes:
+  - independent per-thread delays
+  - system-correlated delays across all source threads
+- control them with environment variables:
+  - `THREAD_DELAY_PROB_PCT`
+  - `THREAD_DELAY_MEAN_MS`
+  - `THREAD_DELAY_RANGE_MS`
+  - `SYS_DELAY_PROB_PCT`
+  - `SYS_DELAY_MEAN_MS`
+  - `SYS_DELAY_RANGE_MS`
+- add a small control thread or shared-state manager for `SYS_*` delays
+- emit an injected-delay event log on host `CLOCK_MONOTONIC`
+- place explicit correlation gates in front of strict sinks so fault-injection
+  tests can verify consume/defer/drop behavior at the sink boundary
+- use that log to validate sink behavior under:
+  - isolated source backlog
+  - all-stream backlog
+  - occasional outliers
+  - torture-test sustained queuing
+
+This milestone addresses:
+
+- G3
+- G5
+- G6
+- G8
+- G9
+
+Why it matters:
+
+- individual-stream queuing tests whether one bad stream can be isolated
+- all-stream queuing tests whether correlated host or network delay creates
+  false confidence in event matches
+- for strict sinks, the meaningful pass criterion is not “the sink ran” but
+  “the gate consumed only correlated data and deferred or dropped the rest”
 
 ## Recommended target model
 

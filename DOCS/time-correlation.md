@@ -17,6 +17,50 @@ This matters because queuing can happen:
 - inside kernel drivers
 - inside user-space readers and parser loops
 
+## Why the model cannot stay simple
+
+A simple read-and-deliver model is still acceptable for sinks that only care
+about one stream at a time.
+
+It is not acceptable for sinks that must reason across multiple streams with
+different native timescales.
+
+The reason is straightforward:
+
+- queueing can distort arrival order
+- queueing can distort apparent freshness
+- two streams can be delayed independently or together
+- some sinks are harmed more by a wrong match than by no match
+
+For strict sinks such as the PHC servo, mis-correlated input is worse than
+silence. A wrong PPS-to-observation match can create a wrong steering action,
+while a dropped epoch merely delays correction.
+
+That implies an architectural rule:
+
+- every time-correlation-sensitive sink should sit behind an explicit
+  correlation gate
+
+The gate should be the component that decides:
+
+- consume now because the required companion events are present
+- defer because a valid match may still arrive
+- drop because the event can no longer be matched inside policy
+
+The sink should not make up its own queue-order heuristics on the fly.
+
+This is also why one policy cannot be imposed globally.
+
+Different sinks need different behavior:
+
+- some want freshest-only
+- some want loss-free
+- some want correlated-window matching
+
+The added metadata, correlation logic, drop logic, and testing machinery are
+there to preserve correctness across those different sink contracts, not to
+make the code abstract for its own sake.
+
 ## Streams we have today
 
 ### 1. GNSS observation stream
@@ -200,6 +244,154 @@ This suggests a future shared mechanism:
 - a slow-moving estimator such as an EMA can track the nominal relationship,
   while sample confidence expresses how much to trust each new update
 
+## Testing strategy
+
+The current multi-threaded blocking-read architecture is acceptable for now.
+We do not need to move to `asyncio` to test timing robustness.
+
+The right fault-injection point is:
+
+- after a source `read()` or equivalent ingress returns
+- before the event is handed to any sink or downstream queue
+
+That is where host-side queuing distorts correlation while preserving the
+real source-native timestamp.
+
+### Queuing modes we must test
+
+#### 1. Individual-stream queuing
+
+Only one stream suffers a queuing event while the others continue to read and
+deliver with low latency.
+
+Examples:
+
+- one GNSS reader thread is delayed by CPU starvation
+- one PPS reader thread is delayed by scheduler latency
+- one NTRIP reader is delayed while the others remain healthy
+
+This tests whether sinks can isolate one bad stream instead of corrupting the
+interpretation of the others.
+
+#### 2. All-stream queuing
+
+Many or all streams suffer a queuing event at nearly the same time.
+
+Examples:
+
+- local CPU starvation delays all source threads together
+- host scheduling pauses all readers
+- shared-path network delay affects several network streams at once
+
+This matters because some delays are time-correlated across sources. A sink
+must not assume that every queueing event is independent.
+
+### Proposed randomized delay injection
+
+Use strategically placed randomized `sleep()` calls in each source thread.
+
+The delay should happen:
+
+- after `read()` returns
+- before delivery to any queue, history, or sink
+
+#### Per-thread delay variables
+
+These environment variables control independent per-thread delays:
+
+- `THREAD_DELAY_PROB_PCT`
+- `THREAD_DELAY_MEAN_MS`
+- `THREAD_DELAY_RANGE_MS`
+
+Interpretation:
+
+- `THREAD_DELAY_PROB_PCT`
+  - floating-point probability in percent that a non-zero delay is injected
+- `THREAD_DELAY_MEAN_MS`
+  - mean delay in milliseconds
+- `THREAD_DELAY_RANGE_MS`
+  - uniformly distributed range around the mean in milliseconds
+
+If `THREAD_DELAY_PROB_PCT` is unset, no per-thread injected delay occurs.
+
+#### System-correlated delay variables
+
+These environment variables control time-correlated delays across all reader
+threads:
+
+- `SYS_DELAY_PROB_PCT`
+- `SYS_DELAY_MEAN_MS`
+- `SYS_DELAY_RANGE_MS`
+
+Intended design:
+
+- a small control thread performs the random check
+- when it triggers, it sets shared state
+- each source thread observes that state after its next read and inserts the
+  same or closely related delay before delivery
+
+If `SYS_DELAY_PROB_PCT` is unset, no correlated delay occurs.
+
+This simulates:
+
+- host-wide CPU starvation
+- host scheduling pauses
+- shared-path network queuing affecting multiple network streams
+
+### Suggested operating ranges
+
+The first implementation can stay simple:
+
+- Bernoulli trigger from `_PROB_PCT`
+- uniform random delay centered around `_MEAN_MS`
+- total span or half-width controlled by `_RANGE_MS`
+
+Suggested regimes:
+
+- `< 1.0%` probability for occasional outlier simulation
+- `> 1.0%` probability for torture testing
+- sub-second delays for mild stress
+- multi-second delays up to nearly `10s` for backlog and correlation-window
+  stress
+
+### Required injected-delay log
+
+Whenever a non-zero synthetic delay is introduced, the test harness should
+emit an event log entry.
+
+Each entry should include:
+
+- source thread name or source class
+- delay type: `THREAD` or `SYS`
+- delay start time on host `CLOCK_MONOTONIC`
+- delay end time on host `CLOCK_MONOTONIC`
+- planned delay duration
+- actual sleep duration
+
+This gives ground truth for later comparison with sink behavior and drop
+decisions.
+
+### What this should validate
+
+This plan should let us verify whether:
+
+- freshest-only sinks stay responsive under backlog
+- loss-free sinks preserve data through bursts
+- correlated-window sinks reject or accept events for the right reasons
+- sink-specific drop policies behave correctly under isolated and shared delay
+- source-time to host-monotonic confidence scores degrade appropriately when
+  queueing is intentionally introduced
+
+### Relationship to current code
+
+This fits the current architecture:
+
+- blocking reader threads can remain blocking
+- no event loop rewrite is required
+- the delay hook lives at the reader boundary
+- the existing move toward event envelopes and timing metadata makes the
+  resulting behavior diagnosable
+
 ## What we learned on `oxco`
 
 On `oxco`, `/dev/gnss0` behaves badly for correlation purposes:
@@ -293,13 +485,19 @@ Why it matters:
 
 Current code:
 
+- `StrictCorrelationGate.pop_observation_match()`
 - `_match_pps_event_from_history()`
 - `_find_pps_event_for_obs()`
-- `_pop_correlatable_observation()`
-in [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+in [`scripts/peppar_fix/correlation_gate.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/correlation_gate.py)
+and [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
 
 What happens:
 
+- the strict sink gate sits in front of the steady-state servo sink
+- observations stay in history until the gate can do one of three things:
+  - consume a valid matched observation/PPS pair
+  - defer while waiting for more companion events
+  - drop an observation once the window proves it can no longer match
 - candidate PPS events are chosen from history using:
   - observation `recv_mono`
   - PPS `recv_mono`
@@ -308,7 +506,12 @@ What happens:
 
 Why it matters:
 
-- this is the core cross-stream correlator in the current unified path
+- this is now the core strict-sink correlator in the current unified path
+- the sink contract is explicit and measurable through gate stats:
+  - `consumed_correlated`
+  - `deferred_waiting`
+  - `dropped_unmatched`
+  - `dropped_outside_window`
 
 ### F. Servo timescale correlation
 
@@ -330,7 +533,31 @@ Why it matters:
 
 - this is where second alignment and sub-second phase are combined into one servo error source
 
-### G. Legacy queue-order servo paths
+### G. Correction freshness gating for EKFs
+
+Current code:
+
+- `CorrectionFreshnessGate.accept()`
+in [`scripts/peppar_fix/correlation_gate.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/correlation_gate.py)
+- `RealtimeCorrections.freshness()`
+in [`scripts/ssr_corrections.py`](/home/bob/git/PePPAR-Fix/scripts/ssr_corrections.py)
+
+What happens:
+
+- the live EKF loops now check correction freshness before LS init,
+  ambiguity seeding, or `filt.update(...)`
+- this is a softer gate than PPS matching:
+  - it defers when broadcast state is not ready yet
+  - it drops when broadcast state is stale on host monotonic time
+  - it does not require one-to-one event pairing
+
+Why it matters:
+
+- the EKF observation epoch is not enough by itself
+- the satellite position/clock model also has to be fresh enough to trust
+- this moves the EKF paths away from implicit “latest correction wins”
+  behavior
+### H. Legacy queue-order servo paths
 
 Current code:
 

@@ -32,6 +32,7 @@ Usage:
 import argparse
 from collections import deque
 import csv
+import json
 import logging
 import math
 import queue
@@ -50,8 +51,15 @@ from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections
 from ntrip_client import NtripStream
 from realtime_ppp import serial_reader, ntrip_reader, QErrStore
-from peppar_fix import save_position, load_position, PositionWatchdog
+from peppar_fix import (
+    CorrectionFreshnessGate,
+    PositionWatchdog,
+    StrictCorrelationGate,
+    load_position,
+    save_position,
+)
 from peppar_fix.event_time import PpsEvent
+from peppar_fix.fault_injection import get_delay_injector
 from peppar_fix.receiver import get_driver
 
 log = logging.getLogger("peppar-fix")
@@ -87,6 +95,14 @@ def apply_ptp_profile(args):
         args.track_ki = profile.get("track_ki", args.track_ki)
     if not args.program_pin:
         args.program_pin = bool(profile.get("program_pin", False))
+    if args.max_broadcast_age_s is None:
+        args.max_broadcast_age_s = profile.get(
+            "max_broadcast_age_s", args.max_broadcast_age_s
+        )
+    if args.require_ssr is None:
+        args.require_ssr = profile.get("require_ssr", args.require_ssr)
+    if args.max_ssr_age_s is None:
+        args.max_ssr_age_s = profile.get("max_ssr_age_s", args.max_ssr_age_s)
 
 
 # ── Convergence detection (from peppar_find_position) ─────────────────── #
@@ -205,6 +221,8 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
 
     filt = PPPFilter()
     filt_initialized = False
+    correction_gate = CorrectionFreshnessGate()
+    run_bootstrap.last_correction_gate_stats = correction_gate.stats.as_dict()
 
     prev_t = None
     prev_pos_ecef = None
@@ -229,6 +247,24 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
                 return None
             continue
         n_empty = 0
+
+        ok_corr, corr_reason, corr_snapshot = correction_gate.accept(
+            corrections,
+            max_broadcast_age_s=args.max_broadcast_age_s,
+            require_ssr=args.require_ssr,
+            max_ssr_age_s=args.max_ssr_age_s,
+        )
+        run_bootstrap.last_correction_gate_stats = correction_gate.stats.as_dict()
+        if not ok_corr:
+            if n_epochs % 10 == 0:
+                log.info(
+                    "Bootstrap waiting for fresh corrections: reason=%s "
+                    "broadcast_age=%s",
+                    corr_reason,
+                    f"{corr_snapshot['broadcast_age_s']:.1f}s"
+                    if corr_snapshot["broadcast_age_s"] is not None else "N/A",
+                )
+            continue
 
         # Initialize filter on first epoch with enough satellites
         if not filt_initialized:
@@ -327,10 +363,12 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
             if n_epochs - converged_at >= 30:
                 log.info(f"CONVERGED at epoch {n_epochs} "
                          f"(σ={sigma_3d:.4f}m, rms={rms:.3f}m)")
+                run_bootstrap.last_correction_gate_stats = correction_gate.stats.as_dict()
                 return (pos_ecef, float(sigma_3d))
         else:
             converged_at = None
 
+    run_bootstrap.last_correction_gate_stats = correction_gate.stats.as_dict()
     return None
 
 
@@ -350,6 +388,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
     filt = FixedPosFilter(known_ecef)
     filt.prev_clock = 0.0
     watchdog = PositionWatchdog(threshold_m=args.watchdog_threshold)
+    correction_gate = CorrectionFreshnessGate()
 
     # Optional servo setup (PTP imports only loaded when needed)
     servo_ctx = None
@@ -357,10 +396,15 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
         servo_ctx = _setup_servo(args, known_ecef)
         if servo_ctx is None:
             log.error("Failed to set up PHC servo, continuing without it")
+        else:
+            servo_ctx["correlation_gate"] = StrictCorrelationGate()
 
     prev_t = None
     n_epochs = 0
     start_time = time.time()
+    # Sink policy: steady-state + servo is a correlated-window consumer.
+    # Preserve receive order here and let the correlator decide when an epoch
+    # is too old to be useful, rather than draining the queue at phase entry.
     obs_history = deque()
     try:
         while not stop_event.is_set():
@@ -374,9 +418,21 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 continue
 
             if servo_ctx is not None:
-                obs_event, pps_match, dropped_obs = _pop_correlatable_observation(
-                    servo_ctx, args, obs_history,
+                gate = servo_ctx["correlation_gate"]
+                dropped_before = gate.stats.dropped_unmatched
+                obs_event, pps_match = gate.pop_observation_match(
+                    obs_history,
+                    target_sec_fn=lambda event: _target_timescale_sec(event.gps_time, args),
+                    match_fn=lambda obs_event, target_sec, min_window_s=0.5, max_window_s=11.0:
+                        _match_pps_event_from_history(
+                            servo_ctx,
+                            obs_event,
+                            target_sec,
+                            min_window_s=min_window_s,
+                            max_window_s=max_window_s,
+                        ),
                 )
+                dropped_obs = gate.stats.dropped_unmatched - dropped_before
                 if obs_event is None:
                     if added_obs and n_epochs % 10 == 0:
                         log.info(f"  [{n_epochs}] Awaiting correlatable observation "
@@ -386,6 +442,24 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 obs_event = obs_history.popleft()
                 pps_match = None
                 dropped_obs = 0
+
+            ok_corr, corr_reason, corr_snapshot = correction_gate.accept(
+                corrections,
+                max_broadcast_age_s=args.max_broadcast_age_s,
+                require_ssr=args.require_ssr,
+                max_ssr_age_s=args.max_ssr_age_s,
+            )
+            if not ok_corr:
+                if n_epochs % 10 == 0:
+                    log.info(
+                        "  [%s] Waiting for fresh corrections: reason=%s "
+                        "broadcast_age=%s",
+                        n_epochs,
+                        corr_reason,
+                        f"{corr_snapshot['broadcast_age_s']:.1f}s"
+                        if corr_snapshot["broadcast_age_s"] is not None else "N/A",
+                    )
+                continue
 
             if dropped_obs and n_epochs % 10 == 0:
                 log.info(f"  [{n_epochs}] Dropped {dropped_obs} expired observation epochs")
@@ -468,17 +542,28 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
         log.info("Interrupted")
     finally:
         stop_event.set()
+        if servo_ctx is not None and servo_ctx.get("correlation_gate") is not None:
+            gate_stats = {
+                "strict_correlation": servo_ctx["correlation_gate"].stats.as_dict(),
+                "correction_freshness": correction_gate.stats.as_dict(),
+            }
+        else:
+            gate_stats = {
+                "correction_freshness": correction_gate.stats.as_dict(),
+            }
         if servo_ctx is not None:
             _cleanup_servo(servo_ctx)
 
     elapsed = time.time() - start_time
     log.info(f"Steady state complete: {elapsed:.0f}s, {n_epochs} epochs")
+    return gate_stats
 
 
 # ── Servo helpers (conditional PTP import) ────────────────────────────── #
 
 def _setup_servo(args, known_ecef):
     """Set up PHC servo. Returns context dict or None on failure."""
+    gate_stats = None
     try:
         from peppar_fix import PtpDevice, PIServo, DisciplineScheduler
         from peppar_fix import compute_error_sources
@@ -529,12 +614,14 @@ def _setup_servo(args, known_ecef):
     pps_history = deque(maxlen=32)
     pps_history_lock = threading.Lock()
     stop_pps = threading.Event()
+    delay_injector = get_delay_injector()
 
     def extts_reader():
         while not stop_pps.is_set():
             event = ptp.read_extts(timeout_ms=1500)
             if event is None:
                 continue
+            delay_injector.maybe_inject_delay(f"ptp:{args.servo}")
             phc_sec, phc_nsec, index, queue_remains = event
             pps_event = PpsEvent(
                 phc_sec=phc_sec,
@@ -546,15 +633,9 @@ def _setup_servo(args, known_ecef):
             )
             with pps_history_lock:
                 pps_history.append(pps_event)
-            try:
-                pps_queue.put_nowait(pps_event)
-            except queue.Full:
-                while not pps_queue.empty():
-                    try:
-                        pps_queue.get_nowait()
-                    except queue.Empty:
-                        break
-                pps_queue.put_nowait(pps_event)
+            dropped = _queue_put_drop_oldest(pps_queue, pps_event)
+            if dropped:
+                log.debug("Dropped one stale PPS notification due to full queue")
 
     t_extts = threading.Thread(target=extts_reader, daemon=True)
     t_extts.start()
@@ -808,13 +889,6 @@ def _servo_epoch(ctx, args, filt, obs_event, n_epochs,
         scheduler = ctx['scheduler']
         ctx['phase'] = 'tracking'
 
-        # Flush stale PPS events
-        time.sleep(2)
-        while not pps_queue.empty():
-            try:
-                pps_queue.get_nowait()
-            except queue.Empty:
-                break
         return
 
     # Tracking phase
@@ -915,15 +989,23 @@ def _cleanup_servo(ctx):
     log.info("PHC servo cleaned up")
 
 
-def _drain_queue(qobj):
-    """Drop any queued items and return how many were removed."""
-    drained = 0
-    while True:
+def _queue_put_drop_oldest(qobj, item):
+    """Enqueue one item, dropping at most one oldest entry if full.
+
+    This queue is only a wakeup/notification path for sinks that keep their own
+    history. When full, preserve continuity by dropping one oldest wakeup
+    rather than draining the queue and erasing recent timing context.
+    """
+    try:
+        qobj.put_nowait(item)
+        return 0
+    except queue.Full:
         try:
             qobj.get_nowait()
-            drained += 1
         except queue.Empty:
-            return drained
+            pass
+        qobj.put_nowait(item)
+        return 1
 
 
 def _append_queue_history(history, qobj, timeout=0.5):
@@ -936,47 +1018,6 @@ def _append_queue_history(history, qobj, timeout=0.5):
             added += 1
         except queue.Empty:
             return added
-
-
-def _get_latest_queue_item(qobj, timeout=0.5):
-    """Return the newest queued item, discarding older stale ones."""
-    item = qobj.get(timeout=timeout)
-    dropped = 0
-    while True:
-        try:
-            item = qobj.get_nowait()
-            dropped += 1
-        except queue.Empty:
-            return item, dropped
-
-
-def _pop_correlatable_observation(ctx, args, obs_history,
-                                  min_window_s=0.5, max_window_s=11.0):
-    """Return the oldest observation that can be matched to PPS history.
-
-    Observations are retained in receive order until a matching PPS event is
-    available or until they age beyond the accepted correlation window.
-    """
-    dropped = 0
-    while obs_history:
-        obs_event = obs_history[0]
-        target_sec = _target_timescale_sec(obs_event.gps_time, args)
-        pps_event, delta_s, recv_dt_s, latest_pps_mono = _match_pps_event_from_history(
-            ctx, obs_event, target_sec,
-            min_window_s=min_window_s,
-            max_window_s=max_window_s,
-        )
-        if pps_event is not None:
-            obs_history.popleft()
-            return obs_event, (pps_event, delta_s, recv_dt_s), dropped
-        if latest_pps_mono is None:
-            return None, None, dropped
-        if latest_pps_mono - obs_event.recv_mono > max_window_s:
-            obs_history.popleft()
-            dropped += 1
-            continue
-        return None, None, dropped
-    return None, None, dropped
 
 
 # ── Main ──────────────────────────────────────────────────────────────── #
@@ -1128,13 +1169,17 @@ def run(args):
         if stop_event.is_set():
             return 0
 
-        drained_obs = _drain_queue(obs_queue)
-        if drained_obs:
-            log.info(f"Drained {drained_obs} queued observation epochs before steady state")
-
         # Phase 2: Steady state
-        run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
-                         stop_event, out_w=out_w)
+        gate_stats = run_steady_state(
+            args,
+            known_ecef,
+            obs_queue,
+            corrections,
+            beph,
+            ssr,
+            stop_event,
+            out_w=out_w,
+        )
 
     except KeyboardInterrupt:
         log.info("Interrupted")
@@ -1142,6 +1187,9 @@ def run(args):
         stop_event.set()
         if out_f:
             out_f.close()
+        if args.gate_stats and gate_stats is not None:
+            with open(args.gate_stats, "w") as f:
+                json.dump(gate_stats, f, indent=2, sort_keys=True)
 
     return 0
 
@@ -1203,6 +1251,12 @@ Two-phase operation:
     ntrip.add_argument("--ssr-mount", help="SSR corrections mountpoint")
     ntrip.add_argument("--ntrip-user", help="NTRIP username")
     ntrip.add_argument("--ntrip-password", help="NTRIP password")
+    ntrip.add_argument("--max-broadcast-age-s", type=float, default=None,
+                       help="Maximum host-monotonic age for broadcast correction state (default: 30)")
+    ntrip.add_argument("--require-ssr", action="store_true", default=None,
+                       help="Require fresh SSR state before EKF updates")
+    ntrip.add_argument("--max-ssr-age-s", type=float, default=None,
+                       help="Maximum host-monotonic age for SSR state when --require-ssr is set (default: 30)")
 
     # PHC servo (optional)
     servo = ap.add_argument_group("PHC servo (optional)")
@@ -1249,6 +1303,7 @@ Two-phase operation:
     out.add_argument("--out", help="Solution CSV output file")
     out.add_argument("--duration", type=int, default=None,
                      help="Run duration in seconds (0 = unlimited)")
+    out.add_argument("--gate-stats", help="Optional JSON output for strict sink gate statistics")
     out.add_argument("-v", "--verbose", action="store_true")
 
     args = ap.parse_args()
@@ -1259,6 +1314,12 @@ Two-phase operation:
         args.extts_channel = 0
     if args.phc_timescale is None:
         args.phc_timescale = "utc"
+    if args.max_broadcast_age_s is None:
+        args.max_broadcast_age_s = 30.0
+    if args.require_ssr is None:
+        args.require_ssr = False
+    if args.max_ssr_age_s is None:
+        args.max_ssr_age_s = 30.0
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

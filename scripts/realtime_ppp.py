@@ -70,7 +70,8 @@ from ppp_corrections import OSBParser, CLKFile
 from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections
 from ntrip_client import NtripStream
-from peppar_fix.event_time import ObservationEvent
+from peppar_fix.event_time import ObservationEvent, RtcmEvent
+from peppar_fix.fault_injection import get_delay_injector
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +118,21 @@ IF_PAIR_PARAMS = {
     ('BDS-B1I', 'BDS-B2I'): ('C', ALPHA_B1I_B2I, ALPHA_B2I),
     ('BDS-B1I', 'BDS-B2aI'): ('C', ALPHA_B1I, ALPHA_B2A),
 }
+
+
+class RtcmMessageView:
+    """RTCM message wrapper that preserves decoded fields plus timing metadata."""
+
+    def __init__(self, message, event):
+        self._message = message
+        self.recv_mono = event.recv_mono
+        self.recv_utc = event.recv_utc
+        self.queue_remains = event.queue_remains
+        self.parse_age_s = event.parse_age_s
+        self.correlation_confidence = event.correlation_confidence
+
+    def __getattr__(self, name):
+        return getattr(self._message, name)
 
 
 # ── Serial observation reader ──────────────────────────────────────────────── #
@@ -209,6 +225,8 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
     epoch_data = {}   # sv → {f1: {...}, f2: {...}}
     epoch_ts = None
     n_epochs = 0
+    delay_injector = get_delay_injector()
+    source_name = f"gnss:{port}"
     while not stop_event.is_set():
         # Drain config queue: write pending UBX messages to the receiver
         if config_queue is not None:
@@ -224,6 +242,7 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
             raw, parsed = ubr.read()
             if parsed is None:
                 continue
+            delay_injector.maybe_inject_delay(source_name)
 
             msg_id = parsed.identity
 
@@ -430,24 +449,37 @@ def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP"):
     """
     msg_counts = defaultdict(int)
     n_total = 0
+    delay_injector = get_delay_injector()
+    source_name = f"ntrip:{label}"
 
     try:
-        for msg in stream.messages():
+        for msg, meta in stream.messages_with_metadata():
             if stop_event.is_set():
                 break
+            delay_injector.maybe_inject_delay(source_name)
 
             identity = str(getattr(msg, 'identity', ''))
+            event = RtcmEvent(
+                identity=identity,
+                message=None,
+                recv_mono=meta["recv_mono"],
+                recv_utc=datetime.now(timezone.utc),
+                queue_remains=meta["queue_remains"],
+                parse_age_s=meta["parse_age_s"],
+                correlation_confidence=meta["correlation_confidence"],
+            )
+            msg_view = RtcmMessageView(msg, event)
             msg_counts[identity] += 1
             n_total += 1
 
             # Route to appropriate handler
             if identity in EPH_MSG_TYPES:
-                prn = beph.update_from_rtcm(msg)
+                prn = beph.update_from_rtcm(msg_view)
                 if prn and beph.n_satellites % 10 == 0:
                     log.debug(f"[{label}] {beph.summary()}")
 
             elif identity in SSR_MSG_TYPES or identity.startswith('4076_'):
-                ssr.update_from_rtcm(msg)
+                ssr.update_from_rtcm(msg_view)
 
             if n_total % 100 == 0:
                 log.info(f"[{label}] {n_total} msgs | {beph.summary()} | {ssr.summary()}")

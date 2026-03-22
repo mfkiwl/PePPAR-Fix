@@ -252,6 +252,11 @@ class NtripStream:
         This is the primary API. Each yielded message has attributes
         for all decoded fields (e.g., msg.DF009 for GPS satellite ID).
         """
+        for parsed, _meta in self.messages_with_metadata():
+            yield parsed
+
+    def messages_with_metadata(self):
+        """Generator yielding decoded messages with host timing metadata."""
         try:
             from pyrtcm import RTCMReader
         except ImportError:
@@ -259,6 +264,8 @@ class NtripStream:
             return
 
         for msg_type, frame in self.raw_frames():
+            parse_mono = time.monotonic()
+            queue_remains = bool(self._buffer)
             try:
                 result = RTCMReader.parse(frame)
                 # pyrtcm >= 1.1: returns RTCMMessage directly
@@ -267,8 +274,14 @@ class NtripStream:
                     parsed = result[1]
                 else:
                     parsed = result
+                confidence = 1.0 if not queue_remains else 0.5
                 self._msgs_decoded += 1
-                yield parsed
+                yield parsed, {
+                    "recv_mono": parse_mono,
+                    "queue_remains": queue_remains,
+                    "parse_age_s": 0.0,
+                    "correlation_confidence": confidence,
+                }
             except Exception as e:
                 log.debug(f"Failed to parse message type {msg_type}: {e}")
 

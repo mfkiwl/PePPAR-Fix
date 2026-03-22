@@ -92,7 +92,7 @@ def check_pps(ptp_dev, extts_pin, extts_channel=0, program_pin=True, timeout_s=5
     ptp.close()
 
     if event is not None:
-        phc_sec, phc_nsec, _ = event
+        phc_sec, phc_nsec, _, _queue_remains = event
         log.info(f"  PPS detected: {phc_sec}.{phc_nsec:09d}")
         return True
     else:

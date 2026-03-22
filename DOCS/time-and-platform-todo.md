@@ -59,12 +59,33 @@ This file turns the recent bring-up and correlation findings into a concrete wor
   - TIM-TP freshness
   - future TICC matching
 - [ ] Log window-based drop reasons explicitly
+- [x] Add timing fault-injection controls:
+  - `THREAD_DELAY_PROB_PCT`, `THREAD_DELAY_MEAN_MS`, `THREAD_DELAY_RANGE_MS`
+  - `SYS_DELAY_PROB_PCT`, `SYS_DELAY_MEAN_MS`, `SYS_DELAY_RANGE_MS`
+- [x] Add a correlated-delay controller so all reader threads can simulate one
+  host-wide or path-wide queuing event
+- [x] Add an injected-delay event log with start and stop times on host
+  `CLOCK_MONOTONIC`
+- [x] Add low-probability injected-delay smoke tests on `oxco` to verify the
+  unified path still reaches steady state without crashing
+- [x] Put a strict correlation gate in front of the unified servo sink
+- [x] Put a correction-freshness gate in front of the live EKF update loops
+- [x] Move correction-freshness defaults into platform profile config so live
+  entrypoints inherit policy instead of relying on CLI-only defaults
+- [ ] Add explicit pass/fail thresholds based on gate outcomes:
+  - minimum `consumed_correlated`
+  - maximum `dropped_unmatched`
+  - expected `deferred_waiting` behavior under injected queueing
+- [ ] Move away from `epoch_offset_s` as the primary robustness gate
+  for strict sinks; keep it as a secondary symptom only
 
 ### Drop policy
 
 - [ ] Audit the code for places that still discard events before correlation
 - [ ] Replace “newest event wins” logic with history-and-window logic where needed
 - [ ] Separate startup backlog cleanup from steady-state stale-event handling
+- [ ] Remove or justify every queue drain at open, after a step, or on overflow
+  where a bounded oldest-drop or sink-side gate would be safer
 
 ## 4. Legacy code cleanup
 
@@ -76,6 +97,7 @@ These files still contain older queue-order assumptions or duplicate timing logi
 
 Tasks:
 
+- [x] Put the strict observation/PPS correlation gate pattern into the legacy steady-state servo paths
 - [ ] Compare each legacy path against the unified event-history logic in [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
 - [ ] Decide whether each path should be migrated, reduced, or removed
 - [ ] Avoid maintaining multiple subtly different correlation models
@@ -86,6 +108,7 @@ Tasks:
 - [ ] Keep a simple EXTS probe for PPS verification
 - [ ] Add a comparable probe for TICC line receive timing once TICC is integrated
 - [ ] Make it easy to emit correlation diagnostics without modifying core servo logic each time
+- [x] Add a repeatable servo fault-smoke wrapper for low-probability injected-delay tests
 
 ## 6. Documentation
 

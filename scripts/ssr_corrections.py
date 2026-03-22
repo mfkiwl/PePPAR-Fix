@@ -28,6 +28,7 @@ Usage:
 
 import logging
 import math
+import time
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
@@ -118,10 +119,12 @@ _SSR_SIGNAL_MAP = {
 class OrbitCorrection:
     """SSR orbit correction for one satellite at one epoch."""
     __slots__ = ('iod', 'epoch_s', 'radial', 'along', 'cross',
-                 'dot_radial', 'dot_along', 'dot_cross', 'rx_time')
+                 'dot_radial', 'dot_along', 'dot_cross', 'rx_time',
+                 'rx_mono', 'queue_remains', 'correlation_confidence')
 
     def __init__(self, iod, epoch_s, radial, along, cross,
-                 dot_radial=0.0, dot_along=0.0, dot_cross=0.0):
+                 dot_radial=0.0, dot_along=0.0, dot_cross=0.0,
+                 rx_mono=None, queue_remains=None, correlation_confidence=None):
         self.iod = iod
         self.epoch_s = epoch_s
         self.radial = radial       # meters
@@ -131,27 +134,37 @@ class OrbitCorrection:
         self.dot_along = dot_along
         self.dot_cross = dot_cross
         self.rx_time = datetime.now(timezone.utc)
+        self.rx_mono = rx_mono
+        self.queue_remains = queue_remains
+        self.correlation_confidence = correlation_confidence
 
 
 class ClockCorrection:
     """SSR clock correction for one satellite at one epoch."""
-    __slots__ = ('epoch_s', 'c0', 'c1', 'c2', 'rx_time')
+    __slots__ = ('epoch_s', 'c0', 'c1', 'c2', 'rx_time',
+                 'rx_mono', 'queue_remains', 'correlation_confidence')
 
-    def __init__(self, epoch_s, c0, c1=0.0, c2=0.0):
+    def __init__(self, epoch_s, c0, c1=0.0, c2=0.0,
+                 rx_mono=None, queue_remains=None, correlation_confidence=None):
         self.epoch_s = epoch_s
         self.c0 = c0    # meters
         self.c1 = c1    # meters/s
         self.c2 = c2    # meters/s²
         self.rx_time = datetime.now(timezone.utc)
+        self.rx_mono = rx_mono
+        self.queue_remains = queue_remains
+        self.correlation_confidence = correlation_confidence
 
 
 class BiasCorrection:
     """SSR code or phase bias for one satellite, one signal."""
     __slots__ = ('signal_code', 'bias_m', 'rx_time', 'is_phase',
-                 'integer_indicator', 'wl_indicator', 'disc_counter')
+                 'integer_indicator', 'wl_indicator', 'disc_counter',
+                 'rx_mono', 'queue_remains', 'correlation_confidence')
 
     def __init__(self, signal_code, bias_m, is_phase=False,
-                 integer_indicator=0, wl_indicator=0, disc_counter=0):
+                 integer_indicator=0, wl_indicator=0, disc_counter=0,
+                 rx_mono=None, queue_remains=None, correlation_confidence=None):
         self.signal_code = signal_code
         self.bias_m = bias_m
         self.is_phase = is_phase
@@ -159,6 +172,9 @@ class BiasCorrection:
         self.wl_indicator = wl_indicator
         self.disc_counter = disc_counter
         self.rx_time = datetime.now(timezone.utc)
+        self.rx_mono = rx_mono
+        self.queue_remains = queue_remains
+        self.correlation_confidence = correlation_confidence
 
 
 class SSRState:
@@ -175,6 +191,10 @@ class SSRState:
         self._phase_bias = defaultdict(dict)  # {prn: {signal_code: BiasCorrection}}
         self._update_counts = defaultdict(int)
         self._iod_ssr = None
+        self._last_update_mono = None
+        self._last_orbit_update_mono = None
+        self._last_clock_update_mono = None
+        self._last_bias_update_mono = None
 
     @property
     def n_orbit(self):
@@ -213,21 +233,39 @@ class SSRState:
         self._iod_ssr = iod_ssr
 
         n_sats = getattr(msg, 'IDF010', None) or getattr(msg, 'DF387', 0)
+        rx_mono = getattr(msg, 'recv_mono', None)
+        queue_remains = getattr(msg, 'queue_remains', None)
+        correlation_confidence = getattr(msg, 'correlation_confidence', None)
 
         if subtype == 'orbit':
-            self._parse_orbit(msg, sys_prefix, epoch_s, n_sats)
+            self._parse_orbit(msg, sys_prefix, epoch_s, n_sats,
+                              rx_mono, queue_remains, correlation_confidence)
+            self._last_orbit_update_mono = rx_mono
         elif subtype == 'clock':
-            self._parse_clock(msg, sys_prefix, epoch_s, n_sats)
+            self._parse_clock(msg, sys_prefix, epoch_s, n_sats,
+                              rx_mono, queue_remains, correlation_confidence)
+            self._last_clock_update_mono = rx_mono
         elif subtype == 'combined':
-            self._parse_orbit(msg, sys_prefix, epoch_s, n_sats)
-            self._parse_clock(msg, sys_prefix, epoch_s, n_sats)
+            self._parse_orbit(msg, sys_prefix, epoch_s, n_sats,
+                              rx_mono, queue_remains, correlation_confidence)
+            self._parse_clock(msg, sys_prefix, epoch_s, n_sats,
+                              rx_mono, queue_remains, correlation_confidence)
+            self._last_orbit_update_mono = rx_mono
+            self._last_clock_update_mono = rx_mono
         elif subtype == 'hr_clock':
-            self._parse_clock(msg, sys_prefix, epoch_s, n_sats)
+            self._parse_clock(msg, sys_prefix, epoch_s, n_sats,
+                              rx_mono, queue_remains, correlation_confidence)
+            self._last_clock_update_mono = rx_mono
         elif subtype == 'code_bias':
-            self._parse_code_bias(msg, sys_prefix, n_sats)
+            self._parse_code_bias(msg, sys_prefix, n_sats,
+                                  rx_mono, queue_remains, correlation_confidence)
+            self._last_bias_update_mono = rx_mono
         elif subtype == 'phase_bias':
-            self._parse_phase_bias(msg, sys_prefix, n_sats)
+            self._parse_phase_bias(msg, sys_prefix, n_sats,
+                                   rx_mono, queue_remains, correlation_confidence)
+            self._last_bias_update_mono = rx_mono
 
+        self._last_update_mono = rx_mono
         self._update_counts[subtype] += 1
         return subtype
 
@@ -249,7 +287,8 @@ class SSRState:
                 return int(val)
         return 0
 
-    def _parse_orbit(self, msg, sys_prefix, epoch_s, n_sats):
+    def _parse_orbit(self, msg, sys_prefix, epoch_s, n_sats,
+                     rx_mono=None, queue_remains=None, correlation_confidence=None):
         """Extract per-satellite orbit corrections from an SSR message.
 
         Supports both IGS SSR (IDF fields) and standard RTCM SSR (DF fields).
@@ -291,9 +330,13 @@ class SSRState:
                 iod=iod, epoch_s=epoch_s,
                 radial=radial, along=along, cross=cross,
                 dot_radial=dot_r, dot_along=dot_a, dot_cross=dot_c,
+                rx_mono=rx_mono,
+                queue_remains=queue_remains,
+                correlation_confidence=correlation_confidence,
             )
 
-    def _parse_clock(self, msg, sys_prefix, epoch_s, n_sats):
+    def _parse_clock(self, msg, sys_prefix, epoch_s, n_sats,
+                     rx_mono=None, queue_remains=None, correlation_confidence=None):
         """Extract per-satellite clock corrections from an SSR message.
 
         Standard RTCM SSR clock fields (pyrtcm):
@@ -322,9 +365,13 @@ class SSRState:
 
             self._clock[prn] = ClockCorrection(
                 epoch_s=epoch_s, c0=c0, c1=c1, c2=c2,
+                rx_mono=rx_mono,
+                queue_remains=queue_remains,
+                correlation_confidence=correlation_confidence,
             )
 
-    def _parse_code_bias(self, msg, sys_prefix, n_sats):
+    def _parse_code_bias(self, msg, sys_prefix, n_sats,
+                         rx_mono=None, queue_remains=None, correlation_confidence=None):
         """Extract per-satellite code bias corrections.
 
         Standard RTCM SSR code bias fields (pyrtcm):
@@ -357,9 +404,13 @@ class SSRState:
                     continue
                 self._code_bias[prn][rinex_code] = BiasCorrection(
                     signal_code=rinex_code, bias_m=float(bias_m), is_phase=False,
+                    rx_mono=rx_mono,
+                    queue_remains=queue_remains,
+                    correlation_confidence=correlation_confidence,
                 )
 
-    def _parse_phase_bias(self, msg, sys_prefix, n_sats):
+    def _parse_phase_bias(self, msg, sys_prefix, n_sats,
+                          rx_mono=None, queue_remains=None, correlation_confidence=None):
         """Extract per-satellite phase bias corrections.
 
         Standard RTCM SSR uses 1265/1267/1270 for GPS/GAL/BDS phase biases.
@@ -395,6 +446,9 @@ class SSRState:
                     signal_code=rinex_code, bias_m=float(bias_m), is_phase=True,
                     integer_indicator=int_ind, wl_indicator=wl_ind,
                     disc_counter=disc,
+                    rx_mono=rx_mono,
+                    queue_remains=queue_remains,
+                    correlation_confidence=correlation_confidence,
                 )
 
     def get_orbit(self, prn):
@@ -442,6 +496,18 @@ class SSRState:
         return (f"SSR: {self.n_orbit} orbit, {self.n_clock} clock, "
                 f"{sum(len(v) for v in self._code_bias.values())} code bias, "
                 f"{sum(len(v) for v in self._phase_bias.values())} phase bias")
+
+    @property
+    def last_update_mono(self):
+        return self._last_update_mono
+
+    @property
+    def last_orbit_update_mono(self):
+        return self._last_orbit_update_mono
+
+    @property
+    def last_clock_update_mono(self):
+        return self._last_clock_update_mono
 
 
 class RealtimeCorrections:
@@ -560,3 +626,22 @@ class RealtimeCorrections:
         """Return a string summarizing correction state."""
         return (f"{self.beph.summary()} | {self.ssr.summary()} | "
                 f"Applied: {self._ssr_applied} SSR, {self._broadcast_only} broadcast-only")
+
+    def freshness(self, now_mono=None):
+        """Return host-monotonic freshness metadata for current correction state."""
+        if now_mono is None:
+            now_mono = time.monotonic()
+
+        def _age(ts):
+            if ts is None:
+                return None
+            return max(0.0, now_mono - ts)
+
+        return {
+            "broadcast_age_s": _age(self.beph.last_update_mono),
+            "ssr_age_s": _age(self.ssr.last_update_mono),
+            "ssr_orbit_age_s": _age(self.ssr.last_orbit_update_mono),
+            "ssr_clock_age_s": _age(self.ssr.last_clock_update_mono),
+            "broadcast_ready": self.beph.n_satellites > 0 and self.beph.last_update_mono is not None,
+            "ssr_ready": self.ssr.last_update_mono is not None,
+        }
