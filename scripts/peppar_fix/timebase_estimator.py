@@ -1,4 +1,4 @@
-"""Slow-moving estimators for source-time to host-monotonic relationships."""
+"""Constant-offset estimators for source-time to host-monotonic relationships."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ import math
 
 
 class TimebaseRelationEstimator:
-    """Track a source-time to monotonic-time relationship with a simple EMA.
+    """Track a source-time to monotonic-time relationship as a weighted constant.
 
     The estimator models:
 
         recv_mono ~= source_time_s + offset_s
 
-    where ``offset_s`` changes slowly. Sudden residual growth usually means
+    where ``offset_s`` should be nearly constant. Sudden residual growth usually means
     queueing, batching, or a scheduling delay between the true event time and
     the point where user space handled it.
     """
@@ -20,27 +20,33 @@ class TimebaseRelationEstimator:
     def __init__(
         self,
         *,
-        alpha: float = 0.02,
-        sigma_alpha: float = 0.05,
         min_sigma_s: float = 1e-3,
         sigma_scale: float = 4.0,
     ):
-        self.alpha = alpha
-        self.sigma_alpha = sigma_alpha
         self.min_sigma_s = min_sigma_s
         self.sigma_scale = sigma_scale
 
         self._offset_s = None
         self._sigma_s = min_sigma_s
         self._samples = 0
+        self._total_weight = 0.0
+        self._weighted_abs_residual_sum = 0.0
 
-    def update(self, source_time_s: float, recv_mono_s: float):
+    def update(
+        self,
+        source_time_s: float,
+        recv_mono_s: float,
+        *,
+        sample_weight: float = 1.0,
+    ):
         """Update the estimate and return residual/confidence details."""
         observed_offset_s = recv_mono_s - source_time_s
+        sample_weight = max(0.0, min(1.0, float(sample_weight)))
 
         if self._offset_s is None:
             self._offset_s = observed_offset_s
             self._samples = 1
+            self._total_weight = max(sample_weight, 1.0)
             return {
                 "predicted_recv_mono_s": recv_mono_s,
                 "residual_s": 0.0,
@@ -53,15 +59,18 @@ class TimebaseRelationEstimator:
         residual_s = recv_mono_s - predicted_recv_mono_s
         abs_residual_s = abs(residual_s)
 
-        self._offset_s = (
-            (1.0 - self.alpha) * self._offset_s
-            + self.alpha * observed_offset_s
-        )
-        self._sigma_s = max(
-            self.min_sigma_s,
-            (1.0 - self.sigma_alpha) * self._sigma_s
-            + self.sigma_alpha * abs_residual_s,
-        )
+        if sample_weight > 0.0:
+            new_total_weight = self._total_weight + sample_weight
+            self._offset_s = (
+                (self._offset_s * self._total_weight)
+                + (observed_offset_s * sample_weight)
+            ) / new_total_weight
+            self._weighted_abs_residual_sum += abs_residual_s * sample_weight
+            self._total_weight = new_total_weight
+            self._sigma_s = max(
+                self.min_sigma_s,
+                self._weighted_abs_residual_sum / self._total_weight,
+            )
         self._samples += 1
 
         scale_s = max(self.min_sigma_s, self._sigma_s * self.sigma_scale)
@@ -74,4 +83,5 @@ class TimebaseRelationEstimator:
             "sigma_s": self._sigma_s,
             "confidence": confidence,
             "samples": self._samples,
+            "sample_weight": sample_weight,
         }

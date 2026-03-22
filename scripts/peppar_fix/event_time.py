@@ -37,6 +37,26 @@ def merge_correlation_confidence(*values: Optional[float]) -> float:
     return max(0.0, min(present))
 
 
+def estimator_sample_weight(
+    *,
+    queue_remains: Optional[bool],
+    base_confidence: float,
+    min_weight: float = 0.0,
+    queued_scale: float = 0.1,
+) -> float:
+    """Weight a source-time sample for constant-offset estimation.
+
+    The offset between healthy same-unit timescales should be nearly constant.
+    Visible backlog usually means the observed receive delay is dominated by
+    queueing rather than a real change in offset, so those samples should move
+    the estimator very little or not at all.
+    """
+    weight = max(0.0, min(1.0, float(base_confidence)))
+    if queue_remains:
+        weight *= queued_scale
+    return max(min_weight, min(1.0, weight))
+
+
 @dataclass(frozen=True)
 class ObservationEvent:
     """One GNSS observation epoch with receive timestamps."""

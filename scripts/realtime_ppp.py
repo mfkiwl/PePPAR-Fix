@@ -73,6 +73,7 @@ from ntrip_client import NtripStream
 from peppar_fix.event_time import (
     ObservationEvent,
     RtcmEvent,
+    estimator_sample_weight,
     estimate_correlation_confidence,
 )
 from peppar_fix.timebase_estimator import TimebaseRelationEstimator
@@ -432,6 +433,10 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     estimator_sample = recv_estimator.update(
                         gps_time.timestamp(),
                         recv_mono,
+                        sample_weight=estimator_sample_weight(
+                            queue_remains=queue_remains,
+                            base_confidence=base_confidence,
+                        ),
                     )
                     confidence = max(
                         0.05,
@@ -490,6 +495,7 @@ def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP"):
                 queue_remains=meta["queue_remains"],
                 parse_age_s=meta["parse_age_s"],
                 correlation_confidence=meta["correlation_confidence"],
+                estimator_residual_s=meta.get("estimator_residual_s"),
             )
             msg_view = RtcmMessageView(msg, event)
             msg_counts[identity] += 1

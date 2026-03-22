@@ -56,6 +56,7 @@ from peppar_fix import (
     PositionWatchdog,
     StrictCorrelationGate,
     TimebaseRelationEstimator,
+    estimator_sample_weight,
     estimate_correlation_confidence,
     match_pps_event_from_history,
     load_position,
@@ -651,6 +652,10 @@ def _setup_servo(args, known_ecef):
             estimator_sample = pps_recv_estimator.update(
                 phc_sec + (phc_nsec / 1_000_000_000.0),
                 recv_mono,
+                sample_weight=estimator_sample_weight(
+                    queue_remains=queue_remains,
+                    base_confidence=base_confidence,
+                ),
             )
             pps_event = PpsEvent(
                 phc_sec=phc_sec,

@@ -51,7 +51,12 @@ import time as _time
 
 import serial
 
-from peppar_fix.event_time import TiccEvent, estimate_correlation_confidence
+from peppar_fix.event_time import (
+    TiccEvent,
+    estimate_correlation_confidence,
+    estimator_sample_weight,
+)
+from peppar_fix.timebase_estimator import TimebaseRelationEstimator
 
 # Integer part DOT 11-or-12 fractional digits whitespace ch followed by A or B.
 _LINE_RE = re.compile(r"^(\d+)\.(\d{11,12})\s+(ch[AB])$")
@@ -78,6 +83,10 @@ class Ticc:
         self.baud = baud
         self.wait_for_boot = wait_for_boot
         self._ser: serial.Serial | None = None
+        self._recv_estimator = TimebaseRelationEstimator(
+            min_sigma_s=0.05,
+            sigma_scale=4.0,
+        )
 
     def __enter__(self) -> "Ticc":
         self._ser = serial.Serial(self.port, self.baud, timeout=2.0)
@@ -147,6 +156,19 @@ class Ticc:
                 continue
             ref_sec = int(m.group(1))
             ref_ps = int(m.group(2).ljust(12, '0'))
+            base_confidence = estimate_correlation_confidence(
+                queue_remains=queue_remains,
+                parse_age_s=0.0,
+            )
+            source_time_s = ref_sec + (ref_ps * 1e-12)
+            estimator_sample = self._recv_estimator.update(
+                source_time_s,
+                recv_mono,
+                sample_weight=estimator_sample_weight(
+                    queue_remains=queue_remains,
+                    base_confidence=base_confidence,
+                ),
+            )
             yield TiccEvent(
                 channel=m.group(3),
                 ref_sec=ref_sec,
@@ -154,8 +176,9 @@ class Ticc:
                 recv_mono=recv_mono,
                 queue_remains=queue_remains,
                 parse_age_s=0.0,
-                correlation_confidence=estimate_correlation_confidence(
-                    queue_remains=queue_remains,
-                    parse_age_s=0.0,
+                correlation_confidence=max(
+                    0.05,
+                    min(1.0, base_confidence * estimator_sample["confidence"]),
                 ),
+                estimator_residual_s=estimator_sample["residual_s"],
             )

@@ -1169,19 +1169,23 @@ Impact:
 Current state:
 
 - [`scripts/peppar_fix/timebase_estimator.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/timebase_estimator.py)
-  now provides a slow-moving EMA estimator of source-time to host-monotonic
-  offset and residual sigma
+  now provides a weighted constant-offset estimator of source-time to
+  host-monotonic offset and residual sigma
 - GNSS observation ingest in
   [`scripts/realtime_ppp.py`](/home/bob/git/PePPAR-Fix/scripts/realtime_ppp.py)
   now blends queue/age heuristics with estimator confidence
 - PPS ingest in
   [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
   now does the same for EXTS events before they reach the strict gate
+- estimator updates are weighted by sample trust, not by recency
+- visible backlog now causes an estimator sample to move the offset estimate
+  only very lightly relative to a prompt no-backlog sample
 
 Still missing:
 
-- RTCM ingest using the same estimator path instead of first-pass confidence only
-- TICC ingest using the same estimator path instead of first-pass confidence only
+- broader RTCM estimator coverage where a true stream epoch exists
+- broadcast ephemeris still intentionally excluded from estimator updates
+  because toe/toc are model epochs, not receive/emit timestamps
 - per-platform/profile tuning of estimator parameters
 - consistent exposure of estimator residuals in sink logs and diagnostics
 - a way for sinks to consume both nominal alignment and residual confidence explicitly

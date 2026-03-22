@@ -245,16 +245,25 @@ This is now partly implemented:
   `correlation_confidence`
 - the strict observation/PPS gate now treats low-confidence matches
   differently from prompt ones instead of treating them all as equal
+- GNSS and PPS now also maintain a slow-moving constant-offset estimator
+  against host `CLOCK_MONOTONIC`
+- estimator updates are weighted by sample trust, not recency
+- samples read while backlog is still visible are only lightly weighted, or
+  can be dropped entirely by policy later if we choose
 
 What is still future work:
 
-- a slow-moving estimator such as an EMA can track the nominal relationship,
-  while sample confidence expresses how much to trust each new update
 - first pass is now in place for GNSS and PPS via
   [`timebase_estimator.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/timebase_estimator.py)
   and is propagated as `estimator_residual_s`
-- RTCM and TICC still only have first-pass confidence and should use the same
-  estimator pattern next
+- recent samples are not privileged just for being recent; the estimator is
+  trying to learn a constant offset and should move mainly on high-confidence,
+  no-backlog reads
+- TICC now uses the same weighted constant-offset estimator against host
+  monotonic
+- RTCM now uses the same estimator only for message families with a usable
+  stream epoch, chiefly SSR; broadcast ephemeris toe/toc remain excluded
+  because they are model epochs, not transport timestamps
 
 ## Testing strategy
 

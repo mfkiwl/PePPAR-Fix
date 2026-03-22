@@ -12,6 +12,7 @@ from peppar_fix.correlation_gate import (
     match_pps_event_from_history,
 )
 from peppar_fix.event_time import (
+    estimator_sample_weight,
     estimate_correlation_confidence,
     merge_correlation_confidence,
 )
@@ -27,6 +28,7 @@ __all__ = [
     'StrictCorrelationGate',
     'CorrectionFreshnessGate',
     'match_pps_event_from_history',
+    'estimator_sample_weight',
     'estimate_correlation_confidence',
     'merge_correlation_confidence',
     'TimebaseRelationEstimator',
