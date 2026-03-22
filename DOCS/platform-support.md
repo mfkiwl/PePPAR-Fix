@@ -96,6 +96,19 @@ Latest validated result on `timehat` after the PPS-history purge:
 - the path is still not “good,” but it is no longer obviously broken at the
   whole-second level
 
+Later tuning result:
+
+- the original `i226` tracking gains (`kp=0.3`, `ki=0.1`) were too aggressive
+  for sustained `timehat` runs and could drive the servo into rail-hitting
+  behavior
+- lowering the default `i226` profile to `kp=0.05`, `ki=0.01` materially
+  improved steady-state tracking
+- in a 120-second low-gain run, the tracking-only rows held `epoch_offset = 0`
+  and showed self-reported `pps_error_ns` TDEV of roughly:
+  - `140 ns` at `τ = 1s`
+  - `551 ns` at `τ = 2s`
+  - `3.57 us` at `τ = 5s`
+
 Wiring and board behavior:
 
 - earlier, no PPS events were detected until after a full power cycle plus the
