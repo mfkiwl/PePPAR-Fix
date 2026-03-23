@@ -27,6 +27,10 @@ KEYS = (
     "duration",
     "log",
     "phase_step_bias_ns",
+    "ticc_landing_horizon_s",
+    "ticc_settled_threshold_ns",
+    "ticc_settled_deadband_ns",
+    "ticc_settled_count",
 )
 
 

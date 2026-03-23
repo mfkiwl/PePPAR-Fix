@@ -329,7 +329,6 @@ def apply_ticc_drive_defaults(args):
     if args.track_outlier_ns is None:
         args.track_outlier_ns = 10_000.0
     if args.ticc_pullin_interval == 5:
-    if args.ticc_pullin_interval == 5:
         args.ticc_pullin_interval = 5
     if args.ticc_pullin_window_s == 8.0:
         args.ticc_pullin_window_s = 8.0

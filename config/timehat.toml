@@ -11,3 +11,7 @@ known_pos = "41.8430626,-88.1037190,201.671"
 position_file = "data/position.json"
 systems = "gps,gal"
 phase_step_bias_ns = 2283.0
+ticc_landing_horizon_s = 6.0
+ticc_settled_threshold_ns = 150.0
+ticc_settled_deadband_ns = 75.0
+ticc_settled_count = 3
