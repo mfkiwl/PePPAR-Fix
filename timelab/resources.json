@@ -1,45 +1,163 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Time lab hardware inventory. Machine-readable resource list for Mayor scheduling of hardware-dependent work. See docs/hw-labels.md for the hw: bead label convention.",
-  "updated": "2026-03-19",
-
+  "updated": "2026-03-23",
   "hosts": {
     "TimeHat": {
-      "description": "Raspberry Pi 5 with TimeHAT v5 — primary PePPAR Fix dev platform",
+      "description": "Raspberry Pi 5 with TimeHAT v5 \u2014 primary PePPAR Fix dev platform",
       "hw_label": "hw:TimeHat",
       "hostname": "timehat",
       "platform": "Raspberry Pi 5",
       "os": "Raspberry Pi OS (Debian)",
-      "interfaces": ["eth0 (igc, i226, 2.5G)"],
+      "interfaces": [
+        "eth0 (igc, i226, 2.5G)"
+      ],
       "location": "lab rack",
-      "status": "active"
+      "status": "active",
+      "access": "ssh TimeHat",
+      "expected_devices": {
+        "gnss": [
+          "/dev/gnss-top"
+        ],
+        "ticc": [
+          "/dev/ticc"
+        ],
+        "ptp": [
+          "/dev/ptp0"
+        ]
+      }
+    },
+    "PiPuss": {
+      "access": "ssh pipuss.local",
+      "ip": "10.168.60.242",
+      "hardware": "Raspberry Pi 5",
+      "expected_devices": {
+        "gnss": [
+          "/dev/gnss-top",
+          "/dev/gnss-bot"
+        ],
+        "ticc": [
+          "/dev/ticc"
+        ],
+        "ptp": [
+          "/dev/ptp0"
+        ]
+      },
+      "receivers": [
+        "F9T-TOP",
+        "F9T-BOT"
+      ],
+      "ticcs": [
+        "TICC-1"
+      ],
+      "notes": "testAnt data collection, PePPAR Fix observations"
+    },
+    "Onocoy": {
+      "access": "ssh onocoy.local",
+      "ip": "10.168.60.143",
+      "hardware": "Raspberry Pi 4",
+      "expected_devices": {
+        "gnss": [],
+        "ticc": [
+          "/dev/ttyUSB0"
+        ],
+        "ptp": []
+      },
+      "receivers": [
+        "F10T",
+        "PX1125T"
+      ],
+      "ticcs": [
+        "TICC-2"
+      ],
+      "notes": "Onocoy GNSS mining, PX1125T eval. TICC on /dev/ttyUSB0 (not udev symlink)."
+    },
+    "otcBob1": {
+      "access": "ssh otcBob1",
+      "ip": "10.168.13.16",
+      "hardware": "Timebeat OTC SBC",
+      "expected_devices": {
+        "gnss": [],
+        "ticc": [],
+        "ptp": [
+          "/dev/ptp0"
+        ]
+      },
+      "receivers": [
+        "F9T-OTC"
+      ],
+      "ticcs": [],
+      "notes": "PTP GM domain 40, OCXO. GNSS on /dev/ttyAMA0 (not /dev/gnss*)."
+    },
+    "ptBoat": {
+      "access": "ssh ptBoat",
+      "ip": "10.168.13.15",
+      "hardware": "Timebeat OTC Mini PT",
+      "expected_devices": {
+        "gnss": [],
+        "ticc": [],
+        "ptp": [
+          "/dev/ptp0"
+        ]
+      },
+      "receivers": [
+        "F9T-ptBoat"
+      ],
+      "ticcs": [],
+      "notes": "PTP GM domain 10. GNSS on /dev/ttyAMA0 (not /dev/gnss*). Weatherproof, PoE."
+    },
+    "bbb": {
+      "access": "ssh bbb",
+      "ip": "10.168.13.14",
+      "hardware": "BeagleBone Black",
+      "expected_devices": {
+        "gnss": [
+          "/dev/gps0"
+        ],
+        "ticc": [],
+        "ptp": [
+          "/dev/ptp0"
+        ]
+      },
+      "receivers": [
+        "Adafruit-GPS"
+      ],
+      "ticcs": [],
+      "notes": "chrony stratum 1, PTP GM domain 20. GPS on /dev/gps0."
     }
   },
-
   "nics": {
     "TimeHAT-v5": {
-      "description": "TimeHAT v5 — i226 + TCXO on Pi 5 HAT",
+      "description": "TimeHAT v5 \u2014 i226 + TCXO on Pi 5 HAT",
       "hw_label": "hw:TimeHat",
       "model": "TimeHAT v5 (Intel i226)",
       "host": "TimeHat",
-      "oscillator": "TCXO ±280 ppb",
+      "oscillator": "TCXO \u00b1280 ppb",
       "phc_resolution": "1 ns",
       "adjfine_ppb_per_lsb": 0.12,
       "max_adj_ppm": 62.5,
-      "pps_io": ["SDP0 (SMA1 J4, PPS OUT)", "SDP1 (SMA2 J5, PPS IN)", "SDP2 (U.FL)", "SDP3 (strapping)"],
+      "pps_io": [
+        "SDP0 (SMA1 J4, PPS OUT)",
+        "SDP1 (SMA2 J5, PPS IN)",
+        "SDP2 (U.FL)",
+        "SDP3 (strapping)"
+      ],
       "driver": "igc",
       "ptp_device": "/dev/ptp0",
       "udev_rule": "config/99-timehat-devices.rules",
       "status": "installed"
     },
     "E810-XXVDA4T": {
-      "description": "Intel E810-XXVDA4T — OCXO, sub-ns timestamping, onboard F9T",
+      "description": "Intel E810-XXVDA4T \u2014 OCXO, sub-ns timestamping, onboard F9T",
       "hw_label": "hw:E810",
       "model": "Intel E810-XXVDA4T",
       "host": null,
       "oscillator": "OCXO (4h holdover)",
       "phc_resolution": "sub-ns (7-bit)",
-      "pps_io": ["2 SMA", "U.FL"],
+      "pps_io": [
+        "2 SMA",
+        "U.FL"
+      ],
       "driver": "ice (out-of-tree DKMS required for PPS)",
       "gnss": "/dev/gnss0 (onboard ZED-F9T via I2C)",
       "interface": "PCIe 4.0 x16, 4x25G SFP28",
@@ -47,43 +165,49 @@
       "ordered": "2026-03-17"
     },
     "SFN6322F-1": {
-      "description": "Solarflare SFN6322F #1 — 10G, PTP standard (no license needed)",
+      "description": "Solarflare SFN6322F #1 \u2014 10G, PTP standard (no license needed)",
       "hw_label": "hw:SFN6322F-1",
       "model": "Solarflare SFN6322F",
       "host": null,
       "oscillator": "Stratum 3 (<0.37 PPM/day)",
-      "pps_io": ["u.FL on PCB (needs u.FL→SMA pigtail)"],
+      "pps_io": [
+        "u.FL on PCB (needs u.FL\u2192SMA pigtail)"
+      ],
       "driver": "sfc + sfptpd",
       "hw_timestamp": "PTP packets only, single port",
       "interface": "PCIe 2.0/3.0, 2x10G SFP+",
       "status": "inventory",
-      "notes": "PTP is standard — no license required"
+      "notes": "PTP is standard \u2014 no license required"
     },
     "SFN6322F-2": {
-      "description": "Solarflare SFN6322F #2 — 10G, PTP standard (no license needed)",
+      "description": "Solarflare SFN6322F #2 \u2014 10G, PTP standard (no license needed)",
       "hw_label": "hw:SFN6322F-2",
       "model": "Solarflare SFN6322F",
       "host": null,
       "oscillator": "Stratum 3 (<0.37 PPM/day)",
-      "pps_io": ["u.FL on PCB (needs u.FL→SMA pigtail)"],
+      "pps_io": [
+        "u.FL on PCB (needs u.FL\u2192SMA pigtail)"
+      ],
       "driver": "sfc + sfptpd",
       "hw_timestamp": "PTP packets only, single port",
       "interface": "PCIe 2.0/3.0, 2x10G SFP+",
       "status": "inventory",
-      "notes": "PTP is standard — no license required"
+      "notes": "PTP is standard \u2014 no license required"
     },
     "SFN8522-1": {
-      "description": "Solarflare SFN8522 #1 — 10G, PTP license status unknown",
+      "description": "Solarflare SFN8522 #1 \u2014 10G, PTP license status unknown",
       "hw_label": "hw:SFN8522-1",
       "model": "Solarflare SFN8522",
       "host": null,
       "oscillator": "Stratum 3 (<0.37 PPM/day)",
-      "pps_io": ["u.FL on PCB (needs u.FL→SMA pigtail)"],
+      "pps_io": [
+        "u.FL on PCB (needs u.FL\u2192SMA pigtail)"
+      ],
       "driver": "sfc + sfptpd",
       "hw_timestamp": "all packets (if licensed)",
       "interface": "PCIe 3.1 x8, 2x10G SFP+",
       "status": "inventory",
-      "notes": "Needs AppFlex PTP license — run ethtool -T to verify"
+      "notes": "Needs AppFlex PTP license \u2014 run ethtool -T to verify"
     },
     "SFN8522-2": {
       "description": "Solarflare SFN8522 #2",
@@ -91,7 +215,7 @@
       "model": "Solarflare SFN8522",
       "host": null,
       "status": "inventory",
-      "notes": "Same as SFN8522-1 — license status unknown"
+      "notes": "Same as SFN8522-1 \u2014 license status unknown"
     },
     "SFN8522-3": {
       "description": "Solarflare SFN8522 #3",
@@ -99,7 +223,7 @@
       "model": "Solarflare SFN8522",
       "host": null,
       "status": "inventory",
-      "notes": "Same as SFN8522-1 — license status unknown"
+      "notes": "Same as SFN8522-1 \u2014 license status unknown"
     },
     "SFN8522-4": {
       "description": "Solarflare SFN8522 #4",
@@ -107,20 +231,30 @@
       "model": "Solarflare SFN8522",
       "host": null,
       "status": "inventory",
-      "notes": "Same as SFN8522-1 — license status unknown"
+      "notes": "Same as SFN8522-1 \u2014 license status unknown"
     }
   },
-
   "receivers": {
     "F9T-3RD": {
-      "description": "u-blox ZED-F9T (EVK-F9T-20-00, ZED-F9T-20B) — primary GNSS receiver",
+      "description": "u-blox ZED-F9T (EVK-F9T-20-00, ZED-F9T-20B) \u2014 primary GNSS receiver",
       "hw_label": "hw:F9T-3RD",
       "model": "u-blox ZED-F9T-20B",
       "host": "TimeHat",
       "port": "/dev/gnss-top",
       "baud": 115200,
-      "bands": ["L1C/A", "L5 (GPS)", "E1", "E5a (Galileo)", "B1", "B2a (BeiDou)"],
-      "constellations": ["GPS", "Galileo", "BeiDou"],
+      "bands": [
+        "L1C/A",
+        "L5 (GPS)",
+        "E1",
+        "E5a (Galileo)",
+        "B1",
+        "B2a (BeiDou)"
+      ],
+      "constellations": [
+        "GPS",
+        "Galileo",
+        "BeiDou"
+      ],
       "notes": "-20B variant: no GLONASS. Connected via USB.",
       "antenna": "Patch2",
       "status": "installed"
@@ -133,12 +267,69 @@
       "port": "/dev/gnss0",
       "notes": "Onboard receiver accessed via ice driver. On order with E810.",
       "status": "on_order"
+    },
+    "F9T-TOP": {
+      "model": "ZED-F9T",
+      "evk": "EVK-F9T-10-00",
+      "firmware": "TIM 2.20",
+      "host": "PiPuss",
+      "port": "/dev/gnss-top",
+      "baud": 115200,
+      "antenna": "TBD",
+      "splitter": "TBD"
+    },
+    "F9T-BOT": {
+      "model": "ZED-F9T-20B",
+      "evk": "EVK-F9T-20-00",
+      "firmware": "TIM 2.25",
+      "host": "PiPuss",
+      "port": "/dev/gnss-bot",
+      "baud": 115200,
+      "antenna": "Patch3",
+      "splitter": "GUS-2"
+    },
+    "F10T": {
+      "model": "ZED-F10T",
+      "host": "Onocoy",
+      "port": "/dev/ttyACM0",
+      "antenna": "Patch3",
+      "splitter": "GUS-2"
+    },
+    "PX1125T": {
+      "model": "SkyTraq PX1125T",
+      "host": "Onocoy",
+      "port": "/dev/ttyUSB1",
+      "antenna": "UFO",
+      "splitter": "GUS-1"
+    },
+    "F9T-OTC": {
+      "model": "ZED-F9T",
+      "host": "otcBob1",
+      "port": "/dev/ttyAMA0",
+      "baud": 460800,
+      "antenna": "UFO",
+      "splitter": "GUS-1"
+    },
+    "F9T-ptBoat": {
+      "model": "ZED-F9T",
+      "host": "ptBoat",
+      "port": "/dev/ttyAMA0",
+      "baud": 115200,
+      "antenna": "SPK6618H-ptBoat",
+      "splitter": null
+    },
+    "Adafruit-GPS": {
+      "model": "MTK-3301",
+      "host": "bbb",
+      "port": "/dev/gps0",
+      "baud": 9600,
+      "antenna": "Patch1",
+      "splitter": "SV1AFN-L1"
     }
   },
-
   "ticcs": {
     "TICC-3": {
-      "description": "TAPR TICC #3 — time interval counter for validation",
+      "description": "TAPR TICC #3 \u2014 time interval counter for validation",
       "hw_label": "hw:TICC-3",
       "model": "TAPR TICC",
       "host": "TimeHat",
@@ -151,22 +342,59 @@
       },
       "reference": "10 MHz from SV1AFN distribution amp (fed by Geppetto GPSDO)",
       "status": "installed"
+    },
+    "TICC-1": {
+      "host": "PiPuss",
+      "port": "/dev/ticc",
+      "baud": 115200,
+      "chA": "TimeHAT PHC PPS OUT (SDP0)",
+      "chB": "F9T-BOT PPS",
+      "ref": "10 MHz from SV1AFN dist amp"
+    },
+    "TICC-2": {
+      "host": "Onocoy",
+      "port": "/dev/ttyUSB0",
+      "baud": 115200,
+      "chA": "F10T PPS",
+      "chB": "PX1125T PPS",
+      "ref": "10 MHz from SV1AFN dist amp"
     }
   },
-
   "antennas": {
     "Patch2": {
-      "description": "Active dual-band patch antenna — roof-mounted",
+      "description": "Active dual-band patch antenna \u2014 roof-mounted",
       "hw_label": "hw:Patch2",
       "model": "Patch2",
       "type": "active patch",
-      "bands": ["L1", "L5"],
+      "bands": [
+        "L1",
+        "L5"
+      ],
       "location": "roof",
       "connected_to": "F9T-3RD",
       "status": "installed"
+    },
+    "UFO": {
+      "type": "SparkFun SPK6618H",
+      "mount": "West roof slope"
+    },
+    "Patch3": {
+      "type": "Patch (unknown mfr)",
+      "mount": "East roof slope"
+    },
+    "Patch1": {
+      "type": "Patch (unknown mfr)",
+      "mount": "East roof slope"
+    },
+    "SPK6618H-ptBoat": {
+      "type": "SparkFun SPK6618H",
+      "mount": "West roof slope"
+    },
+    "Choke": {
+      "type": "Choke ring with radome",
+      "mount": "Indoors (desk)"
     }
   },
-
   "wiring": [
     {
       "from": "Patch2 (roof)",
@@ -210,5 +438,31 @@
       "cable": "USB",
       "signal": "serial data (time interval measurements)"
     }
-  ]
+  ],
+  "splitters": {
+    "GUS-1": {
+      "model": "TAPR GUS Active Splitter",
+      "input": "UFO",
+      "outputs": [
+        "otcBob1 F9T",
+        "Onocoy PX1125T",
+        "TimeHat F9T-3RD"
+      ]
+    },
+    "GUS-2": {
+      "model": "TAPR GUS Active Splitter",
+      "input": "Patch3",
+      "outputs": [
+        "PiPuss F9T-BOT",
+        "Onocoy F10T"
+      ]
+    },
+    "SV1AFN-L1": {
+      "model": "SV1AFN L1 GPS Antenna Splitter",
+      "input": "Patch1",
+      "outputs": [
+        "bbb Adafruit GPS"
+      ]
+    }
+  }
 }
