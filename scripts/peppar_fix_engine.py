@@ -329,6 +329,7 @@ def apply_ticc_drive_defaults(args):
     if args.track_outlier_ns is None:
         args.track_outlier_ns = 10_000.0
     if args.ticc_pullin_interval == 5:
+    if args.ticc_pullin_interval == 5:
         args.ticc_pullin_interval = 5
     if args.ticc_pullin_window_s == 8.0:
         args.ticc_pullin_window_s = 8.0
@@ -336,6 +337,8 @@ def apply_ticc_drive_defaults(args):
         args.ticc_landing_threshold_ns = 1_500.0
     if args.ticc_settled_threshold_ns == 100.0:
         args.ticc_settled_threshold_ns = 100.0
+    if args.ticc_settled_deadband_ns == 75.0:
+        args.ticc_settled_deadband_ns = 75.0
     if args.ticc_settled_interval == 3:
         args.ticc_settled_interval = 2
     if args.ticc_settled_count == 10:
@@ -361,6 +364,9 @@ def _update_ticc_tracking_mode(ctx, args, best, now_mono):
 
     crossed_zero = prev_err is not None and ((prev_err <= 0.0 <= err) or (prev_err >= 0.0 >= err))
 
+    settled_limit = args.ticc_settled_threshold_ns
+    deadband_limit = args.ticc_settled_deadband_ns
+
     if mode == 'pull_in':
         if crossed_zero or abs(err) <= args.ticc_landing_threshold_ns:
             mode = 'landing'
@@ -369,7 +375,10 @@ def _update_ticc_tracking_mode(ctx, args, best, now_mono):
             mode = 'landing'
             ctx['ticc_settled_count'] = 0
     elif mode == 'landing':
-        if abs(err) <= args.ticc_settled_threshold_ns:
+        if abs(err) <= deadband_limit:
+            ctx['ticc_settled_count'] = args.ticc_settled_count
+            mode = 'settled'
+        elif abs(err) <= settled_limit:
             ctx['ticc_settled_count'] = ctx.get('ticc_settled_count', 0) + 1
             if ctx['ticc_settled_count'] >= args.ticc_settled_count:
                 mode = 'settled'
@@ -1640,6 +1649,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
 
         scheduler.update_drift_rate(time.monotonic(), adjfine_ppb)
         scheduler.compute_adaptive_interval(avg_confidence)
+        if args.ticc_drive and best.name == 'TICC' and ctx.get('tracking_mode') == 'landing':
+            scheduler.interval = 1
 
         if n_epochs % 10 == 0:
             mode_suffix = ''
@@ -2119,6 +2130,8 @@ Two-phase operation:
                        help="Enter landing mode when |TICC error| falls below this")
     servo.add_argument("--ticc-settled-threshold-ns", type=float, default=100.0,
                        help="Declare settled when |TICC error| stays below this")
+    servo.add_argument("--ticc-settled-deadband-ns", type=float, default=75.0,
+                       help="Stop aggressive landing corrections once errors fall inside this band")
     servo.add_argument("--ticc-settled-interval", type=int, default=2,
                        help="TICC settled-mode correction interval")
     servo.add_argument("--ticc-settled-count", type=int, default=10,
