@@ -1626,6 +1626,12 @@ Why it matters:
   - dropped outside window
   - dropped unmatched
   - dropped for low confidence
+  - true `no_obs_input` holdover entry
+  - `obs_received_but_deferred` pipeline stalls
+  - `obs_received_but_dropped` expiry/drop behavior
+
+Unexpected holdover is a failed TimeLab run unless the test is explicitly a
+holdover test.
 
 ## Recommended target model
 

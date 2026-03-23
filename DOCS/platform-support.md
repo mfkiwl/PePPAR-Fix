@@ -202,8 +202,8 @@ We added packet-level receive timestamps in the kernel wrapper because parse-tim
 Empirical F9T logical-port result on `2026-03-23`:
 
 - `scripts/peppar_rx_config.py` was run directly against `/dev/gnss0` with
-  `--port-type UART`, `USB`, and `SPI`
-- all three configurations were accepted by the receiver
+  `--port-type UART`, `UART2`, `USB`, and `SPI`
+- all four configurations were accepted by the receiver
 - after each configuration, the live `/dev/gnss0` verify stream still showed
   only:
   - `RXM-RAWX`
@@ -219,6 +219,8 @@ Interpretation:
   port is USB” are separate questions
 - current evidence points to a platform-specific limitation or translation
   layer in the in-tree E810 GNSS path, rather than a simple wrong-port choice
+- explicit `UART2` testing did not change the result, so this is not just a
+  forgotten second UART case
 
 ### `timehat`
 

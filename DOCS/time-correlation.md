@@ -61,6 +61,9 @@ The added metadata, correlation logic, drop logic, and testing machinery are
 there to preserve correctness across those different sink contracts, not to
 make the code abstract for its own sake.
 
+Unexpected holdover in TimeLab testing should be treated as a failed run unless
+holdover is the thing being tested.
+
 ## Streams we have today
 
 ### 1. GNSS observation stream
@@ -794,3 +797,50 @@ Use this as the concrete checklist for future time-correlation work.
 - [ ] For each new PPS path, verify both PHC timestamp capture and host receive timing
 - [ ] For each platform, record whether the dominant delay is in hardware, kernel buffering, or userspace parsing
 - [x] Add at least one reproducible diagnostic script per platform to measure real arrival lag
+## Deterministic Holdover Testing
+
+The randomized delay-injection environment variables are useful for testing
+queueing and stutter, but they are not the best mechanism for deterministic
+holdover tests. They delay delivery after `read()` rather than making a source
+go silent.
+
+For holdover tests, the engine now supports signal-controlled source muting:
+
+- `SIGUSR1`
+  - enable mute for configured source classes
+- `SIGUSR2`
+  - disable mute and resume delivery
+
+Current default mute target:
+
+- `gnss:`
+  - drops GNSS observation delivery from the reader to the sink
+
+This path is implemented in:
+
+- [`fault_injection.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/fault_injection.py)
+- [`realtime_ppp.py`](/home/bob/git/PePPAR-Fix/scripts/realtime_ppp.py)
+- [`peppar_fix_engine.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_engine.py)
+- [`servo_fault_smoke.py`](/home/bob/git/PePPAR-Fix/scripts/servo_fault_smoke.py)
+
+Observed deterministic `timehat` result:
+
+- `SIGUSR1` muted GNSS delivery and produced:
+  - `Entering holdover: reason=no_obs_input`
+- `SIGUSR2` restored GNSS delivery and produced:
+  - `Leaving holdover: reason=no_obs_input`
+- the smoke harness failed the run by default because unexpected holdover is a
+  TimeLab test failure
+
+The current code distinguishes:
+
+- `no_obs_input`
+  - no observation epochs arrived from the reader
+  - may enter holdover
+- `obs_received_but_deferred`
+  - observations arrived but correlation/freshness policy did not yet allow
+    consumption
+  - logged as a pipeline stall, not a holdover reason
+- `obs_received_but_dropped`
+  - observations arrived but expired or failed policy checks before use
+  - logged separately from true source silence

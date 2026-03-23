@@ -80,6 +80,8 @@ This file turns the recent bring-up and correlation findings into a concrete wor
   - expected `deferred_waiting` behavior under injected queueing
 - [ ] Move away from `epoch_offset_s` as the primary robustness gate
   for strict sinks; keep it as a secondary symptom only
+- [x] Add deterministic signal-driven holdover testing using `SIGUSR1`/`SIGUSR2`
+  so source silence can be exercised without relying on randomized delays
 - [ ] Add per-source runtime stream watchdogs that log when:
   - GNSS UBX has been quiet too long
   - PPS/EXTTS has been quiet too long
