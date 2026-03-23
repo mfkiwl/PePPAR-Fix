@@ -127,10 +127,17 @@ class TiccPairTracker:
         self._pending = {phc_channel: {}, ref_channel: {}}
         self._latest = None
         self._lock = threading.Lock()
+        self._last_seen = {phc_channel: None, ref_channel: None}
+        self._counts = {phc_channel: 0, ref_channel: 0}
+        self._armed = False
+        self._buffered_drops = 0
+        self._boot_ref_sec_discard = 2
 
     def ingest(self, event):
         other = self.ref_channel if event.channel == self.phc_channel else self.phc_channel
         with self._lock:
+            self._last_seen[event.channel] = event.recv_mono
+            self._counts[event.channel] = self._counts.get(event.channel, 0) + 1
             self._pending[event.channel][event.ref_sec] = event
             other_event = self._pending[other].pop(event.ref_sec, None)
             if other_event is None:
@@ -148,6 +155,19 @@ class TiccPairTracker:
             else:
                 phc_event = other_event
                 ref_event = this_event
+
+            # Preserve raw logging, but do not let the first few post-open TICC
+            # seconds into the live servo path. Those lines are commonly boot/
+            # reopen artifacts and are not meaningful for control quality.
+            #
+            # Do not key this on queue_remains: for TICC, a valid matched pair
+            # often arrives while its sibling line is still buffered, so
+            # queue_remains can stay true even after the stream is healthy.
+            if not self._armed:
+                if event.ref_sec <= self._boot_ref_sec_discard:
+                    self._buffered_drops += 1
+                    return
+                self._armed = True
 
             diff_ps = (
                 (phc_event.ref_sec - ref_event.ref_sec) * 1_000_000_000_000
@@ -173,6 +193,15 @@ class TiccPairTracker:
             if now_mono - self._latest.recv_mono > max_age_s:
                 return None
             return self._latest
+
+    def health(self):
+        with self._lock:
+            return {
+                "last_seen": dict(self._last_seen),
+                "counts": dict(self._counts),
+                "armed": self._armed,
+                "buffered_drops": self._buffered_drops,
+            }
 
 
 def apply_ptp_profile(args):
@@ -229,12 +258,137 @@ def apply_ptp_profile(args):
         args.track_max_ppb = profile.get("track_max_ppb", args.track_max_ppb)
     if args.track_restep_ns is None:
         args.track_restep_ns = profile.get("track_restep_ns", args.track_restep_ns)
+    if args.phase_step_bias_ns is None:
+        args.phase_step_bias_ns = profile.get("phase_step_bias_ns", args.phase_step_bias_ns)
     if args.obs_idle_timeout_s is None:
         args.obs_idle_timeout_s = profile.get("obs_idle_timeout_s", args.obs_idle_timeout_s)
     if args.carrier_max_sigma_ns is None:
         args.carrier_max_sigma_ns = profile.get(
             "carrier_max_sigma_ns", args.carrier_max_sigma_ns
         )
+    if args.track_outlier_ns is None:
+        args.track_outlier_ns = profile.get("track_outlier_ns", args.track_outlier_ns)
+    if args.discipline_interval == 1:
+        args.discipline_interval = profile.get("discipline_interval", args.discipline_interval)
+    if not args.adaptive_interval:
+        args.adaptive_interval = bool(profile.get("adaptive_interval", args.adaptive_interval))
+    if args.min_interval == 1:
+        args.min_interval = profile.get("min_interval", args.min_interval)
+    if args.max_interval == 120:
+        args.max_interval = profile.get("max_interval", args.max_interval)
+    if args.gain_ref_sigma == 2.0:
+        args.gain_ref_sigma = profile.get("gain_ref_sigma", args.gain_ref_sigma)
+    if args.converge_error_ns == 500.0:
+        args.converge_error_ns = profile.get("converge_error_ns", args.converge_error_ns)
+    if args.converge_min_scale == 2.0:
+        args.converge_min_scale = profile.get("converge_min_scale", args.converge_min_scale)
+    if args.gain_min_scale == 0.1:
+        args.gain_min_scale = profile.get("gain_min_scale", args.gain_min_scale)
+    if args.gain_max_scale == 1.0:
+        args.gain_max_scale = profile.get("gain_max_scale", args.gain_max_scale)
+    if args.scheduler_converge_threshold_ns == 100.0:
+        args.scheduler_converge_threshold_ns = profile.get(
+            "scheduler_converge_threshold_ns", args.scheduler_converge_threshold_ns
+        )
+    if args.scheduler_settle_window == 10:
+        args.scheduler_settle_window = profile.get(
+            "scheduler_settle_window", args.scheduler_settle_window
+        )
+    if args.scheduler_unconverge_factor == 5.0:
+        args.scheduler_unconverge_factor = profile.get(
+            "scheduler_unconverge_factor", args.scheduler_unconverge_factor
+        )
+
+
+def apply_ticc_drive_defaults(args):
+    """Bias experimental TICC drive toward light-touch control when untouched."""
+    if not args.ticc_drive:
+        return
+    if args.discipline_interval == 1:
+        args.discipline_interval = 2
+    if not args.adaptive_interval:
+        args.adaptive_interval = True
+    if args.max_interval == 120:
+        args.max_interval = 10
+    if args.gain_ref_sigma == 2.0:
+        args.gain_ref_sigma = 4.0
+    if args.gain_min_scale == 0.1:
+        args.gain_min_scale = 0.05
+    if args.gain_max_scale == 1.0:
+        args.gain_max_scale = 0.5
+    if args.converge_error_ns == 500.0:
+        args.converge_error_ns = 5_000.0
+    if args.converge_min_scale == 2.0:
+        args.converge_min_scale = 1.0
+    if args.scheduler_converge_threshold_ns == 100.0:
+        args.scheduler_converge_threshold_ns = 1_000.0
+    if args.scheduler_settle_window == 10:
+        args.scheduler_settle_window = 20
+    if args.scheduler_unconverge_factor == 5.0:
+        args.scheduler_unconverge_factor = 10.0
+    if args.track_outlier_ns is None:
+        args.track_outlier_ns = 10_000.0
+    if args.ticc_pullin_interval == 5:
+        args.ticc_pullin_interval = 5
+    if args.ticc_pullin_window_s == 8.0:
+        args.ticc_pullin_window_s = 8.0
+    if args.ticc_landing_threshold_ns == 1_500.0:
+        args.ticc_landing_threshold_ns = 1_500.0
+    if args.ticc_settled_threshold_ns == 100.0:
+        args.ticc_settled_threshold_ns = 100.0
+    if args.ticc_settled_interval == 3:
+        args.ticc_settled_interval = 2
+    if args.ticc_settled_count == 10:
+        args.ticc_settled_count = 10
+
+
+def _update_ticc_tracking_mode(ctx, args, best, now_mono):
+    """Choose pull-in/landing/settled behavior for TICC-driven tracking."""
+    if not args.ticc_drive or best.name != 'TICC':
+        return None, None
+
+    err = best.error_ns
+    prev_err = ctx.get('ticc_prev_error_ns')
+    prev_mono = ctx.get('ticc_prev_error_mono')
+    mode = ctx.get('tracking_mode', 'pull_in')
+    time_to_zero_s = None
+
+    if prev_err is not None and prev_mono is not None:
+        dt = max(1e-6, now_mono - prev_mono)
+        slope = (err - prev_err) / dt
+        if slope != 0.0 and ((err > 0.0 and slope < 0.0) or (err < 0.0 and slope > 0.0)):
+            time_to_zero_s = abs(err / slope)
+
+    crossed_zero = prev_err is not None and ((prev_err <= 0.0 <= err) or (prev_err >= 0.0 >= err))
+
+    if mode == 'pull_in':
+        if crossed_zero or abs(err) <= args.ticc_landing_threshold_ns:
+            mode = 'landing'
+            ctx['ticc_settled_count'] = 0
+        elif time_to_zero_s is not None and time_to_zero_s <= args.ticc_pullin_window_s:
+            mode = 'landing'
+            ctx['ticc_settled_count'] = 0
+    elif mode == 'landing':
+        if abs(err) <= args.ticc_settled_threshold_ns:
+            ctx['ticc_settled_count'] = ctx.get('ticc_settled_count', 0) + 1
+            if ctx['ticc_settled_count'] >= args.ticc_settled_count:
+                mode = 'settled'
+        else:
+            ctx['ticc_settled_count'] = 0
+            if abs(err) > args.ticc_landing_threshold_ns * 2:
+                mode = 'pull_in'
+    else:  # settled
+        if crossed_zero:
+            ctx['ticc_settled_count'] = 0
+            mode = 'landing'
+        elif abs(err) > max(args.ticc_settled_threshold_ns * 4, 500.0):
+            ctx['ticc_settled_count'] = 0
+            mode = 'landing'
+
+    ctx['ticc_prev_error_ns'] = err
+    ctx['ticc_prev_error_mono'] = now_mono
+    ctx['tracking_mode'] = mode
+    return mode, time_to_zero_s
 
 
 # ── Convergence detection (from peppar_find_position) ─────────────────── #
@@ -547,6 +701,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
         "obs_input_timeouts": 0,
         "obs_deferred_stalls": 0,
         "obs_dropped_expired": 0,
+        "ticc_missing_pair": 0,
     }
     last_skip_log = start_time
     last_obs_wall = time.monotonic()
@@ -814,6 +969,9 @@ def _setup_servo(args, known_ecef, qerr_store):
         adaptive=args.adaptive_interval,
         min_interval=args.min_interval,
         max_interval=args.max_interval,
+        converge_threshold_ns=args.scheduler_converge_threshold_ns,
+        settle_window=args.scheduler_settle_window,
+        unconverge_factor=args.scheduler_unconverge_factor,
     )
 
     qerr_alignment = {
@@ -936,6 +1094,7 @@ def _setup_servo(args, known_ecef, qerr_store):
             'source', 'source_error_ns', 'source_confidence_ns',
             'adjfine_ppb', 'phase', 'n_meas', 'gain_scale',
             'discipline_interval', 'n_accumulated', 'watchdog_alarm',
+            'tracking_mode', 'time_to_zero_s',
             'isb_gal_ns', 'isb_bds_ns',
         ])
 
@@ -966,6 +1125,10 @@ def _setup_servo(args, known_ecef, qerr_store):
         'compute_error_sources': compute_error_sources,
         'ticc_only_error_source': ticc_only_error_source,
         'tracking_large_error_count': 0,
+        'tracking_mode': 'pull_in',
+        'ticc_prev_error_ns': None,
+        'ticc_prev_error_mono': None,
+        'ticc_settled_count': 0,
         'holdover': {
             'active': False,
             'reason': '',
@@ -1011,9 +1174,16 @@ def _enter_obs_holdover(ctx, args, reason_code, detail):
         adaptive=args.adaptive_interval,
         min_interval=args.min_interval,
         max_interval=args.max_interval,
+        converge_threshold_ns=args.scheduler_converge_threshold_ns,
+        settle_window=args.scheduler_settle_window,
+        unconverge_factor=args.scheduler_unconverge_factor,
     )
     ctx['phase'] = 'warmup'
     ctx['tracking_large_error_count'] = 0
+    ctx['tracking_mode'] = 'pull_in'
+    ctx['ticc_prev_error_ns'] = None
+    ctx['ticc_prev_error_mono'] = None
+    ctx['ticc_settled_count'] = 0
 
 
 def _exit_holdover(ctx, detail):
@@ -1101,16 +1271,18 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     log_w = ctx['log_w']
     compute_error_sources = ctx['compute_error_sources']
     ticc_only_error_source = ctx.get('ticc_only_error_source')
+    skip_stats = ctx.get('skip_stats')
 
     STEP_THRESHOLD_NS = 10_000
     BASE_KP = args.track_kp
     BASE_KI = args.track_ki
     GAIN_REF_SIGMA = args.gain_ref_sigma
-    GAIN_MIN_SCALE = 0.1
-    GAIN_MAX_SCALE = 1.0
-    CONVERGE_ERROR_NS = 500
-    CONVERGE_MIN_SCALE = 2.0
+    GAIN_MIN_SCALE = args.gain_min_scale
+    GAIN_MAX_SCALE = args.gain_max_scale
+    CONVERGE_ERROR_NS = args.converge_error_ns
+    CONVERGE_MIN_SCALE = args.converge_min_scale
     TRACK_RESTEP_NS = args.track_restep_ns
+    TRACK_OUTLIER_NS = args.track_outlier_ns
 
     # Once filter converges: switch F9T to timing mode
     if n_epochs >= 300 and dt_rx_sigma < 100.0:
@@ -1266,8 +1438,31 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
 
     if args.ticc_drive:
         if ticc_diff_ns is None:
+            if skip_stats is not None:
+                skip_stats["ticc_missing_pair"] += 1
             if n_epochs % 10 == 0:
-                log.info("  [%s] Awaiting fresh paired TICC measurement", n_epochs)
+                health = ticc_tracker.health() if ticc_tracker is not None else {}
+                last_seen = health.get("last_seen", {})
+                counts = health.get("counts", {})
+                armed = health.get("armed", False)
+                buffered_drops = health.get("buffered_drops", 0)
+                now = time.monotonic()
+                phc_last = last_seen.get(args.ticc_phc_channel)
+                ref_last = last_seen.get(args.ticc_ref_channel)
+                log.info(
+                    "  [%s] Awaiting fresh paired TICC measurement: "
+                    "armed=%s buffered_drops=%s "
+                    "%s_count=%s last=%.3fs %s_count=%s last=%.3fs",
+                    n_epochs,
+                    armed,
+                    buffered_drops,
+                    args.ticc_phc_channel,
+                    counts.get(args.ticc_phc_channel, 0),
+                    (now - phc_last) if phc_last is not None else -1.0,
+                    args.ticc_ref_channel,
+                    counts.get(args.ticc_ref_channel, 0),
+                    (now - ref_last) if ref_last is not None else -1.0,
+                )
             return "no_ticc"
         sources = ticc_only_error_source(ticc_diff_ns, args.ticc_confidence_ns)
     else:
@@ -1304,17 +1499,22 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                    pps_var_ns2, pps_qerr_plus_var_ns2, qerr_plus_ratio,
                    pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
                    ctx['adjfine_ppb'], ctx['phase'], n_used,
-                   ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns)
+                   ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns,
+                   ctx.get('tracking_mode'), None)
         return "warmup"
 
     # Step phase
     if ctx['phase'] == 'step':
         total_offset_ns = epoch_offset * 1_000_000_000 + best.error_ns
+        step_bias_ns = args.phase_step_bias_ns or 0.0
+        compensated_offset_ns = total_offset_ns - step_bias_ns
         log.info(f"  STEP: epoch_offset={epoch_offset}s, "
-                 f"source={best}, total={total_offset_ns:+.0f}ns")
+                 f"source={best}, total={total_offset_ns:+.0f}ns "
+                 f"bias={step_bias_ns:+.0f}ns "
+                 f"compensated={compensated_offset_ns:+.0f}ns")
 
         import subprocess
-        adj_s = -total_offset_ns / 1_000_000_000
+        adj_s = -compensated_offset_ns / 1_000_000_000
         result = subprocess.run(
             ['/usr/sbin/phc_ctl', args.servo, '--',
              'adj', f'{adj_s:.9f}'],
@@ -1336,14 +1536,40 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             adaptive=args.adaptive_interval,
             min_interval=args.min_interval,
             max_interval=args.max_interval,
+            converge_threshold_ns=args.scheduler_converge_threshold_ns,
+            settle_window=args.scheduler_settle_window,
+            unconverge_factor=args.scheduler_unconverge_factor,
         )
         scheduler = ctx['scheduler']
         ctx['phase'] = 'tracking'
+        ctx['tracking_mode'] = 'pull_in'
+        ctx['ticc_prev_error_ns'] = None
+        ctx['ticc_prev_error_mono'] = None
+        ctx['ticc_settled_count'] = 0
 
         return "step"
 
     # Tracking phase
-    if abs(best.error_ns) > 500 and not scheduler._converging:
+    mode_time_to_zero_s = None
+    if args.ticc_drive and best.name == 'TICC':
+        mode_name, mode_time_to_zero_s = _update_ticc_tracking_mode(
+            ctx, args, best, time.monotonic()
+        )
+        if mode_name == 'pull_in':
+            scheduler._converging = False
+            scheduler.interval = max(args.min_interval, min(args.max_interval, args.ticc_pullin_interval))
+        elif mode_name == 'landing':
+            scheduler._converging = True
+            scheduler.interval = 1
+        else:
+            scheduler._converging = False
+            scheduler.interval = max(args.min_interval, min(args.max_interval, args.ticc_settled_interval))
+
+    if (
+        TRACK_OUTLIER_NS is not None and
+        abs(best.error_ns) > TRACK_OUTLIER_NS and
+        not scheduler._converging
+    ):
         log.warning(f"  Outlier: {best}, skipping")
         return "outlier"
 
@@ -1406,17 +1632,25 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         scheduler.compute_adaptive_interval(avg_confidence)
 
         if n_epochs % 10 == 0:
+            mode_suffix = ''
+            if args.ticc_drive and best.name == 'TICC':
+                ttz = f"{mode_time_to_zero_s:.1f}s" if mode_time_to_zero_s is not None else 'na'
+                mode_suffix = f" mode={ctx.get('tracking_mode')} t0={ttz}"
             log.info(f"  [{n_epochs}] {best.name}: "
                      f"err={avg_error:+.1f}ns (avg {n_samples}) "
                      f"adj={adjfine_ppb:+.1f}ppb "
                      f"gain={gain_scale:.2f}x "
-                     f"interval={scheduler.interval}")
+                     f"interval={scheduler.interval}{mode_suffix}")
     else:
         if n_epochs % 10 == 0:
+            mode_suffix = ''
+            if args.ticc_drive and best.name == 'TICC':
+                ttz = f"{mode_time_to_zero_s:.1f}s" if mode_time_to_zero_s is not None else 'na'
+                mode_suffix = f" mode={ctx.get('tracking_mode')} t0={ttz}"
             log.info(f"  [{n_epochs}] {best.name}: "
                      f"err={best.error_ns:+.1f}ns "
                      f"coast ({scheduler.n_accumulated}/{scheduler.interval}) "
-                     f"adj={ctx['adjfine_ppb']:+.1f}ppb")
+                     f"adj={ctx['adjfine_ppb']:+.1f}ppb{mode_suffix}")
 
     _log_servo(log_w, ctx['log_f'], ts_str, target_sec, phc_sec, phc_nsec,
                phc_rounded_sec, epoch_offset, timescale_error_ns,
@@ -1427,7 +1661,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                pps_var_ns2, pps_qerr_plus_var_ns2, qerr_plus_ratio,
                pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
                ctx['adjfine_ppb'], ctx['phase'], n_used,
-               ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns)
+               ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns,
+               ctx.get('tracking_mode'), mode_time_to_zero_s)
     return "logged"
 
 
@@ -1440,7 +1675,7 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
                pps_var_ns2, pps_qerr_plus_var_ns2, qerr_plus_ratio,
                pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
                adjfine_ppb, phase, n_used, gain_scale, scheduler,
-               isb_gal_ns, isb_bds_ns):
+               isb_gal_ns, isb_bds_ns, tracking_mode, time_to_zero_s):
     """Write one servo log row."""
     if log_w is None:
         return
@@ -1480,6 +1715,8 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
         best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
         f'{adjfine_ppb:.3f}', phase, n_used, f'{gain_scale:.3f}',
         scheduler.interval, scheduler.n_accumulated, 0,
+        tracking_mode or '',
+        f'{time_to_zero_s:.3f}' if time_to_zero_s is not None else '',
         f'{isb_gal_ns:.3f}', f'{isb_bds_ns:.3f}',
     ])
     if log_f is not None:
@@ -1832,6 +2069,14 @@ Two-phase operation:
                        help="PI servo Ki gain (default: 0.1)")
     servo.add_argument("--gain-ref-sigma", type=float, default=2.0,
                        help="Reference confidence for gain scale=1.0 (default: 2.0)")
+    servo.add_argument("--gain-min-scale", type=float, default=0.1,
+                       help="Minimum gain scale in tracking (default: 0.1)")
+    servo.add_argument("--gain-max-scale", type=float, default=1.0,
+                       help="Maximum gain scale in tracking before convergence boost (default: 1.0)")
+    servo.add_argument("--converge-error-ns", type=float, default=500.0,
+                       help="Boost gains above this tracking error magnitude (default: 500)")
+    servo.add_argument("--converge-min-scale", type=float, default=2.0,
+                       help="Minimum gain scale while converging (default: 2.0)")
     servo.add_argument("--discipline-interval", type=int, default=1,
                        help="Fixed discipline interval (default: 1)")
     servo.add_argument("--adaptive-interval", action="store_true",
@@ -1840,12 +2085,34 @@ Two-phase operation:
                        help="Maximum discipline interval (default: 120)")
     servo.add_argument("--min-interval", type=int, default=1,
                        help="Minimum discipline interval (default: 1)")
+    servo.add_argument("--scheduler-converge-threshold-ns", type=float, default=100.0,
+                       help="Scheduler settled threshold in ns (default: 100)")
+    servo.add_argument("--scheduler-settle-window", type=int, default=10,
+                       help="Consecutive corrections required to declare settled (default: 10)")
+    servo.add_argument("--scheduler-unconverge-factor", type=float, default=5.0,
+                       help="Re-enter convergence when error exceeds threshold*f (default: 5.0)")
     servo.add_argument("--servo-log", default=None,
                        help="CSV log file for servo data")
     servo.add_argument("--track-max-ppb", type=float, default=None,
                        help="Clamp tracking corrections to this ppb magnitude")
+    servo.add_argument("--track-outlier-ns", type=float, default=None,
+                       help="Skip tracking updates above this error magnitude when settled")
     servo.add_argument("--track-restep-ns", type=float, default=None,
                        help="Re-enter step if |tracking error| exceeds this for 3 epochs")
+    servo.add_argument("--phase-step-bias-ns", type=float, default=None,
+                       help="Per-host bias compensation applied to PHC phase steps")
+    servo.add_argument("--ticc-pullin-interval", type=int, default=5,
+                       help="TICC pull-in correction interval when zero crossing is far away")
+    servo.add_argument("--ticc-pullin-window-s", type=float, default=8.0,
+                       help="Switch from pull-in to landing when predicted intercept is within this window")
+    servo.add_argument("--ticc-landing-threshold-ns", type=float, default=1500.0,
+                       help="Enter landing mode when |TICC error| falls below this")
+    servo.add_argument("--ticc-settled-threshold-ns", type=float, default=100.0,
+                       help="Declare settled when |TICC error| stays below this")
+    servo.add_argument("--ticc-settled-interval", type=int, default=2,
+                       help="TICC settled-mode correction interval")
+    servo.add_argument("--ticc-settled-count", type=int, default=10,
+                       help="Consecutive low-error TICC corrections required before settled mode")
     servo.add_argument("--obs-idle-timeout-s", type=float, default=None,
                        help="Log and enter safe holdover if no observation epochs arrive for this long")
     servo.add_argument("--carrier-max-sigma-ns", type=float, default=None,
@@ -1888,6 +2155,7 @@ Two-phase operation:
 
     args = ap.parse_args()
     apply_ptp_profile(args)
+    apply_ticc_drive_defaults(args)
     if args.pps_pin is None:
         args.pps_pin = 1
     if args.extts_channel is None:
@@ -1904,6 +2172,10 @@ Two-phase operation:
         args.min_correlation_confidence = 0.5
     if args.track_restep_ns is None:
         args.track_restep_ns = 100_000.0
+    if args.phase_step_bias_ns is None:
+        args.phase_step_bias_ns = 0.0
+    if args.track_outlier_ns is None:
+        args.track_outlier_ns = 500.0
     if args.obs_idle_timeout_s is None:
         args.obs_idle_timeout_s = 15.0
     if args.carrier_max_sigma_ns is None:
