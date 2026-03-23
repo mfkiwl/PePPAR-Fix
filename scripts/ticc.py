@@ -51,6 +51,14 @@ import time as _time
 
 import serial
 
+from peppar_fix.event_time import (
+    TiccEvent,
+    estimate_correlation_confidence,
+    estimator_sample_weight,
+)
+from peppar_fix.exclusive_io import acquire_device_lock, release_device_lock
+from peppar_fix.timebase_estimator import TimebaseRelationEstimator
+
 # Integer part DOT 11-or-12 fractional digits whitespace ch followed by A or B.
 _LINE_RE = re.compile(r"^(\d+)\.(\d{11,12})\s+(ch[AB])$")
 
@@ -76,9 +84,28 @@ class Ticc:
         self.baud = baud
         self.wait_for_boot = wait_for_boot
         self._ser: serial.Serial | None = None
+        self._lock_fd: int | None = None
+        self._recv_estimator = TimebaseRelationEstimator(
+            min_sigma_s=0.05,
+            sigma_scale=4.0,
+        )
+
+    def _open_serial(self) -> serial.Serial:
+        return serial.Serial(
+            self.port,
+            self.baud,
+            timeout=2.0,
+            exclusive=True,
+        )
 
     def __enter__(self) -> "Ticc":
-        self._ser = serial.Serial(self.port, self.baud, timeout=2.0)
+        self._lock_fd, _lock_path = acquire_device_lock(self.port)
+        try:
+            self._ser = self._open_serial()
+        except Exception:
+            release_device_lock(self._lock_fd)
+            self._lock_fd = None
+            raise
         self._ser.reset_input_buffer()
 
         if self.wait_for_boot:
@@ -104,8 +131,7 @@ class Ticc:
                         pass
                     _time.sleep(1)
                     try:
-                        self._ser = serial.Serial(self.port, self.baud,
-                                                  timeout=2.0)
+                        self._ser = self._open_serial()
                         self._ser.reset_input_buffer()
                     except (serial.SerialException, OSError):
                         _time.sleep(1)
@@ -120,8 +146,12 @@ class Ticc:
         return self
 
     def __exit__(self, *_) -> None:
-        if self._ser:
-            self._ser.close()
+        try:
+            if self._ser:
+                self._ser.close()
+        finally:
+            release_device_lock(self._lock_fd)
+            self._lock_fd = None
 
     def __iter__(self):
         """Yield (channel, ref_sec, ref_ps) for each valid edge line."""
@@ -133,3 +163,41 @@ class Ticc:
             ref_sec = int(m.group(1))
             ref_ps  = int(m.group(2).ljust(12, '0'))   # normalise 11→12 digits
             yield m.group(3), ref_sec, ref_ps
+
+    def iter_events(self):
+        """Yield TiccEvent records with host receive timestamps."""
+        for raw in self._ser:
+            recv_mono = _time.monotonic()
+            queue_remains = bool(getattr(self._ser, "in_waiting", 0))
+            line = raw.decode(errors="replace").strip()
+            m = _LINE_RE.match(line)
+            if not m:
+                continue
+            ref_sec = int(m.group(1))
+            ref_ps = int(m.group(2).ljust(12, '0'))
+            base_confidence = estimate_correlation_confidence(
+                queue_remains=queue_remains,
+                parse_age_s=0.0,
+            )
+            source_time_s = ref_sec + (ref_ps * 1e-12)
+            estimator_sample = self._recv_estimator.update(
+                source_time_s,
+                recv_mono,
+                sample_weight=estimator_sample_weight(
+                    queue_remains=queue_remains,
+                    base_confidence=base_confidence,
+                ),
+            )
+            yield TiccEvent(
+                channel=m.group(3),
+                ref_sec=ref_sec,
+                ref_ps=ref_ps,
+                recv_mono=recv_mono,
+                queue_remains=queue_remains,
+                parse_age_s=0.0,
+                correlation_confidence=max(
+                    0.05,
+                    min(1.0, base_confidence * estimator_sample["confidence"]),
+                ),
+                estimator_residual_s=estimator_sample["residual_s"],
+            )

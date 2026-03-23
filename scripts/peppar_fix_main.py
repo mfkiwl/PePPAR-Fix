@@ -35,6 +35,7 @@ import signal
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone, timedelta
 
 import numpy as np
@@ -45,9 +46,42 @@ from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections
 from ntrip_client import NtripStream
 from realtime_ppp import serial_reader, ntrip_reader, QErrStore
-from peppar_fix import save_position, load_position
+from peppar_fix import (
+    CorrectionFreshnessGate,
+    StrictCorrelationGate,
+    estimate_correlation_confidence,
+    load_position,
+    match_pps_event_from_history,
+    save_position,
+)
+from peppar_fix.event_time import PpsEvent
 
 log = logging.getLogger("peppar-fix")
+
+
+def queue_put_drop_oldest(qobj, item):
+    """Enqueue one item, dropping at most one oldest entry if full."""
+    try:
+        qobj.put_nowait(item)
+        return 0
+    except queue.Full:
+        try:
+            qobj.get_nowait()
+        except queue.Empty:
+            pass
+        qobj.put_nowait(item)
+        return 1
+
+
+def append_queue_history(history, qobj, timeout=5):
+    """Append one blocking item plus any immediately queued items."""
+    item = qobj.get(timeout=timeout)
+    history.append(item)
+    while True:
+        try:
+            history.append(qobj.get_nowait())
+        except queue.Empty:
+            return len(history)
 
 
 # ── Convergence detection ────────────────────────────────────────────── #
@@ -149,6 +183,7 @@ def run_bootstrap(obs_queue, stop_event, corrections, beph, args, systems):
 
     filt = PPPFilter()
     filt_initialized = False
+    correction_gate = CorrectionFreshnessGate()
 
     # Seed position (optional, speeds convergence)
     seed_ecef = None
@@ -191,6 +226,25 @@ def run_bootstrap(obs_queue, stop_event, corrections, beph, args, systems):
                     break
                 continue
             n_empty = 0
+
+            ok_corr, corr_reason, corr_snapshot = correction_gate.accept(
+                corrections,
+                max_broadcast_age_s=args.max_broadcast_age_s,
+                require_ssr=args.require_ssr,
+                max_ssr_age_s=args.max_ssr_age_s,
+                min_broadcast_confidence=args.min_broadcast_confidence,
+                min_ssr_confidence=args.min_ssr_confidence,
+            )
+            if not ok_corr:
+                if n_epochs % 10 == 0:
+                    log.info(
+                        "Bootstrap waiting for fresh corrections: reason=%s "
+                        "broadcast_age=%s",
+                        corr_reason,
+                        f"{corr_snapshot['broadcast_age_s']:.1f}s"
+                        if corr_snapshot["broadcast_age_s"] is not None else "N/A",
+                    )
+                continue
 
             # Initialize filter on first epoch with enough satellites
             if not filt_initialized:
@@ -356,24 +410,33 @@ def run_steady_state(obs_queue, stop_event, corrections, known_ecef, args,
         ptp.enable_extts(extts_channel, rising_edge=True)
         log.info(f"EXTTS enabled: pin={args.pps_pin}, channel={extts_channel}")
 
-        # PPS event reader thread
+        # PPS event reader thread and strict sink gate for observation/PPS pairing
         pps_queue = queue.Queue(maxsize=10)
+        pps_history = deque()
+        obs_history = deque()
+        correlation_gate = StrictCorrelationGate()
 
         def extts_reader():
             while not stop_event.is_set():
                 event = ptp.read_extts(timeout_ms=1500)
                 if event is None:
                     continue
-                phc_sec, phc_nsec, _idx = event
-                try:
-                    pps_queue.put_nowait((phc_sec, phc_nsec))
-                except queue.Full:
-                    while not pps_queue.empty():
-                        try:
-                            pps_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                    pps_queue.put_nowait((phc_sec, phc_nsec))
+                phc_sec, phc_nsec, index, recv_mono, queue_remains, parse_age_s = event
+                pps_event = PpsEvent(
+                    phc_sec=phc_sec,
+                    phc_nsec=phc_nsec,
+                    index=index,
+                    recv_mono=recv_mono,
+                    queue_remains=queue_remains,
+                    parse_age_s=parse_age_s,
+                    correlation_confidence=estimate_correlation_confidence(
+                        queue_remains=queue_remains,
+                        parse_age_s=parse_age_s,
+                    ),
+                )
+                dropped = queue_put_drop_oldest(pps_queue, pps_event)
+                if dropped:
+                    log.debug("Dropped one stale PPS notification due to full queue")
 
         t_extts = threading.Thread(target=extts_reader, daemon=True)
         t_extts.start()
@@ -385,6 +448,7 @@ def run_steady_state(obs_queue, stop_event, corrections, known_ecef, args,
 
     # Watchdog
     watchdog = PositionWatchdog(threshold_m=args.watchdog_threshold)
+    correction_gate = CorrectionFreshnessGate()
 
     # Servo components (only used with --servo)
     servo = None
@@ -443,8 +507,57 @@ def run_steady_state(obs_queue, stop_event, corrections, known_ecef, args,
                 break
 
             try:
-                gps_time, observations = obs_queue.get(timeout=5)
+                if servo_enabled:
+                    append_queue_history(obs_history, obs_queue, timeout=5)
+                else:
+                    gps_time, observations = obs_queue.get(timeout=5)
             except queue.Empty:
+                continue
+            if servo_enabled:
+                while True:
+                    try:
+                        pps_history.append(pps_queue.get_nowait())
+                    except queue.Empty:
+                        break
+
+                obs_event, pps_match = correlation_gate.pop_observation_match(
+                    obs_history,
+                    target_sec_fn=lambda event: int(round(event.gps_time.timestamp())),
+                    match_fn=lambda obs_event, target_sec, min_window_s=0.5, max_window_s=11.0:
+                        match_pps_event_from_history(
+                            pps_history,
+                            obs_event,
+                            target_sec,
+                            min_window_s=min_window_s,
+                            max_window_s=max_window_s,
+                        ),
+                    min_confidence=args.min_correlation_confidence,
+                )
+                if obs_event is None:
+                    if n_epochs % 10 == 0 and obs_history:
+                        log.info(f"  [{n_epochs}] Awaiting correlatable observation "
+                                 f"(queued={len(obs_history)})")
+                    continue
+                gps_time, observations = obs_event
+
+            ok_corr, corr_reason, corr_snapshot = correction_gate.accept(
+                corrections,
+                max_broadcast_age_s=args.max_broadcast_age_s,
+                require_ssr=args.require_ssr,
+                max_ssr_age_s=args.max_ssr_age_s,
+                min_broadcast_confidence=args.min_broadcast_confidence,
+                min_ssr_confidence=args.min_ssr_confidence,
+            )
+            if not ok_corr:
+                if n_epochs % 10 == 0:
+                    log.info(
+                        "  [%s] Waiting for fresh corrections: reason=%s "
+                        "broadcast_age=%s",
+                        n_epochs,
+                        corr_reason,
+                        f"{corr_snapshot['broadcast_age_s']:.1f}s"
+                        if corr_snapshot["broadcast_age_s"] is not None else "N/A",
+                    )
                 continue
 
             # EKF predict
@@ -494,20 +607,9 @@ def run_steady_state(obs_queue, stop_event, corrections, known_ecef, args,
             source_error_ns = 0.0
 
             if servo_enabled:
-                # Get PPS event
-                try:
-                    phc_sec, phc_nsec = pps_queue.get(timeout=0.5)
-                except queue.Empty:
-                    # No PPS event — log clock-only
-                    if out_w:
-                        out_w.writerow([
-                            'steady', ts_str, f'{clk_ns:.3f}', f'{clk_sigma_ns:.4f}',
-                            n_used, f'{resid_rms:.4f}', '', '', f'{adjfine_ppb:.3f}',
-                        ])
-                    if n_epochs % 10 == 0:
-                        log.info(f"  [{n_epochs}] clk={clk_ns:+.1f}ns "
-                                 f"sigma={clk_sigma_ns:.2f}ns n={n_used} (no PPS)")
-                    continue
+                pps_event, _epoch_delta_s, _pps_match_recv_dt_s, _pps_match_confidence = pps_match
+                phc_sec = pps_event.phc_sec
+                phc_nsec = pps_event.phc_nsec
 
                 gps_unix_sec = int(round(gps_time.timestamp()))
                 pps_error_ns = pps_fractional_error(phc_sec, phc_nsec)
@@ -557,15 +659,16 @@ def run_steady_state(obs_queue, stop_event, corrections, known_ecef, args,
                     else:
                         log.error(f"  phc_ctl adj failed: {result.stderr.strip()}")
 
-                    servo = PIServo(BASE_KP, BASE_KI, max_ppb=caps['max_adj'])
-                    scheduler = DisciplineScheduler(base_interval=1)
-                    phase = 'tracking'
-                    time.sleep(2)
-                    while not pps_queue.empty():
+                    pps_history.clear()
+                    while True:
                         try:
                             pps_queue.get_nowait()
                         except queue.Empty:
                             break
+
+                    servo = PIServo(BASE_KP, BASE_KI, max_ppb=caps['max_adj'])
+                    scheduler = DisciplineScheduler(base_interval=1)
+                    phase = 'tracking'
                     continue
 
                 # Tracking phase
@@ -826,6 +929,16 @@ Examples:
                        help="SSR corrections mountpoint")
     ntrip.add_argument("--user", help="NTRIP username")
     ntrip.add_argument("--password", help="NTRIP password")
+    ntrip.add_argument("--max-broadcast-age-s", type=float, default=30.0,
+                       help="Maximum host-monotonic age for broadcast correction state (default: 30)")
+    ntrip.add_argument("--require-ssr", action="store_true",
+                       help="Require fresh SSR state before EKF updates")
+    ntrip.add_argument("--max-ssr-age-s", type=float, default=30.0,
+                       help="Maximum host-monotonic age for SSR state when --require-ssr is set (default: 30)")
+    ntrip.add_argument("--min-broadcast-confidence", type=float, default=0.0,
+                       help="Minimum acceptable confidence for broadcast correction timing")
+    ntrip.add_argument("--min-ssr-confidence", type=float, default=0.0,
+                       help="Minimum acceptable confidence for SSR correction timing")
 
     # Position
     pos = ap.add_argument_group("Position")
@@ -846,6 +959,8 @@ Examples:
                      help="PTP device to discipline (e.g. /dev/ptp0)")
     phc.add_argument("--pps-pin", type=int, default=1,
                      help="SDP pin for PPS input (default: 1)")
+    phc.add_argument("--min-correlation-confidence", type=float, default=0.5,
+                     help="Minimum acceptable confidence for observation/PPS correlation")
 
     # Caster output (future)
     ap.add_argument("--caster", dest="caster_out", default=None, metavar="PORT",

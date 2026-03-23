@@ -32,6 +32,12 @@ import sys
 import time
 from datetime import datetime, timezone
 
+from peppar_fix.event_time import (
+    estimate_correlation_confidence,
+    estimator_sample_weight,
+)
+from peppar_fix.timebase_estimator import TimebaseRelationEstimator
+
 log = logging.getLogger(__name__)
 
 # RTCM3 frame constants
@@ -86,6 +92,10 @@ class NtripStream:
         self._bytes_received = 0
         self._msgs_decoded = 0
         self._connect_time = None
+        self._epoch_estimator = TimebaseRelationEstimator(
+            min_sigma_s=1.0,
+            sigma_scale=4.0,
+        )
 
     def connect(self):
         """Establish connection to the NTRIP caster."""
@@ -252,6 +262,11 @@ class NtripStream:
         This is the primary API. Each yielded message has attributes
         for all decoded fields (e.g., msg.DF009 for GPS satellite ID).
         """
+        for parsed, _meta in self.messages_with_metadata():
+            yield parsed
+
+    def messages_with_metadata(self):
+        """Generator yielding decoded messages with host timing metadata."""
         try:
             from pyrtcm import RTCMReader
         except ImportError:
@@ -259,6 +274,8 @@ class NtripStream:
             return
 
         for msg_type, frame in self.raw_frames():
+            parse_mono = time.monotonic()
+            queue_remains = bool(self._buffer)
             try:
                 result = RTCMReader.parse(frame)
                 # pyrtcm >= 1.1: returns RTCMMessage directly
@@ -267,10 +284,66 @@ class NtripStream:
                     parsed = result[1]
                 else:
                     parsed = result
+                base_confidence = estimate_correlation_confidence(
+                    queue_remains=queue_remains,
+                    parse_age_s=0.0,
+                )
+                confidence = base_confidence
+                estimator_residual_s = None
+                source_time_s = self._extract_source_time_s(parsed)
+                if source_time_s is not None:
+                    estimator_sample = self._epoch_estimator.update(
+                        source_time_s,
+                        parse_mono,
+                        sample_weight=estimator_sample_weight(
+                            queue_remains=queue_remains,
+                            base_confidence=base_confidence,
+                        ),
+                    )
+                    confidence = max(
+                        0.05,
+                        min(1.0, base_confidence * estimator_sample["confidence"]),
+                    )
+                    estimator_residual_s = estimator_sample["residual_s"]
                 self._msgs_decoded += 1
-                yield parsed
+                yield parsed, {
+                    "recv_mono": parse_mono,
+                    "queue_remains": queue_remains,
+                    "parse_age_s": 0.0,
+                    "correlation_confidence": confidence,
+                    "estimator_residual_s": estimator_residual_s,
+                }
             except Exception as e:
                 log.debug(f"Failed to parse message type {msg_type}: {e}")
+
+    def _extract_source_time_s(self, parsed):
+        """Return absolute GPS-like seconds for RTCM messages with usable epochs.
+
+        Only some RTCM families carry a message epoch that is meaningfully
+        related to receive latency. Broadcast ephemeris toe/toc are model
+        reference epochs, not transport timestamps, so they are intentionally
+        excluded here.
+        """
+        identity = str(getattr(parsed, "identity", ""))
+        if not (identity.startswith("4076_") or identity.isdigit()):
+            return None
+
+        epoch_s = getattr(parsed, "IDF003", None)
+        if epoch_s is None:
+            epoch_s = getattr(parsed, "DF385", None)
+        if epoch_s is None:
+            return None
+
+        now_utc = datetime.now(timezone.utc)
+        gps_now = now_utc.timestamp() + 18.0
+        week_s = 604800.0
+        current_week = int(gps_now // week_s)
+        candidate = current_week * week_s + float(epoch_s)
+        while candidate - gps_now > (week_s / 2.0):
+            candidate -= week_s
+        while gps_now - candidate > (week_s / 2.0):
+            candidate += week_s
+        return candidate
 
     def status(self):
         """Return a dict with connection statistics."""

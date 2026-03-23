@@ -1,0 +1,10 @@
+[peppar]
+serial = "/dev/gnss0"
+ubx_port = "UART"
+receiver = "f9t"
+ptp_profile = "e810"
+ptp_dev = "/dev/ptp1"
+ntrip_conf = "ntrip.conf"
+eph_mount = "BCEP00BKG0"
+position_file = "data/position.json"
+systems = "gps,gal"

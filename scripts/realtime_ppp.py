@@ -46,7 +46,7 @@ import queue
 import sys
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 
 import numpy as np
@@ -55,7 +55,12 @@ import numpy as np
 from solve_pseudorange import (
     SP3, C, OMEGA_E, lla_to_ecef, timestamp_to_gpstime,
 )
-from solve_dualfreq import IF_PAIRS
+from solve_dualfreq import (
+    IF_PAIRS, F_L1, F_L2, F_L5, F_E5B, F_B1I, F_B2I,
+    ALPHA_L1_L2, ALPHA_L2, ALPHA_L1, ALPHA_L5,
+    ALPHA_E1, ALPHA_E5B, ALPHA_B1I, ALPHA_B2A,
+    ALPHA_B1I_B2I, ALPHA_B2I,
+)
 from solve_ppp import (
     FixedPosFilter, SIG_TO_RINEX, IF_WL, ELEV_MASK,
     SIGMA_P_IF, SIGMA_PHI_IF, BDS_MIN_PRN,
@@ -65,6 +70,14 @@ from ppp_corrections import OSBParser, CLKFile
 from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections
 from ntrip_client import NtripStream
+from peppar_fix.event_time import (
+    ObservationEvent,
+    RtcmEvent,
+    estimator_sample_weight,
+    estimate_correlation_confidence,
+)
+from peppar_fix.timebase_estimator import TimebaseRelationEstimator
+from peppar_fix.fault_injection import get_delay_injector, get_source_mute_controller
 
 log = logging.getLogger(__name__)
 
@@ -85,38 +98,195 @@ for _mt in range(1240, 1264):
     SSR_MSG_TYPES.add(str(_mt))
 
 
+SIG_WAVELENGTH = {
+    'GPS-L1CA': C / F_L1,
+    'GPS-L2CL': C / F_L2,
+    'GPS-L2CM': C / F_L2,
+    'GPS-L5I': C / F_L5,
+    'GPS-L5Q': C / F_L5,
+    'GAL-E1C': C / F_L1,
+    'GAL-E1B': C / F_L1,
+    'GAL-E5aI': C / F_L5,
+    'GAL-E5aQ': C / F_L5,
+    'GAL-E5bI': C / F_E5B,
+    'GAL-E5bQ': C / F_E5B,
+    'BDS-B1I': C / F_B1I,
+    'BDS-B2I': C / F_B2I,
+    'BDS-B2aI': C / F_L5,
+    'BDS-B2aQ': C / F_L5,
+}
+
+IF_PAIR_PARAMS = {
+    ('GPS-L1CA', 'GPS-L2CL'): ('G', ALPHA_L1_L2, ALPHA_L2),
+    ('GPS-L1CA', 'GPS-L5Q'): ('G', ALPHA_L1, ALPHA_L5),
+    ('GAL-E1C', 'GAL-E5bQ'): ('E', ALPHA_E1, ALPHA_E5B),
+    ('GAL-E1C', 'GAL-E5aQ'): ('E', ALPHA_L1, ALPHA_L5),
+    ('BDS-B1I', 'BDS-B2I'): ('C', ALPHA_B1I_B2I, ALPHA_B2I),
+    ('BDS-B1I', 'BDS-B2aI'): ('C', ALPHA_B1I, ALPHA_B2A),
+}
+
+
+class RtcmMessageView:
+    """RTCM message wrapper that preserves decoded fields plus timing metadata."""
+
+    def __init__(self, message, event):
+        self._message = message
+        self.recv_mono = event.recv_mono
+        self.recv_utc = event.recv_utc
+        self.queue_remains = event.queue_remains
+        self.parse_age_s = event.parse_age_s
+        self.correlation_confidence = event.correlation_confidence
+
+    def __getattr__(self, name):
+        return getattr(self._message, name)
+
+
 # ── Serial observation reader ──────────────────────────────────────────────── #
 
 class QErrStore:
-    """Thread-safe container for the latest TIM-TP quantization error."""
+    """Thread-safe history of TIM-TP quantization error samples."""
 
-    def __init__(self):
+    def __init__(self, maxlen=128):
         self._lock = threading.Lock()
-        self._qerr_ns = None
-        self._tow_ms = None
-        self._host_time = None
+        self._samples = deque(maxlen=maxlen)
+
+    @staticmethod
+    def _normalize_tow_ms(tow_ms):
+        if tow_ms is None:
+            return None
+        return int(round(float(tow_ms))) % (7 * 86400 * 1000)
+
+    @staticmethod
+    def gps_tow_ms(gps_time):
+        """Convert GPS datetime to GPS time-of-week in milliseconds."""
+        gps_epoch = datetime(1980, 1, 6, tzinfo=timezone.utc)
+        total_seconds = (gps_time - gps_epoch).total_seconds()
+        week_seconds = total_seconds % (7 * 86400)
+        return int(round(week_seconds * 1000)) % (7 * 86400 * 1000)
+
+    @staticmethod
+    def _tow_delta_ms(a_ms, b_ms):
+        if a_ms is None or b_ms is None:
+            return None
+        week_ms = 7 * 86400 * 1000
+        delta = (int(a_ms) - int(b_ms)) % week_ms
+        if delta > week_ms / 2:
+            delta -= week_ms
+        return int(delta)
 
     def update(self, qerr_ps, tow_ms):
         """Store new qErr (picoseconds from TIM-TP) as nanoseconds."""
         with self._lock:
-            self._qerr_ns = qerr_ps / 1000.0
-            self._tow_ms = tow_ms
-            self._host_time = time.monotonic()
+            self._samples.append({
+                "qerr_ns": qerr_ps / 1000.0,
+                "tow_ms": self._normalize_tow_ms(tow_ms),
+                "host_time": time.monotonic(),
+            })
 
     def get(self, max_age_s=2.0):
         """Return (qerr_ns, tow_ms) or (None, None) if stale/unavailable."""
         with self._lock:
-            if self._host_time is None:
+            if not self._samples:
                 return None, None
-            if time.monotonic() - self._host_time > max_age_s:
+            latest = self._samples[-1]
+            if time.monotonic() - latest["host_time"] > max_age_s:
                 return None, None
-            return self._qerr_ns, self._tow_ms
+            return latest["qerr_ns"], latest["tow_ms"]
+
+    def snapshot(self, max_age_s=2.0):
+        """Return latest qErr sample metadata or Nones if stale/unavailable."""
+        with self._lock:
+            if not self._samples:
+                return None, None, None
+            latest = self._samples[-1]
+            age_s = time.monotonic() - latest["host_time"]
+            if age_s > max_age_s:
+                return None, None, None
+            return latest["qerr_ns"], latest["tow_ms"], age_s
+
+    def match_gps_time(self, gps_time, max_age_s=30.0, max_tow_delta_ms=1000):
+        """Return qErr matched to the GNSS epoch second.
+
+        TIM-TP describes the timing of the next timepulse. RXM-RAWX arrives
+        near the end of the current second, so the qErr relevant to the PPS
+        edge aligned with a RAWX epoch is the most recent TIM-TP sample whose
+        `towMS` matches the RAWX epoch rounded to the nearest second.
+
+        Returns `(qerr_ns, tow_ms, age_s, tow_delta_ms)` or Nones when no
+        sufficiently fresh, close TIM-TP sample is available.
+        """
+        target_tow_ms = self._normalize_tow_ms(
+            int(round(self.gps_tow_ms(gps_time) / 1000.0)) * 1000
+        )
+        now = time.monotonic()
+        with self._lock:
+            best = None
+            for sample in reversed(self._samples):
+                age_s = now - sample["host_time"]
+                if age_s > max_age_s:
+                    continue
+                tow_delta_ms = self._tow_delta_ms(sample["tow_ms"], target_tow_ms)
+                if tow_delta_ms is None or abs(tow_delta_ms) > max_tow_delta_ms:
+                    continue
+                if best is None:
+                    best = (sample, age_s, tow_delta_ms)
+                    continue
+                _, best_age_s, best_delta_ms = best
+                rank = (abs(tow_delta_ms), age_s)
+                best_rank = (abs(best_delta_ms), best_age_s)
+                if rank < best_rank:
+                    best = (sample, age_s, tow_delta_ms)
+            if best is None:
+                return None, None, None, None
+            sample, age_s, tow_delta_ms = best
+            return sample["qerr_ns"], sample["tow_ms"], age_s, tow_delta_ms
+
+    def debug_match_gps_time(self, gps_time, max_age_s=30.0, max_tow_delta_ms=1000):
+        """Return detailed debug info for qErr matching."""
+        target_tow_ms = self._normalize_tow_ms(
+            int(round(self.gps_tow_ms(gps_time) / 1000.0)) * 1000
+        )
+        now = time.monotonic()
+        with self._lock:
+            info = {
+                "sample_count": len(self._samples),
+                "target_tow_ms": target_tow_ms,
+                "latest_tow_ms": None,
+                "latest_age_s": None,
+                "latest_qerr_ns": None,
+                "best_tow_ms": None,
+                "best_age_s": None,
+                "best_tow_delta_ms": None,
+                "best_qerr_ns": None,
+            }
+            if self._samples:
+                latest = self._samples[-1]
+                info["latest_tow_ms"] = latest["tow_ms"]
+                info["latest_age_s"] = now - latest["host_time"]
+                info["latest_qerr_ns"] = latest["qerr_ns"]
+            best = None
+            for sample in reversed(self._samples):
+                age_s = now - sample["host_time"]
+                if age_s > max_age_s:
+                    continue
+                tow_delta_ms = self._tow_delta_ms(sample["tow_ms"], target_tow_ms)
+                if tow_delta_ms is None or abs(tow_delta_ms) > max_tow_delta_ms:
+                    continue
+                if best is None or (abs(tow_delta_ms), age_s) < (abs(best[2]), best[1]):
+                    best = (sample, age_s, tow_delta_ms)
+            if best is not None:
+                sample, age_s, tow_delta_ms = best
+                info["best_tow_ms"] = sample["tow_ms"]
+                info["best_age_s"] = age_s
+                info["best_tow_delta_ms"] = tow_delta_ms
+                info["best_qerr_ns"] = sample["qerr_ns"]
+            return info
 
 
 def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                    ssr=None, qerr_store=None, config_queue=None, driver=None,
                    raw_callback=None):
-    """Read UBX messages from a u-blox serial port.
+    """Read UBX messages from a GNSS device.
 
     Puts (timestamp, observations_list) tuples onto obs_queue for each
     RXM-RAWX epoch. Also feeds RXM-SFRBX to broadcast ephemeris.
@@ -138,34 +308,53 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
     """
     try:
         from pyubx2 import UBXReader
-        import serial as pyserial
     except ImportError:
         log.error("pyubx2/pyserial not installed")
         stop_event.set()
         return
+
+    from peppar_fix.gnss_stream import open_gnss
 
     # Default to F9T for backward compatibility
     if driver is None:
         from peppar_fix.receiver import F9TDriver
         driver = F9TDriver()
 
-    log.info(f"Opening serial {port} at {baud} baud (driver: {driver.name})")
-    ser = pyserial.Serial(port, baud, timeout=2)
+    stream, device_type = open_gnss(port, baud)
+    log.info(
+        f"Opening GNSS device {port} at {baud} baud "
+        f"(type: {device_type}, driver: {driver.name})"
+    )
+    ser = stream
     ubr = UBXReader(ser, protfilter=2)  # UBX only
 
     # Signal name mapping from receiver driver
     SIG_NAMES = driver.signal_names
     SYS_MAP = driver.sys_map
 
+    pair_config = getattr(driver, 'if_pairs', None) or IF_PAIRS
     sig_lookup = {}
-    for gnss_id, sig_f1, sig_f2, prefix, a1, a2 in IF_PAIRS:
+    for gnss_id, sig_f1, sig_f2, prefix in pair_config:
+        pair_params = IF_PAIR_PARAMS.get((sig_f1, sig_f2))
+        if pair_params is None:
+            raise ValueError(f"Unsupported IF pair for {driver.name}: {sig_f1} + {sig_f2}")
+        _, a1, a2 = pair_params
         sig_lookup[sig_f1] = (gnss_id, prefix, 'f1', a1, a2, sig_f1)
         sig_lookup[sig_f2] = (gnss_id, prefix, 'f2', a1, a2, sig_f2)
 
     epoch_data = {}   # sv → {f1: {...}, f2: {...}}
     epoch_ts = None
     n_epochs = 0
-
+    delay_injector = get_delay_injector()
+    mute_controller = get_source_mute_controller()
+    source_name = f"gnss:{port}"
+    last_qerr_invalid_log = 0.0
+    # GNSS delivery can legitimately batch by seconds on some hosts
+    # (notably the kernel-GNSS path on oxco), so keep this estimator broad.
+    recv_estimator = TimebaseRelationEstimator(
+        min_sigma_s=4.0,
+        sigma_scale=4.0,
+    )
     while not stop_event.is_set():
         # Drain config queue: write pending UBX messages to the receiver
         if config_queue is not None:
@@ -181,6 +370,10 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
             raw, parsed = ubr.read()
             if parsed is None:
                 continue
+            delay_injector.maybe_inject_delay(source_name)
+            if mute_controller.should_drop(source_name):
+                mute_controller.note_drop(source_name)
+                continue
 
             msg_id = parsed.identity
 
@@ -191,11 +384,23 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
             if msg_id == 'TIM-TP' and qerr_store is not None:
                 qerr_ps = getattr(parsed, 'qErr', None)
                 tow_ms = getattr(parsed, 'towMS', None)
-                # Check qErrInvalid flag (bit 4 of flags byte)
+                # Prefer the decoded qErrInvalid field when pyubx2 exposes it.
                 flags = getattr(parsed, 'flags', 0)
-                qerr_invalid = bool(flags & 0x10) if isinstance(flags, int) else False
+                decoded_invalid = getattr(parsed, 'qErrInvalid', None)
+                if decoded_invalid is None:
+                    qerr_invalid = bool(flags & 0x10) if isinstance(flags, int) else False
+                else:
+                    qerr_invalid = bool(decoded_invalid)
                 if qerr_ps is not None and not qerr_invalid:
                     qerr_store.update(qerr_ps, tow_ms)
+                elif qerr_invalid:
+                    now = time.monotonic()
+                    if now - last_qerr_invalid_log > 30.0:
+                        log.warning(
+                            "TIM-TP qErrInvalid=1 on %s; dropping qErr sample",
+                            port,
+                        )
+                        last_qerr_invalid_log = now
 
             if msg_id == 'RXM-RAWX':
                 # Fire raw callback before IF processing (for NTRIP caster)
@@ -299,7 +504,8 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                                 pr_f2 -= cb_f2
 
                     pr_if = a1 * pr_f1 - a2 * pr_f2
-                    wl_f1, wl_f2, _, _ = IF_WL[prefix]
+                    wl_f1 = SIG_WAVELENGTH[f1['sig_name']]
+                    wl_f2 = SIG_WAVELENGTH[f2['sig_name']]
                     phi_if_m = a1 * wl_f1 * cp_f1 - a2 * wl_f2 * cp_f2
 
                     observations.append({
@@ -337,7 +543,46 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     # Compute GPS time from RAWX header
                     gps_epoch = datetime(1980, 1, 6, tzinfo=timezone.utc)
                     gps_time = gps_epoch + timedelta(weeks=week, seconds=rcvTow)
-                    obs_queue.put((gps_time, observations))
+
+                    recv_mono = None
+                    queue_remains = None
+                    if hasattr(stream, 'pop_packet_metadata'):
+                        recv_mono, queue_remains = stream.pop_packet_metadata()
+                    elif hasattr(stream, 'pop_packet_timestamp'):
+                        recv_mono = stream.pop_packet_timestamp()
+                    now_mono = time.monotonic()
+                    if recv_mono is None:
+                        recv_mono = now_mono
+                    if queue_remains is None:
+                        queue_remains = bool(getattr(stream, 'in_waiting', 0))
+                    recv_utc = datetime.now(timezone.utc)
+                    parse_age_s = max(0.0, now_mono - recv_mono)
+                    base_confidence = estimate_correlation_confidence(
+                        queue_remains=queue_remains,
+                        parse_age_s=parse_age_s,
+                    )
+                    estimator_sample = recv_estimator.update(
+                        gps_time.timestamp(),
+                        recv_mono,
+                        sample_weight=estimator_sample_weight(
+                            queue_remains=queue_remains,
+                            base_confidence=base_confidence,
+                        ),
+                    )
+                    confidence = max(
+                        0.05,
+                        min(1.0, base_confidence * estimator_sample["confidence"]),
+                    )
+                    obs_queue.put(ObservationEvent(
+                        gps_time=gps_time,
+                        observations=observations,
+                        recv_mono=recv_mono,
+                        recv_utc=recv_utc,
+                        queue_remains=queue_remains,
+                        parse_age_s=parse_age_s,
+                        correlation_confidence=confidence,
+                        estimator_residual_s=estimator_sample["residual_s"],
+                    ))
                     n_epochs += 1
 
                     if n_epochs % 60 == 0:
@@ -363,24 +608,42 @@ def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP"):
     """
     msg_counts = defaultdict(int)
     n_total = 0
+    delay_injector = get_delay_injector()
+    mute_controller = get_source_mute_controller()
+    source_name = f"ntrip:{label}"
 
     try:
-        for msg in stream.messages():
+        for msg, meta in stream.messages_with_metadata():
             if stop_event.is_set():
                 break
+            delay_injector.maybe_inject_delay(source_name)
+            if mute_controller.should_drop(source_name):
+                mute_controller.note_drop(source_name)
+                continue
 
             identity = str(getattr(msg, 'identity', ''))
+            event = RtcmEvent(
+                identity=identity,
+                message=None,
+                recv_mono=meta["recv_mono"],
+                recv_utc=datetime.now(timezone.utc),
+                queue_remains=meta["queue_remains"],
+                parse_age_s=meta["parse_age_s"],
+                correlation_confidence=meta["correlation_confidence"],
+                estimator_residual_s=meta.get("estimator_residual_s"),
+            )
+            msg_view = RtcmMessageView(msg, event)
             msg_counts[identity] += 1
             n_total += 1
 
             # Route to appropriate handler
             if identity in EPH_MSG_TYPES:
-                prn = beph.update_from_rtcm(msg)
+                prn = beph.update_from_rtcm(msg_view)
                 if prn and beph.n_satellites % 10 == 0:
                     log.debug(f"[{label}] {beph.summary()}")
 
             elif identity in SSR_MSG_TYPES or identity.startswith('4076_'):
-                ssr.update_from_rtcm(msg)
+                ssr.update_from_rtcm(msg_view)
 
             if n_total % 100 == 0:
                 log.info(f"[{label}] {n_total} msgs | {beph.summary()} | {ssr.summary()}")

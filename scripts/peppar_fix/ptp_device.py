@@ -7,6 +7,9 @@ import fcntl
 import os
 import select
 import struct
+import time
+
+from peppar_fix.exclusive_io import acquire_device_lock, release_device_lock
 
 # ── PTP ioctl constants (from linux/ptp_clock.h) ─────────────────────── #
 
@@ -56,12 +59,20 @@ class PtpDevice:
 
     def __init__(self, dev_path="/dev/ptp0"):
         self.path = dev_path
-        self.fd = os.open(dev_path, os.O_RDWR)
+        self._lock_fd, self._lock_path = acquire_device_lock(dev_path)
+        try:
+            self.fd = os.open(dev_path, os.O_RDWR)
+        except Exception:
+            release_device_lock(self._lock_fd)
+            raise
         self.clock_id = _clock_id_from_fd(self.fd)
         self._libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
 
     def close(self):
-        os.close(self.fd)
+        try:
+            os.close(self.fd)
+        finally:
+            release_device_lock(self._lock_fd)
 
     def get_caps(self):
         """Query PTP clock capabilities."""
@@ -69,13 +80,17 @@ class PtpDevice:
         fcntl.ioctl(self.fd, PTP_CLOCK_GETCAPS, buf, True)
         raw = buf.tobytes()
         max_adj = struct.unpack_from('<i', raw, 0)[0]
-        n_ext_ts = struct.unpack_from('<i', raw, 12)[0]
-        n_per_out = struct.unpack_from('<i', raw, 16)[0]
-        n_pins = struct.unpack_from('<i', raw, 24)[0]
+        n_alarm = struct.unpack_from('<i', raw, 4)[0]
+        n_ext_ts = struct.unpack_from('<i', raw, 8)[0]
+        n_per_out = struct.unpack_from('<i', raw, 12)[0]
+        pps = struct.unpack_from('<i', raw, 16)[0]
+        n_pins = struct.unpack_from('<i', raw, 20)[0]
         return {
             'max_adj': max_adj,
+            'n_alarm': n_alarm,
             'n_ext_ts': n_ext_ts,
             'n_per_out': n_per_out,
+            'pps': pps,
             'n_pins': n_pins,
         }
 
@@ -105,15 +120,20 @@ class PtpDevice:
             fcntl.ioctl(self.fd, PTP_EXTTS_REQUEST, buf)
 
     def read_extts(self, timeout_ms=1500):
-        """Read one external timestamp event. Returns (sec, nsec, index) or None."""
+        """Read one external timestamp event.
+
+        Returns (sec, nsec, index, recv_mono, queue_remains, parse_age_s) or None.
+        """
         r, _, _ = select.select([self.fd], [], [], timeout_ms / 1000.0)
         if not r:
             return None
         data = os.read(self.fd, PTP_EXTTS_EVENT_SIZE)
+        recv_mono = time.monotonic()
         if len(data) < 20:
             return None
         sec, nsec, _reserved, index = struct.unpack_from('<qIII', data, 0)
-        return (sec, nsec, index)
+        r_more, _, _ = select.select([self.fd], [], [], 0.0)
+        return (sec, nsec, index, recv_mono, bool(r_more), 0.0)
 
     def adjfine(self, ppb):
         """Adjust PHC frequency by ppb (parts per billion)."""

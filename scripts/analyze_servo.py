@@ -53,12 +53,18 @@ def capture_ticc(port: str, duration: int, out_path: Path, baud: int = 115200):
     n_edges = 0
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["host_timestamp", "ref_sec", "ref_ps", "channel"])
+        w.writerow(["host_timestamp", "host_monotonic", "ref_sec", "ref_ps", "channel"])
         with Ticc(port, baud) as ticc:
             start = time.monotonic()
-            for channel, ref_sec, ref_ps in ticc:
+            for event in ticc.iter_events():
                 now = datetime.now(tz=timezone.utc)
-                w.writerow([now.isoformat(), ref_sec, ref_ps, channel])
+                w.writerow([
+                    now.isoformat(),
+                    f"{event.recv_mono:.9f}",
+                    event.ref_sec,
+                    event.ref_ps,
+                    event.channel,
+                ])
                 n_edges += 1
                 elapsed = time.monotonic() - start
                 if elapsed >= duration:

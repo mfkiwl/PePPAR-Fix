@@ -4,6 +4,7 @@ Extracted from configure_f9t.py for reuse by peppar-rx-config and other tools.
 """
 
 import logging
+import os
 import sys
 import time
 
@@ -57,6 +58,42 @@ SIGNAL_CONFIG = {
     "CFG_SIGNAL_QZSS_ENA": 0,
 }
 
+F9T_SIGNAL_CONFIG = {
+    "CFG_SIGNAL_GPS_ENA": 1,
+    "CFG_SIGNAL_GPS_L1CA_ENA": 1,
+    "CFG_SIGNAL_GPS_L2C_ENA": 1,
+    "CFG_SIGNAL_GPS_L5_ENA": 0,
+    "CFG_SIGNAL_GAL_ENA": 1,
+    "CFG_SIGNAL_GAL_E1_ENA": 1,
+    "CFG_SIGNAL_GAL_E5A_ENA": 0,
+    "CFG_SIGNAL_GAL_E5B_ENA": 1,
+    "CFG_SIGNAL_BDS_ENA": 1,
+    "CFG_SIGNAL_BDS_B1_ENA": 1,
+    "CFG_SIGNAL_BDS_B2_ENA": 1,
+    "CFG_SIGNAL_BDS_B2A_ENA": 0,
+    "CFG_SIGNAL_GLO_ENA": 0,
+    "CFG_SIGNAL_SBAS_ENA": 0,
+    "CFG_SIGNAL_QZSS_ENA": 0,
+}
+
+F9T_L5_SIGNAL_CONFIG = {
+    "CFG_SIGNAL_GPS_ENA": 1,
+    "CFG_SIGNAL_GPS_L1CA_ENA": 1,
+    "CFG_SIGNAL_GPS_L2C_ENA": 0,
+    "CFG_SIGNAL_GPS_L5_ENA": 1,
+    "CFG_SIGNAL_GAL_ENA": 1,
+    "CFG_SIGNAL_GAL_E1_ENA": 1,
+    "CFG_SIGNAL_GAL_E5A_ENA": 1,
+    "CFG_SIGNAL_GAL_E5B_ENA": 0,
+    "CFG_SIGNAL_BDS_ENA": 1,
+    "CFG_SIGNAL_BDS_B1_ENA": 1,
+    "CFG_SIGNAL_BDS_B2_ENA": 0,
+    "CFG_SIGNAL_BDS_B2A_ENA": 1,
+    "CFG_SIGNAL_GLO_ENA": 0,
+    "CFG_SIGNAL_SBAS_ENA": 0,
+    "CFG_SIGNAL_QZSS_ENA": 0,
+}
+
 # Required UBX messages for peppar-fix operation
 REQUIRED_MESSAGES = {"RXM-RAWX", "RXM-SFRBX", "NAV-PVT", "TIM-TP"}
 
@@ -74,21 +111,130 @@ MESSAGE_TIMEOUTS = {
 # Port ID mapping
 PORT_SUFFIX = {1: "UART1", 2: "UART2", 3: "USB", 4: "SPI"}
 
+SIGNAL_NAMES = {
+    (0, 0): "GPS-L1CA",
+    (0, 3): "GPS-L2CL",
+    (0, 4): "GPS-L2CM",
+    (0, 6): "GPS-L5I",
+    (0, 7): "GPS-L5Q",
+    (2, 0): "GAL-E1C",
+    (2, 1): "GAL-E1B",
+    (2, 3): "GAL-E5aI",
+    (2, 4): "GAL-E5aQ",
+    (2, 5): "GAL-E5bI",
+    (2, 6): "GAL-E5bQ",
+    (3, 0): "BDS-B1I",
+    (3, 5): "BDS-B2aI",
+    (3, 2): "BDS-B2I",
+}
+
+SYS_MAP = {
+    0: "gps",
+    2: "gal",
+    3: "bds",
+}
+
+
+class ReceiverDriver:
+    """Receiver-specific signal and capability metadata."""
+
+    name = "Generic u-blox"
+    protver = "unknown"
+    default_baud = 115200
+    supports_timing_mode = False
+    supports_l5_health_override = False
+    signal_config = SIGNAL_CONFIG
+    signal_names = SIGNAL_NAMES
+    sys_map = SYS_MAP
+    if_pairs = ()
+
+    def signal_name(self, gnss_id, sig_id):
+        return self.signal_names.get((gnss_id, sig_id))
+
+    def build_tmode_fixed_msg(self, ecef):
+        return None
+
+
+class F9TDriver(ReceiverDriver):
+    name = "ZED-F9T"
+    protver = "27"
+    default_baud = 460800
+    supports_timing_mode = True
+    supports_l5_health_override = True
+    signal_config = F9T_SIGNAL_CONFIG
+    if_pairs = (
+        ('GPS', 'GPS-L1CA', 'GPS-L2CL', 'G'),
+        ('GAL', 'GAL-E1C', 'GAL-E5bQ', 'E'),
+        ('BDS', 'BDS-B1I', 'BDS-B2I', 'C'),
+    )
+
+    def build_tmode_fixed_msg(self, ecef):
+        _ensure_imports()
+        x_cm = int(round(float(ecef[0]) * 100))
+        y_cm = int(round(float(ecef[1]) * 100))
+        z_cm = int(round(float(ecef[2]) * 100))
+        cfg_data = [
+            ("CFG_TMODE_MODE", 2),
+            ("CFG_TMODE_POS_TYPE", 0),
+            ("CFG_TMODE_ECEF_X", x_cm),
+            ("CFG_TMODE_ECEF_Y", y_cm),
+            ("CFG_TMODE_ECEF_Z", z_cm),
+            ("CFG_TMODE_ECEF_X_HP", 0),
+            ("CFG_TMODE_ECEF_Y_HP", 0),
+            ("CFG_TMODE_ECEF_Z_HP", 0),
+            ("CFG_TMODE_FIXED_POS_ACC", 100),
+        ]
+        return _UBXMessage.config_set(7, 0, cfg_data).serialize()
+
+
+class F9TL5Driver(F9TDriver):
+    name = "ZED-F9T (L1/L5 profile)"
+    signal_config = F9T_L5_SIGNAL_CONFIG
+    if_pairs = (
+        ('GPS', 'GPS-L1CA', 'GPS-L5Q', 'G'),
+        ('GAL', 'GAL-E1C', 'GAL-E5aQ', 'E'),
+        ('BDS', 'BDS-B1I', 'BDS-B2aI', 'C'),
+    )
+
+
+class F10TDriver(ReceiverDriver):
+    name = "NEO-F10T"
+    protver = "32"
+    default_baud = 115200
+    supports_timing_mode = False
+    supports_l5_health_override = False
+
+
+def get_driver(name):
+    """Return the receiver driver for a CLI receiver name."""
+    key = (name or "f9t").strip().lower()
+    if key == "f9t":
+        return F9TDriver()
+    if key in {"f9t-l5", "f9t_l5"}:
+        return F9TL5Driver()
+    if key == "f10t":
+        return F10TDriver()
+    raise ValueError(f"Unknown receiver model: {name}")
+
 
 # ── Low-level UBX helpers ──────────────────────────────────────────────────── #
 
 def probe_baud(port):
     """Try common baud rates and return the one that produces valid UBX/NMEA."""
-    _ensure_imports()
+    basename = os.path.basename(port)
+    if basename.startswith("gnss") and basename[4:].isdigit():
+        return None
+    from peppar_fix.gnss_stream import open_gnss
     for baud in [9600, 38400, 115200, 230400, 460800]:
         try:
-            ser = _Serial(port, baudrate=baud, timeout=2)
-            ser.reset_input_buffer()
+            ser, _device_type = open_gnss(port, baud)
             time.sleep(1.5)
             data = ser.read(500)
             ser.close()
             if b'\xb5\x62' in data or b'$G' in data:
                 return baud
+        except RuntimeError:
+            raise
         except Exception:
             pass
     return None
@@ -97,7 +243,8 @@ def probe_baud(port):
 def open_receiver(port, baud=9600):
     """Open serial port and return (Serial, UBXReader) pair."""
     _ensure_imports()
-    ser = _Serial(port, baudrate=baud, timeout=1)
+    from peppar_fix.gnss_stream import open_gnss
+    ser, _device_type = open_gnss(port, baud)
     ubr = _UBXReader(ser, protfilter=2)  # UBX protocol only
     return ser, ubr
 
@@ -169,20 +316,43 @@ def reopen_after_reset(port, wait_s=5, retries=2):
 
     Returns (Serial, UBXReader) or raises RuntimeError.
     """
+    basename = os.path.basename(port)
+    is_kernel_gnss = basename.startswith("gnss") and basename[4:].isdigit()
     for attempt in range(retries):
         time.sleep(wait_s)
-        baud = probe_baud(port)
-        if baud is not None:
-            log.info(f"  Receiver found at {baud} baud after reset")
-            return open_receiver(port, baud)
-        log.info(f"  Probe attempt {attempt + 1} failed, retrying...")
+        if is_kernel_gnss:
+            try:
+                log.info(f"  Reopening kernel GNSS device {port} after reset")
+                return open_receiver(port, 115200)
+            except Exception:
+                log.info(f"  Reopen attempt {attempt + 1} failed, retrying...")
+                continue
+        else:
+            baud = probe_baud(port)
+            if baud is not None:
+                log.info(f"  Receiver found at {baud} baud after reset")
+                return open_receiver(port, baud)
+            log.info(f"  Probe attempt {attempt + 1} failed, retrying...")
     raise RuntimeError(f"Cannot find receiver on {port} after reset")
 
 
-def configure_signals(ser, ubr):
-    """Enable dual-frequency signals for PPP-AR."""
-    return send_cfg(ser, ubr, SIGNAL_CONFIG,
-                    "Signals: GPS L1+L5, GAL E1+E5a, BDS B1+B2a")
+def _driver_band_summary(driver):
+    """Return a short human-readable summary of the receiver IF plan."""
+    parts = []
+    for sys_name, f1, f2, _rinex_prefix in getattr(driver, "if_pairs", ()):
+        parts.append(f"{sys_name} {f1}+{f2}")
+    return ", ".join(parts) if parts else driver.name
+
+
+def configure_signals(ser, ubr, driver=None):
+    """Enable dual-frequency signals for the selected receiver profile."""
+    driver = driver or get_driver("f9t")
+    return send_cfg(
+        ser,
+        ubr,
+        driver.signal_config,
+        f"Signals: {_driver_band_summary(driver)}",
+    )
 
 
 def configure_gps_l5_health(ser, ubr):
@@ -273,7 +443,7 @@ def configure_uart_baud(ser, ubr, baud):
 
 # ── Passive verification ───────────────────────────────────────────────────── #
 
-def listen_for_messages(ser, ubr, required=None, timeout_map=None):
+def listen_for_messages(ser, ubr, required=None, timeout_map=None, driver=None):
     """Passively listen and report which UBX messages arrive.
 
     For each required message, waits up to its timeout (from timeout_map).
@@ -310,18 +480,13 @@ def listen_for_messages(ser, ubr, required=None, timeout_map=None):
     rawx_times = []  # monotonic times of RAWX arrivals
     systems_seen = set()
     sig_pairs = {}   # sv -> set of signal roles seen
-    SIG_NAMES = {
-        (0, 0): 'GPS-L1CA', (0, 6): 'GPS-L5I', (0, 7): 'GPS-L5Q',
-        (2, 0): 'GAL-E1C', (2, 1): 'GAL-E1B',
-        (2, 3): 'GAL-E5aI', (2, 4): 'GAL-E5aQ',
-        (3, 0): 'BDS-B1I', (3, 5): 'BDS-B2aI',
-    }
+    driver = driver or get_driver("f9t")
+    SIG_NAMES = driver.signal_names
     SYS_NAMES = {0: 'gps', 2: 'gal', 3: 'bds'}
-    FREQ_BAND = {
-        'GPS-L1CA': 'L1', 'GPS-L5I': 'L5', 'GPS-L5Q': 'L5',
-        'GAL-E1C': 'E1', 'GAL-E1B': 'E1', 'GAL-E5aI': 'E5a', 'GAL-E5aQ': 'E5a',
-        'BDS-B1I': 'B1', 'BDS-B2aI': 'B2a',
-    }
+    FREQ_BAND = {}
+    for _sys_name, sig1, sig2, _rinex_prefix in getattr(driver, "if_pairs", ()):
+        FREQ_BAND[sig1] = sig1.split("-")[-1]
+        FREQ_BAND[sig2] = sig2.split("-")[-1]
 
     while time.monotonic() < deadline and pending:
         # Check per-message deadlines
@@ -392,14 +557,15 @@ def listen_for_messages(ser, ubr, required=None, timeout_map=None):
 
 def full_configure(port, baud=9600, port_type="USB", rate_hz=1,
                    survey_dur_s=300, survey_acc_m=5.0, target_baud=460800,
-                   do_reset=True):
+                   do_reset=True, receiver="f9t"):
     """Run full receiver configuration sequence.
 
     This is the programmatic equivalent of the old configure_f9t.py main().
     Returns True on success.
     """
     _ensure_imports()
-    port_id = 1 if port_type == "UART" else 3
+    port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4}[port_type]
+    driver = get_driver(receiver)
 
     ser, ubr = open_receiver(port, baud)
 
@@ -408,7 +574,7 @@ def full_configure(port, baud=9600, port_type="USB", rate_hz=1,
         ser.close()
         ser, ubr = reopen_after_reset(port, wait_s=5)
 
-    configure_signals(ser, ubr)
+    configure_signals(ser, ubr, driver=driver)
     l5_ok = configure_gps_l5_health(ser, ubr)
 
     if l5_ok:
@@ -427,9 +593,12 @@ def full_configure(port, baud=9600, port_type="USB", rate_hz=1,
 
     log.info("  Configuration saved to RAM + BBR + Flash.")
 
-    seen, missing, _ = listen_for_messages(ser, ubr, timeout_map={
-        m: 15 for m in REQUIRED_MESSAGES
-    })
+    seen, missing, _ = listen_for_messages(
+        ser,
+        ubr,
+        timeout_map={m: 15 for m in REQUIRED_MESSAGES},
+        driver=driver,
+    )
     ser.close()
 
     if missing:

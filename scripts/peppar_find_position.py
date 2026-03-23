@@ -186,8 +186,8 @@ def run_find_position(args):
                 gps_time, observations = obs_queue.get(timeout=5)
             except queue.Empty:
                 n_empty += 1
-                if n_empty > 12:  # 60s with no observations
-                    log.error("No observations received for 60s")
+                if n_empty > 12:  # 60s with no correlated GNSS/PPS pairs
+                    log.error("No correlated GNSS/PPS pairs arrived for 60s")
                     stop_event.set()
                     break
                 continue
@@ -385,8 +385,8 @@ Exit codes:
     # Position
     ap.add_argument("--seed-pos",
                     help="Seed position as lat,lon,alt (optional, speeds convergence)")
-    ap.add_argument("--sigma", type=float, default=0.1,
-                    help="Convergence threshold in meters (default: 0.1)")
+    ap.add_argument("--sigma", type=float, default=0.5,
+                    help="Convergence threshold in meters (default: 0.5)")
     ap.add_argument("--timeout", type=int, default=3600,
                     help="Timeout in seconds (default: 3600)")
     ap.add_argument("--systems", default="gps,gal,bds",

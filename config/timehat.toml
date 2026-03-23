@@ -1,0 +1,17 @@
+[peppar]
+serial = "/dev/gnss-top"
+baud = 9600
+ubx_port = "USB"
+receiver = "f9t-l5"
+ptp_profile = "i226"
+ptp_dev = "/dev/ptp0"
+ntrip_conf = "ntrip.conf"
+eph_mount = "BCEP00BKG0"
+known_pos = "41.8430626,-88.1037190,201.671"
+position_file = "data/position.json"
+systems = "gps,gal"
+phase_step_bias_ns = 2283.0
+ticc_landing_horizon_s = 6.0
+ticc_settled_threshold_ns = 150.0
+ticc_settled_deadband_ns = 75.0
+ticc_settled_count = 3

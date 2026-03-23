@@ -35,23 +35,26 @@ from solve_pseudorange import (
     timestamp_to_gpstime,
 )
 from solve_dualfreq import (
-    F_L1, F_L5, F_B1I, IF_PAIRS,
-    ALPHA_L1, ALPHA_L5, ALPHA_B1I, ALPHA_B2A,
+    F_L1, F_L2, F_E5B, F_B1I, F_B2I, IF_PAIRS,
+    ALPHA_L1_L2, ALPHA_L2, ALPHA_E1, ALPHA_E5B, ALPHA_B1I_B2I, ALPHA_B2I,
 )
 from ppp_corrections import OSBParser, CLKFile
 
 # IF wavelengths for carrier phase
 WL_L1 = C / F_L1
-WL_L5 = C / F_L5
+WL_L2 = C / F_L2
+WL_E5B = C / F_E5B
 WL_B1I = C / F_B1I
+WL_B2I = C / F_B2I
 
 # Per-system IF carrier phase wavelength pairs
-# GPS/GAL: same frequencies (L1/E1 + L5/E5a)
-# BDS: B1I + B2a (B2a = same freq as L5)
+# GPS: L1 + L2C
+# GAL: E1 + E5b
+# BDS: B1I + B2I
 IF_WL = {
-    'G': (WL_L1, WL_L5, ALPHA_L1, ALPHA_L5),
-    'E': (WL_L1, WL_L5, ALPHA_L1, ALPHA_L5),
-    'C': (WL_B1I, WL_L5, ALPHA_B1I, ALPHA_B2A),
+    'G': (WL_L1, WL_L2, ALPHA_L1_L2, ALPHA_L2),
+    'E': (WL_L1, WL_E5B, ALPHA_E1, ALPHA_E5B),
+    'C': (WL_B1I, WL_B2I, ALPHA_B1I_B2I, ALPHA_B2I),
 }
 
 # Measurement noise (meters)
@@ -64,10 +67,14 @@ BDS_MIN_PRN = 19  # Exclude BDS-2 GEO/IGSO
 # F9T signal name → RINEX observation code mapping
 SIG_TO_RINEX = {
     'GPS-L1CA': ('C1C', 'L1C'),   # Code, Phase
+    'GPS-L2CL': ('C2L', 'L2L'),
+    'GPS-L2CM': ('C2S', 'L2S'),
     'GPS-L5Q':  ('C5Q', 'L5Q'),
     'GAL-E1C':  ('C1C', 'L1C'),
+    'GAL-E5bQ': ('C7Q', 'L7Q'),
     'GAL-E5aQ': ('C5Q', 'L5Q'),
     'BDS-B1I':  ('C2I', 'L2I'),
+    'BDS-B2I':  ('C7I', 'L7I'),
     'BDS-B2aI': ('C5I', 'L5I'),   # u-blox B2aI → RINEX C5I
 }
 

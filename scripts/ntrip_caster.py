@@ -341,14 +341,14 @@ def caster_serial_loop(port, baud, caster, position_file, stop_event,
     """
     try:
         from pyubx2 import UBXReader
-        import serial as pyserial
+        from peppar_fix.gnss_stream import open_gnss
     except ImportError:
         log.error("pyubx2/pyserial not installed")
         stop_event.set()
         return
 
     log.info(f"Caster serial: opening {port} at {baud} baud")
-    ser = pyserial.Serial(port, baud, timeout=2)
+    ser, _device_type = open_gnss(port, baud)
     ubr = UBXReader(ser, protfilter=2)
 
     n_epochs = 0

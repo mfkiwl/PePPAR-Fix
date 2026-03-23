@@ -32,12 +32,12 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import time
 
 try:
     from pyubx2 import UBXMessage, UBXReader, SET, POLL
-    from serial import Serial
 except ImportError:
     print("ERROR: requires pyubx2 and pyserial", file=sys.stderr)
     print("  pip install pyubx2 pyserial", file=sys.stderr)
@@ -48,19 +48,35 @@ except ImportError:
 # Receiver-specific signal config from the driver abstraction.
 # The driver knows which signals to enable for each receiver model.
 from peppar_fix.receiver import get_driver, F9TDriver
+from peppar_fix.gnss_stream import open_gnss
+
+
+def is_kernel_gnss(port):
+    """Return True for kernel GNSS char devices like /dev/gnss0."""
+    base = os.path.basename(port)
+    return base.startswith("gnss") and base[4:].isdigit()
+
+
+def open_port(port, baud):
+    """Open either a serial receiver or a kernel GNSS char device."""
+    stream, _device_type = open_gnss(port, baud)
+    return stream, UBXReader(stream, protfilter=2)
 
 
 def probe_baud(port):
     """Try common baud rates and return the one that produces valid UBX/NMEA."""
+    if is_kernel_gnss(port):
+        return 115200
     for baud in [9600, 38400, 115200, 230400, 460800]:
         try:
-            ser = Serial(port, baudrate=baud, timeout=2)
-            ser.reset_input_buffer()
+            ser, _device_type = open_gnss(port, baud)
             time.sleep(1.5)
             data = ser.read(500)
             ser.close()
             if b'\xb5\x62' in data or b'$G' in data:
                 return baud
+        except RuntimeError:
+            raise
         except Exception:
             pass
     return None
@@ -131,7 +147,7 @@ def configure_signals(ser, ubr, driver=None):
     if driver is None:
         driver = F9TDriver()
     return send_cfg(ser, ubr, driver.signal_config,
-                    f"Signals: GPS L1+L5, GAL E1+E5a, BDS B1+B2a ({driver.name})")
+                    f"Signals: driver-specific dual-frequency set ({driver.name})")
 
 
 def configure_messages(ser, ubr, port_id):
@@ -183,6 +199,9 @@ def configure_tmode(ser, ubr, survey_dur_s, survey_acc_m):
 
 def configure_uart_baud(ser, ubr, baud):
     """Set UART1 baud rate for high-rate output."""
+    if is_kernel_gnss(getattr(ser, "name", "")):
+        print(f"  UART1 baud rate = {baud}... skipped (kernel GNSS device)")
+        return True
     cfg_data = [("CFG_UART1_BAUDRATE", baud)]
     msg = UBXMessage.config_set(7, 0, cfg_data)
     print(f"  UART1 baud rate = {baud}...", end=" ", flush=True)
@@ -273,8 +292,8 @@ def main():
                     help="Survey-in minimum duration in seconds (default 300)")
     ap.add_argument("--survey-acc", type=float, default=5.0,
                     help="Survey-in accuracy threshold in meters (default 5.0)")
-    ap.add_argument("--port-type", default="UART", choices=["UART", "USB"],
-                    help="Connection type (default UART)")
+    ap.add_argument("--port-type", default="UART", choices=["UART", "UART2", "USB", "SPI"],
+                    help="u-blox logical port to configure (default UART)")
     ap.add_argument("--skip-reset", action="store_true",
                     help="Skip factory reset (use if already configured)")
     ap.add_argument("--verify", action="store_true", default=True,
@@ -287,7 +306,7 @@ def main():
     if args.target_baud is None:
         args.target_baud = driver.default_baud
 
-    port_id = 1 if args.port_type == "UART" else 3
+    port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4}[args.port_type]
 
     print(f"PePPAR Fix — {driver.name} Configuration")
     print(f"  Port: {args.port} ({args.port_type})")
@@ -297,10 +316,11 @@ def main():
         print(f"  Survey-in: {args.survey_dur}s, {args.survey_acc}m")
     else:
         print(f"  Survey-in: N/A (no timing mode on {driver.name})")
+    if is_kernel_gnss(args.port):
+        print("  Device type: kernel GNSS char device")
     print()
 
-    ser = Serial(args.port, baudrate=args.baud, timeout=1)
-    ubr = UBXReader(ser, protfilter=2)  # UBX protocol only
+    ser, ubr = open_port(args.port, args.baud)
 
     # Step 1: Factory reset
     if not args.skip_reset:
@@ -319,9 +339,9 @@ def main():
             print("ERROR: Cannot find receiver after reset", file=sys.stderr)
             sys.exit(1)
         print(f"  Receiver found at {post_baud} baud after reset")
-        ser = Serial(args.port, baudrate=post_baud, timeout=1)
-        ser.reset_input_buffer()
-        ubr = UBXReader(ser, protfilter=2)
+        ser, ubr = open_port(args.port, post_baud)
+        if hasattr(ser, "reset_input_buffer"):
+            ser.reset_input_buffer()
 
     # Step 2: Configure signals + GPS L5 health override
     configure_signals(ser, ubr, driver=driver)
@@ -352,9 +372,9 @@ def main():
         if post_baud is None:
             print("ERROR: receiver not found after L5 restart", file=sys.stderr)
             sys.exit(1)
-        ser = Serial(args.port, baudrate=post_baud, timeout=1)
-        ser.reset_input_buffer()
-        ubr = UBXReader(ser, protfilter=2)
+        ser, ubr = open_port(args.port, post_baud)
+        if hasattr(ser, "reset_input_buffer"):
+            ser.reset_input_buffer()
         print(f"OK (found at {post_baud} baud)")
 
     # Step 3: Set measurement rate
@@ -371,7 +391,7 @@ def main():
         print(f"  Survey-in: skipped ({driver.name} has no timing mode)")
 
     # Step 6: UART baud rate (skip for USB)
-    if args.port_type == "UART" and args.target_baud != 9600:
+    if args.port_type == "UART" and not is_kernel_gnss(args.port) and args.target_baud != 9600:
         configure_uart_baud(ser, ubr, args.target_baud)
 
     # Step 7: Save confirmation

@@ -124,6 +124,20 @@
       ],
       "ticcs": [],
       "notes": "chrony stratum 1, PTP GM domain 20. GPS on /dev/gps0."
+    },
+    "oxco": {
+      "description": "x86 host with Intel E810 OCXO NIC and onboard F9T",
+      "hw_label": "hw:oxco",
+      "hostname": "oxco",
+      "platform": "x86_64",
+      "os": "Linux",
+      "interfaces": [
+        "eno1",
+        "enp1s0f1np1",
+        "E810 PHC /dev/ptp1"
+      ],
+      "location": "lab rack",
+      "status": "active"
     }
   },
   "nics": {
@@ -151,18 +165,26 @@
       "description": "Intel E810-XXVDA4T \u2014 OCXO, sub-ns timestamping, onboard F9T",
       "hw_label": "hw:E810",
       "model": "Intel E810-XXVDA4T",
-      "host": null,
+      "host": "oxco",
       "oscillator": "OCXO (4h holdover)",
       "phc_resolution": "sub-ns (7-bit)",
       "pps_io": [
-        "2 SMA",
-        "U.FL"
+        "SMA A / J13 (upper bracket connector)",
+        "SMA B / J14 (lower bracket connector)",
+        "u.FL RX (TIME PULSE input)",
+        "u.FL TX (TIME PULSE output)"
       ],
-      "driver": "ice (out-of-tree DKMS required for PPS)",
+      "driver": "ice (in-tree works for EXTS/PPS in; PPS out likely needs Intel out-of-tree driver)",
       "gnss": "/dev/gnss0 (onboard ZED-F9T via I2C)",
       "interface": "PCIe 4.0 x16, 4x25G SFP28",
-      "status": "on_order",
-      "ordered": "2026-03-17"
+      "status": "installed",
+      "ordered": "2026-03-17",
+      "board_notes": [
+        "External SMA connectors are marked A (top) and B (bottom) on the bracket.",
+        "PCB silkscreen near the SMA connectors reads J13 and J14.",
+        "Nearby u.FL pair is marked RX/TX with TIME PULSE silk.",
+        "Nearby headers J21, J20, J9, and J34 remain undocumented in the lab notes."
+      ]
     },
     "SFN6322F-1": {
       "description": "Solarflare SFN6322F #1 \u2014 10G, PTP standard (no license needed)",
@@ -263,10 +285,10 @@
       "description": "Onboard ZED-F9T on E810-XXVDA4T (via ice driver I2C)",
       "hw_label": "hw:E810",
       "model": "u-blox ZED-F9T",
-      "host": null,
+      "host": "oxco",
       "port": "/dev/gnss0",
-      "notes": "Onboard receiver accessed via ice driver. On order with E810.",
-      "status": "on_order"
+      "notes": "Onboard receiver accessed via ice driver.",
+      "status": "installed"
     },
     "F9T-TOP": {
       "model": "ZED-F9T",

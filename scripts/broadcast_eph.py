@@ -250,6 +250,9 @@ class BroadcastEphemeris:
         # {prn_str: eph_dict}
         self._ephs = {}
         self._update_count = 0
+        self._last_update_mono = None
+        self._last_update_queue_remains = None
+        self._last_update_correlation_confidence = None
 
     @property
     def n_satellites(self):
@@ -309,7 +312,24 @@ class BroadcastEphemeris:
 
         self._ephs[prn] = eph
         self._update_count += 1
+        self._last_update_mono = getattr(msg, 'recv_mono', None)
+        self._last_update_queue_remains = getattr(msg, 'queue_remains', None)
+        self._last_update_correlation_confidence = getattr(
+            msg, 'correlation_confidence', None
+        )
         return prn
+
+    @property
+    def last_update_mono(self):
+        return self._last_update_mono
+
+    @property
+    def last_update_queue_remains(self):
+        return self._last_update_queue_remains
+
+    @property
+    def last_update_correlation_confidence(self):
+        return self._last_update_correlation_confidence
 
     def _gps_seconds_of_week(self, t):
         """Convert datetime to GPS seconds-of-week."""
