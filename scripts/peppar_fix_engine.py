@@ -32,6 +32,7 @@ Usage:
 import argparse
 from collections import deque
 import csv
+from dataclasses import dataclass
 import json
 import logging
 import math
@@ -53,6 +54,7 @@ from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections
 from ntrip_client import NtripStream
 from realtime_ppp import serial_reader, ntrip_reader, QErrStore
+from ticc import Ticc
 from peppar_fix import (
     CorrectionFreshnessGate,
     PositionWatchdog,
@@ -104,6 +106,73 @@ class RunningVarianceWindow:
 
     def count(self):
         return len(self._values)
+
+
+@dataclass
+class TiccPairMeasurement:
+    phc_channel: str
+    ref_channel: str
+    ref_sec: int
+    diff_ns: float
+    recv_mono: float
+    confidence: float
+
+
+class TiccPairTracker:
+    """Pair TICC channel edges by integer ref_sec for realtime use."""
+
+    def __init__(self, phc_channel: str, ref_channel: str):
+        self.phc_channel = phc_channel
+        self.ref_channel = ref_channel
+        self._pending = {phc_channel: {}, ref_channel: {}}
+        self._latest = None
+        self._lock = threading.Lock()
+
+    def ingest(self, event):
+        other = self.ref_channel if event.channel == self.phc_channel else self.phc_channel
+        with self._lock:
+            self._pending[event.channel][event.ref_sec] = event
+            other_event = self._pending[other].pop(event.ref_sec, None)
+            if other_event is None:
+                cutoff = event.ref_sec - 4
+                for channel in self._pending.values():
+                    stale_keys = [k for k in channel.keys() if k < cutoff]
+                    for key in stale_keys:
+                        channel.pop(key, None)
+                return
+
+            this_event = event
+            if this_event.channel == self.phc_channel:
+                phc_event = this_event
+                ref_event = other_event
+            else:
+                phc_event = other_event
+                ref_event = this_event
+
+            diff_ps = (
+                (phc_event.ref_sec - ref_event.ref_sec) * 1_000_000_000_000
+                + phc_event.ref_ps
+                - ref_event.ref_ps
+            )
+            self._latest = TiccPairMeasurement(
+                phc_channel=self.phc_channel,
+                ref_channel=self.ref_channel,
+                ref_sec=event.ref_sec,
+                diff_ns=diff_ps * 1e-3,
+                recv_mono=max(phc_event.recv_mono, ref_event.recv_mono),
+                confidence=min(
+                    getattr(phc_event, "correlation_confidence", 1.0) or 1.0,
+                    getattr(ref_event, "correlation_confidence", 1.0) or 1.0,
+                ),
+            )
+
+    def latest(self, now_mono: float, max_age_s: float):
+        with self._lock:
+            if self._latest is None:
+                return None
+            if now_mono - self._latest.recv_mono > max_age_s:
+                return None
+            return self._latest
 
 
 def apply_ptp_profile(args):
@@ -162,6 +231,10 @@ def apply_ptp_profile(args):
         args.track_restep_ns = profile.get("track_restep_ns", args.track_restep_ns)
     if args.obs_idle_timeout_s is None:
         args.obs_idle_timeout_s = profile.get("obs_idle_timeout_s", args.obs_idle_timeout_s)
+    if args.carrier_max_sigma_ns is None:
+        args.carrier_max_sigma_ns = profile.get(
+            "carrier_max_sigma_ns", args.carrier_max_sigma_ns
+        )
 
 
 # ── Convergence detection (from peppar_find_position) ─────────────────── #
@@ -703,7 +776,7 @@ def _setup_servo(args, known_ecef, qerr_store):
     gate_stats = None
     try:
         from peppar_fix import PtpDevice, PIServo, DisciplineScheduler
-        from peppar_fix import compute_error_sources
+        from peppar_fix import compute_error_sources, ticc_only_error_source
     except ImportError:
         log.error("peppar_fix library not available for servo")
         return None
@@ -754,8 +827,12 @@ def _setup_servo(args, known_ecef, qerr_store):
     pps_history = deque(maxlen=32)
     pps_history_lock = threading.Lock()
     stop_pps = threading.Event()
+    stop_ticc = threading.Event()
     delay_injector = get_delay_injector()
     pps_recv_estimator = TimebaseRelationEstimator()
+    ticc_tracker = None
+    ticc_log_f = None
+    ticc_log_w = None
 
     def extts_reader():
         while not stop_pps.is_set():
@@ -799,6 +876,45 @@ def _setup_servo(args, known_ecef, qerr_store):
     t_extts.start()
     log.info("EXTTS reader started")
 
+    if args.ticc_port:
+        ticc_tracker = TiccPairTracker(args.ticc_phc_channel, args.ticc_ref_channel)
+        if args.ticc_log:
+            ticc_log_f = open(args.ticc_log, 'w', newline='')
+            ticc_log_w = csv.writer(ticc_log_f)
+            ticc_log_w.writerow([
+                'host_timestamp', 'host_monotonic', 'ref_sec', 'ref_ps', 'channel'
+            ])
+            ticc_log_f.flush()
+
+        def ticc_reader():
+            while not stop_ticc.is_set():
+                try:
+                    with Ticc(args.ticc_port, args.ticc_baud, wait_for_boot=True) as ticc:
+                        log.info("TICC reader started on %s", args.ticc_port)
+                        for event in ticc.iter_events():
+                            if stop_ticc.is_set():
+                                return
+                            if ticc_log_w is not None:
+                                ticc_log_w.writerow([
+                                    datetime.now(tz=timezone.utc).isoformat(),
+                                    f"{event.recv_mono:.9f}",
+                                    event.ref_sec,
+                                    event.ref_ps,
+                                    event.channel,
+                                ])
+                                ticc_log_f.flush()
+                            ticc_tracker.ingest(event)
+                except Exception as exc:
+                    if stop_ticc.is_set():
+                        return
+                    log.warning("TICC reader reconnect after error: %s", exc)
+                    time.sleep(1.0)
+
+        t_ticc = threading.Thread(target=ticc_reader, daemon=True)
+        t_ticc.start()
+    else:
+        t_ticc = None
+
     # Servo log file
     log_f = None
     log_w = None
@@ -813,7 +929,8 @@ def _setup_servo(args, known_ecef, qerr_store):
             'pps_confidence', 'pps_estimator_residual_s', 'match_confidence',
             'broadcast_confidence', 'ssr_confidence',
             'dt_rx_ns', 'dt_rx_sigma_ns', 'pps_error_ns', 'qerr_ns',
-            'qerr_age_s', 'qerr_tow_delta_ms', 'pps_var_ns2',
+            'qerr_age_s', 'qerr_tow_delta_ms', 'ticc_diff_ns', 'ticc_age_s',
+            'ticc_confidence', 'pps_var_ns2',
             'pps_qerr_plus_var_ns2', 'pps_qerr_plus_ratio',
             'pps_qerr_minus_var_ns2', 'pps_qerr_minus_ratio',
             'source', 'source_error_ns', 'source_confidence_ns',
@@ -832,6 +949,9 @@ def _setup_servo(args, known_ecef, qerr_store):
         'pps_history': pps_history,
         'pps_history_lock': pps_history_lock,
         'stop_pps': stop_pps,
+        'stop_ticc': stop_ticc,
+        'ticc_tracker': ticc_tracker,
+        'ticc_log_f': ticc_log_f,
         'extts_channel': extts_channel,
         'caps': caps,
         'log_f': log_f,
@@ -844,6 +964,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'tmode_set': False,
         'position_saved': False,
         'compute_error_sources': compute_error_sources,
+        'ticc_only_error_source': ticc_only_error_source,
         'tracking_large_error_count': 0,
         'holdover': {
             'active': False,
@@ -976,8 +1097,10 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     qerr_store = ctx['qerr_store']
     qerr_alignment = ctx['qerr_alignment']
     pps_queue = ctx['pps_queue']
+    ticc_tracker = ctx.get('ticc_tracker')
     log_w = ctx['log_w']
     compute_error_sources = ctx['compute_error_sources']
+    ticc_only_error_source = ctx.get('ticc_only_error_source')
 
     STEP_THRESHOLD_NS = 10_000
     BASE_KP = args.track_kp
@@ -1041,6 +1164,17 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     pps_queue_depth = pps_queue.qsize()
 
     qerr_ns, _qerr_tow_ms, qerr_age_s, qerr_tow_delta_ms = qerr_store.match_gps_time(gps_time)
+    ticc_diff_ns = None
+    ticc_age_s = None
+    ticc_confidence = None
+    if ticc_tracker is not None:
+        ticc_measurement = ticc_tracker.latest(time.monotonic(), args.ticc_max_age_s)
+        if ticc_measurement is not None:
+            # TICC diff is defined as chPHC - chREF. Positive means PPS OUT is
+            # late relative to the reference and the PHC must move forward.
+            ticc_diff_ns = -(ticc_measurement.diff_ns - args.ticc_target_ns)
+            ticc_age_s = max(0.0, time.monotonic() - ticc_measurement.recv_mono)
+            ticc_confidence = ticc_measurement.confidence
     if qerr_ns is None and n_epochs % 10 == 0:
         qdbg = qerr_store.debug_match_gps_time(gps_time)
         log.info(
@@ -1130,9 +1264,22 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                     qerr_minus_ratio,
                 )
 
-    sources = compute_error_sources(
-        pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma,
-    )
+    if args.ticc_drive:
+        if ticc_diff_ns is None:
+            if n_epochs % 10 == 0:
+                log.info("  [%s] Awaiting fresh paired TICC measurement", n_epochs)
+            return "no_ticc"
+        sources = ticc_only_error_source(ticc_diff_ns, args.ticc_confidence_ns)
+    else:
+        sources = compute_error_sources(
+            pps_error_ns,
+            qerr_ns,
+            dt_rx_ns,
+            dt_rx_sigma,
+            carrier_max_sigma=args.carrier_max_sigma_ns,
+            ticc_error_ns=None,
+            ticc_confidence=None,
+        )
     best = sources[0]
 
     # Warmup phase
@@ -1153,6 +1300,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                    extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
                    obs_event, pps_event, _match_confidence, corr_snapshot,
                    dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, qerr_age_s, qerr_tow_delta_ms,
+                   ticc_diff_ns, ticc_age_s, ticc_confidence,
                    pps_var_ns2, pps_qerr_plus_var_ns2, qerr_plus_ratio,
                    pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
                    ctx['adjfine_ppb'], ctx['phase'], n_used,
@@ -1275,6 +1423,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
                obs_event, pps_event, _match_confidence, corr_snapshot,
                dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, qerr_age_s, qerr_tow_delta_ms,
+               ticc_diff_ns, ticc_age_s, ticc_confidence,
                pps_var_ns2, pps_qerr_plus_var_ns2, qerr_plus_ratio,
                pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
                ctx['adjfine_ppb'], ctx['phase'], n_used,
@@ -1287,6 +1436,7 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
                extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
                obs_event, pps_event, match_confidence, corr_snapshot,
                dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, qerr_age_s, qerr_tow_delta_ms,
+               ticc_diff_ns, ticc_age_s, ticc_confidence,
                pps_var_ns2, pps_qerr_plus_var_ns2, qerr_plus_ratio,
                pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
                adjfine_ppb, phase, n_used, gain_scale, scheduler,
@@ -1319,6 +1469,9 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
         f'{pps_error_ns:.1f}', f'{qerr_ns:.3f}' if qerr_ns is not None else '',
         f'{qerr_age_s:.3f}' if qerr_age_s is not None else '',
         f'{qerr_tow_delta_ms:.0f}' if qerr_tow_delta_ms is not None else '',
+        f'{ticc_diff_ns:.3f}' if ticc_diff_ns is not None else '',
+        f'{ticc_age_s:.3f}' if ticc_age_s is not None else '',
+        f'{ticc_confidence:.3f}' if ticc_confidence is not None else '',
         f'{pps_var_ns2:.3f}' if pps_var_ns2 is not None else '',
         f'{pps_qerr_plus_var_ns2:.3f}' if pps_qerr_plus_var_ns2 is not None else '',
         f'{qerr_plus_ratio:.3f}' if qerr_plus_ratio is not None else '',
@@ -1336,6 +1489,8 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
 def _cleanup_servo(ctx):
     """Clean up servo resources."""
     ctx['stop_pps'].set()
+    if 'stop_ticc' in ctx:
+        ctx['stop_ticc'].set()
     ptp = ctx['ptp']
     try:
         ptp.adjfine(0.0)
@@ -1345,6 +1500,8 @@ def _cleanup_servo(ctx):
     ptp.close()
     if ctx['log_f']:
         ctx['log_f'].close()
+    if ctx.get('ticc_log_f'):
+        ctx['ticc_log_f'].close()
     log.info("PHC servo cleaned up")
 
 
@@ -1691,8 +1848,30 @@ Two-phase operation:
                        help="Re-enter step if |tracking error| exceeds this for 3 epochs")
     servo.add_argument("--obs-idle-timeout-s", type=float, default=None,
                        help="Log and enter safe holdover if no observation epochs arrive for this long")
+    servo.add_argument("--carrier-max-sigma-ns", type=float, default=None,
+                       help="Maximum PPP sigma allowed to compete as a servo source")
     servo.add_argument("--pid-file", default=None,
                        help="Write engine PID here for external test control")
+
+    ticc = ap.add_argument_group("TICC experimental input (optional)")
+    ticc.add_argument("--ticc-port", default=None,
+                      help="TICC serial port for experimental measurement/servo input")
+    ticc.add_argument("--ticc-log", default=None,
+                      help="Optional raw TICC CSV log path for lab analysis")
+    ticc.add_argument("--ticc-baud", type=int, default=115200,
+                      help="TICC baud rate (default: 115200)")
+    ticc.add_argument("--ticc-phc-channel", choices=["chA", "chB"], default="chA",
+                      help="TICC channel carrying disciplined PHC PPS OUT (default: chA)")
+    ticc.add_argument("--ticc-ref-channel", choices=["chA", "chB"], default="chB",
+                      help="TICC channel carrying raw reference PPS (default: chB)")
+    ticc.add_argument("--ticc-max-age-s", type=float, default=2.0,
+                      help="Maximum age for a paired TICC measurement to be used")
+    ticc.add_argument("--ticc-target-ns", type=float, default=0.0,
+                      help="Target chPHC-chREF offset in ns for TICC-driven servo mode")
+    ticc.add_argument("--ticc-confidence-ns", type=float, default=3.0,
+                      help="Assumed confidence of TICC differential error when driving servo")
+    ticc.add_argument("--ticc-drive", action="store_true",
+                      help="Use paired TICC differential measurement as a servo source")
 
     # NTRIP caster output (optional, future)
     caster = ap.add_argument_group("NTRIP caster output (optional)")
@@ -1727,6 +1906,8 @@ Two-phase operation:
         args.track_restep_ns = 100_000.0
     if args.obs_idle_timeout_s is None:
         args.obs_idle_timeout_s = 15.0
+    if args.carrier_max_sigma_ns is None:
+        args.carrier_max_sigma_ns = 50.0
     if args.min_broadcast_confidence is None:
         args.min_broadcast_confidence = 0.0
     if args.min_ssr_confidence is None:

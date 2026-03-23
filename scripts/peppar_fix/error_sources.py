@@ -16,7 +16,8 @@ class ErrorSource:
 
 def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
                           pps_confidence=20.0, qerr_confidence=3.0,
-                          carrier_max_sigma=50.0):
+                          carrier_max_sigma=50.0,
+                          ticc_error_ns=None, ticc_confidence=None):
     """Compute all available error sources and return sorted by confidence.
 
     Args:
@@ -45,5 +46,15 @@ def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
                                    pps_error_ns + dt_rx_ns,
                                    dt_rx_sigma_ns))
 
+    if ticc_error_ns is not None and ticc_confidence is not None:
+        sources.append(ErrorSource('TICC',
+                                   ticc_error_ns,
+                                   ticc_confidence))
+
     sources.sort(key=lambda s: s.confidence_ns)
     return sources
+
+
+def ticc_only_error_source(ticc_error_ns, ticc_confidence):
+    """Return a single-source list for experimental TICC-driven servo mode."""
+    return [ErrorSource('TICC', ticc_error_ns, ticc_confidence)]
