@@ -9,6 +9,8 @@ import select
 import struct
 import time
 
+from peppar_fix.exclusive_io import acquire_device_lock, release_device_lock
+
 # ── PTP ioctl constants (from linux/ptp_clock.h) ─────────────────────── #
 
 PTP_CLK_MAGIC = ord('=')
@@ -57,12 +59,20 @@ class PtpDevice:
 
     def __init__(self, dev_path="/dev/ptp0"):
         self.path = dev_path
-        self.fd = os.open(dev_path, os.O_RDWR)
+        self._lock_fd, self._lock_path = acquire_device_lock(dev_path)
+        try:
+            self.fd = os.open(dev_path, os.O_RDWR)
+        except Exception:
+            release_device_lock(self._lock_fd)
+            raise
         self.clock_id = _clock_id_from_fd(self.fd)
         self._libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
 
     def close(self):
-        os.close(self.fd)
+        try:
+            os.close(self.fd)
+        finally:
+            release_device_lock(self._lock_fd)
 
     def get_caps(self):
         """Query PTP clock capabilities."""

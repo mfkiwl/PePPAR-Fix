@@ -224,16 +224,17 @@ def probe_baud(port):
     basename = os.path.basename(port)
     if basename.startswith("gnss") and basename[4:].isdigit():
         return None
-    _ensure_imports()
+    from peppar_fix.gnss_stream import open_gnss
     for baud in [9600, 38400, 115200, 230400, 460800]:
         try:
-            ser = _Serial(port, baudrate=baud, timeout=2)
-            ser.reset_input_buffer()
+            ser, _device_type = open_gnss(port, baud)
             time.sleep(1.5)
             data = ser.read(500)
             ser.close()
             if b'\xb5\x62' in data or b'$G' in data:
                 return baud
+        except RuntimeError:
+            raise
         except Exception:
             pass
     return None
@@ -242,13 +243,8 @@ def probe_baud(port):
 def open_receiver(port, baud=9600):
     """Open serial port and return (Serial, UBXReader) pair."""
     _ensure_imports()
-    basename = os.path.basename(port)
-    if basename.startswith("gnss") and basename[4:].isdigit():
-        from peppar_fix.gnss_stream import open_gnss
-        ser, _device_type = open_gnss(port, baud)
-        ubr = _UBXReader(ser, protfilter=2)
-        return ser, ubr
-    ser = _Serial(port, baudrate=baud, timeout=1)
+    from peppar_fix.gnss_stream import open_gnss
+    ser, _device_type = open_gnss(port, baud)
     ubr = _UBXReader(ser, protfilter=2)  # UBX protocol only
     return ser, ubr
 

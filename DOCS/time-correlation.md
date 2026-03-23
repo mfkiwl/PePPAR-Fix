@@ -212,6 +212,13 @@ Important property:
 
 The TICC is not fully correlated in the unified path today, but this stream should be treated as another event source that will need the same design discipline.
 
+### TimeHat landing log
+
+- Run `timehat-wrapper-horizon6-300s` (289 epochs, 300 s) with `--ticc-landing-horizon-s 6.0`, `--ticc-settled-threshold-ns 150`, `--ticc-settled-count 5` and the host `phase_step_bias_ns 2283.0`. The servo remained in `landing`, moved from about −1.26 µs at the beginning of steady state to −145 ns at the end, and logged no holdover events (`data/timehat-wrapper-horizon6-300s.csv` / `.log`).
+- Slicing the final 120 s tail and running `scripts/analyze_servo.py` yields TDEV(1 s)=61.6 ns for PPS OUT versus 0.59 ns for raw F9T PPS, confirming the short-τ crossover after pull-in (`data/timehat-wrapper-horizon6-300s_tail120_analysis_report.txt`).
+
+The tuned parameters are kept host-specific (TimeHat profile) and injected through the wrapper `--engine-arg` chain. Promote them into shared defaults only after verifying the same landing behavior on additional platforms, otherwise treat them as TimeHat-specific overrides.
+
 ## Initial buffering and delayed delivery
 
 There are two distinct problems:

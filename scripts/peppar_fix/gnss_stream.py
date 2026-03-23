@@ -14,6 +14,8 @@ import select
 import time
 from collections import deque
 
+from peppar_fix.exclusive_io import acquire_device_lock, release_device_lock
+
 log = logging.getLogger(__name__)
 
 
@@ -26,7 +28,12 @@ class KernelGnssStream:
     """
 
     def __init__(self, path):
-        self._fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        self._lock_fd, self._lock_path = acquire_device_lock(path)
+        try:
+            self._fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        except Exception:
+            release_device_lock(self._lock_fd)
+            raise
         self.name = path
         self._buf = bytearray()
         self._out = bytearray()
@@ -187,10 +194,44 @@ class KernelGnssStream:
         return drained
 
     def close(self):
-        return os.close(self._fd)
+        try:
+            return os.close(self._fd)
+        finally:
+            release_device_lock(self._lock_fd)
 
     def fileno(self):
         return self._fd
+
+
+def _open_serial_exclusive(device, baud):
+    import serial
+
+    lock_fd, _lock_path = acquire_device_lock(device)
+    try:
+        ser = serial.Serial(
+            device,
+            baud,
+            timeout=2.0,
+            dsrdtr=False,
+            rtscts=False,
+            exclusive=True,
+        )
+        ser.reset_input_buffer()
+    except Exception:
+        release_device_lock(lock_fd)
+        raise
+
+    original_close = ser.close
+
+    def close_with_lock():
+        try:
+            return original_close()
+        finally:
+            release_device_lock(lock_fd)
+
+    ser.close = close_with_lock
+    ser._peppar_lock_fd = lock_fd
+    return ser
 
 
 def open_gnss(device, baud=115200):
@@ -212,11 +253,8 @@ def open_gnss(device, baud=115200):
         return stream, 'gnss'
 
     # Everything else: try pyserial
-    import serial
     log.info(f"Opening {device} as serial port at {baud} baud")
-    ser = serial.Serial(device, baud, timeout=2.0,
-                        dsrdtr=False, rtscts=False)
-    ser.reset_input_buffer()
+    ser = _open_serial_exclusive(device, baud)
     return ser, 'serial'
 
 

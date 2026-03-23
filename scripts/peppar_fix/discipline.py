@@ -14,7 +14,9 @@ class DisciplineScheduler:
     """
 
     def __init__(self, base_interval=1, adaptive=False,
-                 min_interval=1, max_interval=120):
+                 min_interval=1, max_interval=120,
+                 converge_threshold_ns=100.0, settle_window=10,
+                 unconverge_factor=5.0):
         self.base_interval = base_interval
         self.adaptive = adaptive
         self.min_interval = min_interval
@@ -31,9 +33,10 @@ class DisciplineScheduler:
         self._prev_adjfine_t = None
         self._adjfine_history_s = 0.0
 
-        self._converge_threshold = 100.0
+        self._converge_threshold = converge_threshold_ns
         self._settled_count = 0
-        self._settle_window = 10
+        self._settle_window = settle_window
+        self._unconverge_factor = unconverge_factor
         self._converging = True
 
     @property
@@ -88,7 +91,7 @@ class DisciplineScheduler:
             else:
                 self._settled_count = 0
         else:
-            if abs(avg_error) > self._converge_threshold * 5:
+            if abs(avg_error) > self._converge_threshold * self._unconverge_factor:
                 self._converging = True
                 self._settled_count = 0
                 log.info(f"  M7: error {avg_error:+.0f}ns, back to convergence mode")

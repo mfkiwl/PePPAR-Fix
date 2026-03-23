@@ -56,6 +56,7 @@ from peppar_fix.event_time import (
     estimate_correlation_confidence,
     estimator_sample_weight,
 )
+from peppar_fix.exclusive_io import acquire_device_lock, release_device_lock
 from peppar_fix.timebase_estimator import TimebaseRelationEstimator
 
 # Integer part DOT 11-or-12 fractional digits whitespace ch followed by A or B.
@@ -83,13 +84,28 @@ class Ticc:
         self.baud = baud
         self.wait_for_boot = wait_for_boot
         self._ser: serial.Serial | None = None
+        self._lock_fd: int | None = None
         self._recv_estimator = TimebaseRelationEstimator(
             min_sigma_s=0.05,
             sigma_scale=4.0,
         )
 
+    def _open_serial(self) -> serial.Serial:
+        return serial.Serial(
+            self.port,
+            self.baud,
+            timeout=2.0,
+            exclusive=True,
+        )
+
     def __enter__(self) -> "Ticc":
-        self._ser = serial.Serial(self.port, self.baud, timeout=2.0)
+        self._lock_fd, _lock_path = acquire_device_lock(self.port)
+        try:
+            self._ser = self._open_serial()
+        except Exception:
+            release_device_lock(self._lock_fd)
+            self._lock_fd = None
+            raise
         self._ser.reset_input_buffer()
 
         if self.wait_for_boot:
@@ -115,8 +131,7 @@ class Ticc:
                         pass
                     _time.sleep(1)
                     try:
-                        self._ser = serial.Serial(self.port, self.baud,
-                                                  timeout=2.0)
+                        self._ser = self._open_serial()
                         self._ser.reset_input_buffer()
                     except (serial.SerialException, OSError):
                         _time.sleep(1)
@@ -131,8 +146,12 @@ class Ticc:
         return self
 
     def __exit__(self, *_) -> None:
-        if self._ser:
-            self._ser.close()
+        try:
+            if self._ser:
+                self._ser.close()
+        finally:
+            release_device_lock(self._lock_fd)
+            self._lock_fd = None
 
     def __iter__(self):
         """Yield (channel, ref_sec, ref_ps) for each valid edge line."""

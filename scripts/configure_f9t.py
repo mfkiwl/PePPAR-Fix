@@ -38,7 +38,6 @@ import time
 
 try:
     from pyubx2 import UBXMessage, UBXReader, SET, POLL
-    from serial import Serial
 except ImportError:
     print("ERROR: requires pyubx2 and pyserial", file=sys.stderr)
     print("  pip install pyubx2 pyserial", file=sys.stderr)
@@ -60,11 +59,8 @@ def is_kernel_gnss(port):
 
 def open_port(port, baud):
     """Open either a serial receiver or a kernel GNSS char device."""
-    if is_kernel_gnss(port):
-        stream, _device_type = open_gnss(port, baud)
-        return stream, UBXReader(stream, protfilter=2)
-    ser = Serial(port, baudrate=baud, timeout=1)
-    return ser, UBXReader(ser, protfilter=2)
+    stream, _device_type = open_gnss(port, baud)
+    return stream, UBXReader(stream, protfilter=2)
 
 
 def probe_baud(port):
@@ -73,13 +69,14 @@ def probe_baud(port):
         return 115200
     for baud in [9600, 38400, 115200, 230400, 460800]:
         try:
-            ser = Serial(port, baudrate=baud, timeout=2)
-            ser.reset_input_buffer()
+            ser, _device_type = open_gnss(port, baud)
             time.sleep(1.5)
             data = ser.read(500)
             ser.close()
             if b'\xb5\x62' in data or b'$G' in data:
                 return baud
+        except RuntimeError:
+            raise
         except Exception:
             pass
     return None

@@ -1551,6 +1551,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
 
     # Tracking phase
     mode_time_to_zero_s = None
+    mode_gain_floor = None
     if args.ticc_drive and best.name == 'TICC':
         mode_name, mode_time_to_zero_s = _update_ticc_tracking_mode(
             ctx, args, best, time.monotonic()
@@ -1561,6 +1562,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         elif mode_name == 'landing':
             scheduler._converging = True
             scheduler.interval = 1
+            mode_gain_floor = args.ticc_landing_gain_floor
         else:
             scheduler._converging = False
             scheduler.interval = max(args.min_interval, min(args.max_interval, args.ticc_settled_interval))
@@ -1603,6 +1605,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                          GAIN_REF_SIGMA / avg_confidence))
         if abs(avg_error) > CONVERGE_ERROR_NS:
             gain_scale = max(gain_scale, CONVERGE_MIN_SCALE)
+        if mode_gain_floor is not None:
+            gain_scale = max(gain_scale, mode_gain_floor)
 
         servo.kp = BASE_KP * gain_scale
         servo.ki = BASE_KI * gain_scale
@@ -1619,6 +1623,12 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 math.copysign(max_track_ppb, adjfine_ppb),
             )
             adjfine_ppb = math.copysign(max_track_ppb, adjfine_ppb)
+        if args.ticc_drive and best.name == 'TICC' and ctx.get('tracking_mode') == 'landing':
+            landing_floor_ppb = abs(avg_error) / max(1e-6, args.ticc_landing_horizon_s)
+            landing_floor_ppb = min(max_track_ppb, landing_floor_ppb)
+            desired_sign = math.copysign(1.0, -avg_error) if avg_error != 0 else 1.0
+            if abs(adjfine_ppb) < landing_floor_ppb:
+                adjfine_ppb = math.copysign(landing_floor_ppb, desired_sign)
         # Anti-windup: if adjfine is at the rail, reset integral
         # to prevent windup-driven oscillation
         if abs(adjfine_ppb) >= max_track_ppb * 0.95:
@@ -2113,6 +2123,10 @@ Two-phase operation:
                        help="TICC settled-mode correction interval")
     servo.add_argument("--ticc-settled-count", type=int, default=10,
                        help="Consecutive low-error TICC corrections required before settled mode")
+    servo.add_argument("--ticc-landing-gain-floor", type=float, default=2.0,
+                       help="Minimum gain scale while TICC tracking mode is landing")
+    servo.add_argument("--ticc-landing-horizon-s", type=float, default=10.0,
+                       help="In landing mode, enforce enough frequency to clear the current TICC error over this horizon")
     servo.add_argument("--obs-idle-timeout-s", type=float, default=None,
                        help="Log and enter safe holdover if no observation epochs arrive for this long")
     servo.add_argument("--carrier-max-sigma-ns", type=float, default=None,
