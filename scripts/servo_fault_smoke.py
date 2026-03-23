@@ -66,6 +66,7 @@ def summarize_servo_log(path):
         "match_confidence",
         "broadcast_confidence",
         "ssr_confidence",
+        "qerr_var_ratio",
     ]
     summary = {
         "rows": len(rows),

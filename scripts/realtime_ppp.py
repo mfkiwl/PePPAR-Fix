@@ -46,7 +46,7 @@ import queue
 import sys
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 
 import numpy as np
@@ -144,29 +144,143 @@ class RtcmMessageView:
 # ── Serial observation reader ──────────────────────────────────────────────── #
 
 class QErrStore:
-    """Thread-safe container for the latest TIM-TP quantization error."""
+    """Thread-safe history of TIM-TP quantization error samples."""
 
-    def __init__(self):
+    def __init__(self, maxlen=128):
         self._lock = threading.Lock()
-        self._qerr_ns = None
-        self._tow_ms = None
-        self._host_time = None
+        self._samples = deque(maxlen=maxlen)
+
+    @staticmethod
+    def _normalize_tow_ms(tow_ms):
+        if tow_ms is None:
+            return None
+        return int(round(float(tow_ms))) % (7 * 86400 * 1000)
+
+    @staticmethod
+    def gps_tow_ms(gps_time):
+        """Convert GPS datetime to GPS time-of-week in milliseconds."""
+        gps_epoch = datetime(1980, 1, 6, tzinfo=timezone.utc)
+        total_seconds = (gps_time - gps_epoch).total_seconds()
+        week_seconds = total_seconds % (7 * 86400)
+        return int(round(week_seconds * 1000)) % (7 * 86400 * 1000)
+
+    @staticmethod
+    def _tow_delta_ms(a_ms, b_ms):
+        if a_ms is None or b_ms is None:
+            return None
+        week_ms = 7 * 86400 * 1000
+        delta = (int(a_ms) - int(b_ms)) % week_ms
+        if delta > week_ms / 2:
+            delta -= week_ms
+        return int(delta)
 
     def update(self, qerr_ps, tow_ms):
         """Store new qErr (picoseconds from TIM-TP) as nanoseconds."""
         with self._lock:
-            self._qerr_ns = qerr_ps / 1000.0
-            self._tow_ms = tow_ms
-            self._host_time = time.monotonic()
+            self._samples.append({
+                "qerr_ns": qerr_ps / 1000.0,
+                "tow_ms": self._normalize_tow_ms(tow_ms),
+                "host_time": time.monotonic(),
+            })
 
     def get(self, max_age_s=2.0):
         """Return (qerr_ns, tow_ms) or (None, None) if stale/unavailable."""
         with self._lock:
-            if self._host_time is None:
+            if not self._samples:
                 return None, None
-            if time.monotonic() - self._host_time > max_age_s:
+            latest = self._samples[-1]
+            if time.monotonic() - latest["host_time"] > max_age_s:
                 return None, None
-            return self._qerr_ns, self._tow_ms
+            return latest["qerr_ns"], latest["tow_ms"]
+
+    def snapshot(self, max_age_s=2.0):
+        """Return latest qErr sample metadata or Nones if stale/unavailable."""
+        with self._lock:
+            if not self._samples:
+                return None, None, None
+            latest = self._samples[-1]
+            age_s = time.monotonic() - latest["host_time"]
+            if age_s > max_age_s:
+                return None, None, None
+            return latest["qerr_ns"], latest["tow_ms"], age_s
+
+    def match_gps_time(self, gps_time, max_age_s=30.0, max_tow_delta_ms=1000):
+        """Return qErr matched to the GNSS epoch second.
+
+        TIM-TP describes the timing of the next timepulse. RXM-RAWX arrives
+        near the end of the current second, so the qErr relevant to the PPS
+        edge aligned with a RAWX epoch is the most recent TIM-TP sample whose
+        `towMS` matches the RAWX epoch rounded to the nearest second.
+
+        Returns `(qerr_ns, tow_ms, age_s, tow_delta_ms)` or Nones when no
+        sufficiently fresh, close TIM-TP sample is available.
+        """
+        target_tow_ms = self._normalize_tow_ms(
+            int(round(self.gps_tow_ms(gps_time) / 1000.0)) * 1000
+        )
+        now = time.monotonic()
+        with self._lock:
+            best = None
+            for sample in reversed(self._samples):
+                age_s = now - sample["host_time"]
+                if age_s > max_age_s:
+                    continue
+                tow_delta_ms = self._tow_delta_ms(sample["tow_ms"], target_tow_ms)
+                if tow_delta_ms is None or abs(tow_delta_ms) > max_tow_delta_ms:
+                    continue
+                if best is None:
+                    best = (sample, age_s, tow_delta_ms)
+                    continue
+                _, best_age_s, best_delta_ms = best
+                rank = (abs(tow_delta_ms), age_s)
+                best_rank = (abs(best_delta_ms), best_age_s)
+                if rank < best_rank:
+                    best = (sample, age_s, tow_delta_ms)
+            if best is None:
+                return None, None, None, None
+            sample, age_s, tow_delta_ms = best
+            return sample["qerr_ns"], sample["tow_ms"], age_s, tow_delta_ms
+
+    def debug_match_gps_time(self, gps_time, max_age_s=30.0, max_tow_delta_ms=1000):
+        """Return detailed debug info for qErr matching."""
+        target_tow_ms = self._normalize_tow_ms(
+            int(round(self.gps_tow_ms(gps_time) / 1000.0)) * 1000
+        )
+        now = time.monotonic()
+        with self._lock:
+            info = {
+                "sample_count": len(self._samples),
+                "target_tow_ms": target_tow_ms,
+                "latest_tow_ms": None,
+                "latest_age_s": None,
+                "latest_qerr_ns": None,
+                "best_tow_ms": None,
+                "best_age_s": None,
+                "best_tow_delta_ms": None,
+                "best_qerr_ns": None,
+            }
+            if self._samples:
+                latest = self._samples[-1]
+                info["latest_tow_ms"] = latest["tow_ms"]
+                info["latest_age_s"] = now - latest["host_time"]
+                info["latest_qerr_ns"] = latest["qerr_ns"]
+            best = None
+            for sample in reversed(self._samples):
+                age_s = now - sample["host_time"]
+                if age_s > max_age_s:
+                    continue
+                tow_delta_ms = self._tow_delta_ms(sample["tow_ms"], target_tow_ms)
+                if tow_delta_ms is None or abs(tow_delta_ms) > max_tow_delta_ms:
+                    continue
+                if best is None or (abs(tow_delta_ms), age_s) < (abs(best[2]), best[1]):
+                    best = (sample, age_s, tow_delta_ms)
+            if best is not None:
+                sample, age_s, tow_delta_ms = best
+                info["best_tow_ms"] = sample["tow_ms"]
+                info["best_age_s"] = age_s
+                info["best_tow_delta_ms"] = tow_delta_ms
+                info["best_qerr_ns"] = sample["qerr_ns"]
+            return info
 
 
 def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
@@ -233,6 +347,7 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
     n_epochs = 0
     delay_injector = get_delay_injector()
     source_name = f"gnss:{port}"
+    last_qerr_invalid_log = 0.0
     # GNSS delivery can legitimately batch by seconds on some hosts
     # (notably the kernel-GNSS path on oxco), so keep this estimator broad.
     recv_estimator = TimebaseRelationEstimator(
@@ -265,11 +380,23 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
             if msg_id == 'TIM-TP' and qerr_store is not None:
                 qerr_ps = getattr(parsed, 'qErr', None)
                 tow_ms = getattr(parsed, 'towMS', None)
-                # Check qErrInvalid flag (bit 4 of flags byte)
+                # Prefer the decoded qErrInvalid field when pyubx2 exposes it.
                 flags = getattr(parsed, 'flags', 0)
-                qerr_invalid = bool(flags & 0x10) if isinstance(flags, int) else False
+                decoded_invalid = getattr(parsed, 'qErrInvalid', None)
+                if decoded_invalid is None:
+                    qerr_invalid = bool(flags & 0x10) if isinstance(flags, int) else False
+                else:
+                    qerr_invalid = bool(decoded_invalid)
                 if qerr_ps is not None and not qerr_invalid:
                     qerr_store.update(qerr_ps, tow_ms)
+                elif qerr_invalid:
+                    now = time.monotonic()
+                    if now - last_qerr_invalid_log > 30.0:
+                        log.warning(
+                            "TIM-TP qErrInvalid=1 on %s; dropping qErr sample",
+                            port,
+                        )
+                        last_qerr_invalid_log = now
 
             if msg_id == 'RXM-RAWX':
                 # Fire raw callback before IF processing (for NTRIP caster)

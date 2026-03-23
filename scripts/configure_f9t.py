@@ -295,8 +295,8 @@ def main():
                     help="Survey-in minimum duration in seconds (default 300)")
     ap.add_argument("--survey-acc", type=float, default=5.0,
                     help="Survey-in accuracy threshold in meters (default 5.0)")
-    ap.add_argument("--port-type", default="UART", choices=["UART", "USB"],
-                    help="Connection type (default UART)")
+    ap.add_argument("--port-type", default="UART", choices=["UART", "USB", "SPI"],
+                    help="u-blox logical port to configure (default UART)")
     ap.add_argument("--skip-reset", action="store_true",
                     help="Skip factory reset (use if already configured)")
     ap.add_argument("--verify", action="store_true", default=True,
@@ -309,7 +309,7 @@ def main():
     if args.target_baud is None:
         args.target_baud = driver.default_baud
 
-    port_id = 1 if args.port_type == "UART" else 3
+    port_id = {"UART": 1, "USB": 3, "SPI": 4}[args.port_type]
 
     print(f"PePPAR Fix — {driver.name} Configuration")
     print(f"  Port: {args.port} ({args.port_type})")

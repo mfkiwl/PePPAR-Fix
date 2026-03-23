@@ -190,11 +190,35 @@ GNSS arrives through the Linux kernel GNSS device:
 Important properties:
 
 - not a conventional serial port
+- host config for this path should omit `baud`
+- host config should use `ubx_port = "..."` to mean the F9T logical output
+  port being configured, not the Linux device type
 - returns short reads and packet bursts
 - may include queued startup data
 - requires local buffering to avoid losing the remainder of a kernel packet while `pyubx2` is scanning one byte at a time
 
 We added packet-level receive timestamps in the kernel wrapper because parse-time timestamps were not precise enough once bursts were involved.
+
+Empirical F9T logical-port result on `2026-03-23`:
+
+- `scripts/peppar_rx_config.py` was run directly against `/dev/gnss0` with
+  `--port-type UART`, `USB`, and `SPI`
+- all three configurations were accepted by the receiver
+- after each configuration, the live `/dev/gnss0` verify stream still showed
+  only:
+  - `RXM-RAWX`
+  - `NAV-PVT`
+- `RXM-SFRBX` and `TIM-TP` did not reappear in the post-config verify stream
+  for any tested logical port
+
+Interpretation:
+
+- this does not prove which F9T logical port the E810 kernel path corresponds
+  to
+- it does prove that “Linux sees a char device” and “the F9T logical message
+  port is USB” are separate questions
+- current evidence points to a platform-specific limitation or translation
+  layer in the in-tree E810 GNSS path, rather than a simple wrong-port choice
 
 ### `timehat`
 
@@ -243,6 +267,26 @@ Observed and code-relevant properties:
 - EXTS channels available
 - pin programming is not required for the current working path
 - current code uses the `e810` profile and implicit EXTS mapping
+- physical connector notes from lab inspection:
+  - two external SMA connectors, vertically stacked on the bracket when the
+    card is mounted in a horizontal motherboard with slot openings facing up
+  - upper connector is externally marked `A`
+  - lower connector is externally marked `B`
+  - on the PCB they are labeled `J13` and `J14`
+  - nearby are two `u.FL` timing connectors marked `RX` and `TX` with
+    `TIME PULSE` silk nearby
+
+Interpretation of the nearby `u.FL` connectors:
+
+- Intel documents the E810-XXVDA4T as exposing four external 1PPS timing
+  connectors: `SMA1`, `SMA2`, `U.FL1`, and `U.FL2`
+- Intel also documents the `u.FL` pair as dedicated send/receive timing ports,
+  not generic RF connectors
+- in practice, that matches the board silk:
+  - `RX` is the 1PPS timing input side
+  - `TX` is the 1PPS timing output side
+- source: Intel E810-XXVDA4T user guide summary indexed by ManualsLib:
+  <https://www.manualslib.com/manual/2991401/Intel-E810-Vda4t-Series.html>
 
 Current practical behavior:
 
@@ -251,6 +295,14 @@ Current practical behavior:
 - PHC should be treated as `tai` when used as a PTP-facing clock
 - PPS output on the SMA connectors is not currently active through the in-tree
   `ice` path we are using
+
+Still unverified from software:
+
+- exact mapping between external bracket labels `A/B` and Intel logical names
+  `SMA1/SMA2`
+- exact role of nearby headers `J21`, `J20`, `J9`, and `J34`
+  - one of these may expose a lower-latency serial/UART path to the onboard
+    F9T, but that has not yet been confirmed from documentation or probing
 
 ### i226 on `timehat`
 

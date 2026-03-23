@@ -49,12 +49,23 @@
       "host": "oxco",
       "oscillator": "OCXO (4h holdover)",
       "phc_resolution": "sub-ns (7-bit)",
-      "pps_io": ["2 SMA", "U.FL"],
+      "pps_io": [
+        "SMA A / J13 (upper bracket connector)",
+        "SMA B / J14 (lower bracket connector)",
+        "u.FL RX (TIME PULSE input)",
+        "u.FL TX (TIME PULSE output)"
+      ],
       "driver": "ice (in-tree works for EXTS/PPS in; PPS out likely needs Intel out-of-tree driver)",
       "gnss": "/dev/gnss0 (onboard ZED-F9T via I2C)",
       "interface": "PCIe 4.0 x16, 4x25G SFP28",
       "status": "installed",
-      "ordered": "2026-03-17"
+      "ordered": "2026-03-17",
+      "board_notes": [
+        "External SMA connectors are marked A (top) and B (bottom) on the bracket.",
+        "PCB silkscreen near the SMA connectors reads J13 and J14.",
+        "Nearby u.FL pair is marked RX/TX with TIME PULSE silk.",
+        "Nearby headers J21, J20, J9, and J34 remain undocumented in the lab notes."
+      ]
     },
     "SFN6322F-1": {
       "description": "Solarflare SFN6322F #1 — 10G, PTP standard (no license needed)",

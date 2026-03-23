@@ -955,6 +955,37 @@ For EKF updates that do not consume PPS directly, the gate is softer:
 - stale correction state should defer or drop the EKF update before
   `filt.update(...)`, even when no PPS correlation is involved
 
+## Startup checks and runtime watchdogs
+
+These are separate concerns and should stay separate in the code:
+
+- startup receiver verification
+  - good for confirming that configurable sources such as GNSS receivers are
+    still emitting the required message types and signal families before the
+    main sinks start
+  - for the F9T family this means at least:
+    - `RXM-RAWX`
+    - `RXM-SFRBX`
+    - `NAV-PVT`
+    - `TIM-TP`
+  - if startup verification fails, it is reasonable to re-run the receiver
+    configuration flow before proceeding
+- runtime stream watchdogs
+  - should not reconfigure devices just because a stream stuttered
+  - should only note that a source has been quiet for longer than policy
+  - should be configurable per source
+  - should bark during fault-injection and real stream stalls
+
+Runtime watchdogs are diagnostic, not corrective:
+
+- the system should keep running through transient stutters
+- sinks and gates should continue to apply their own correlation/drop policy
+- watchdog logs should simply tell us when:
+  - GNSS observation stream has gone quiet
+  - PPS/EXTTS stream has gone quiet
+  - RTCM stream has gone quiet
+  - TICC stream has gone quiet
+
 ## Freshest-only vs loss-free vs correlated-window
 
 There are really three policies, not two.

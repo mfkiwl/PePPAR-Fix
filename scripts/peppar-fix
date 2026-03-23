@@ -4,9 +4,9 @@
 # Composes three tools with retry logic and exponential backoff:
 #   1. peppar-rx-config   — verify/configure receiver
 #   2. peppar-find-position — bootstrap antenna position (if needed)
-#   3. peppar-phc-servo   — discipline PHC using GNSS
+#   3. peppar-fix-engine  — maintain software clock, optionally discipline PHC
 #
-# Exit codes from peppar-phc-servo drive retry behavior:
+# Exit codes from peppar-fix-engine drive retry behavior:
 #   0 = clean shutdown
 #   1 = error (fatal)
 #   2 = position moved (re-bootstrap position, then restart servo)
@@ -16,7 +16,11 @@
 # Configuration via environment variables or command-line overrides:
 #   PEPPAR_SERIAL       Serial port (e.g. /dev/gnss-top)
 #   PEPPAR_BAUD         Baud rate (default: 9600)
-#   PEPPAR_PORT_TYPE    UART or USB (default: USB)
+#   PEPPAR_UBX_PORT     u-blox logical output port: UART, USB, or SPI (default: USB)
+#   PEPPAR_PORT_TYPE    Deprecated alias for PEPPAR_UBX_PORT
+#   PEPPAR_RECEIVER     Receiver profile (default: f9t)
+#   PEPPAR_PTP_PROFILE  PTP profile (optional)
+#   PEPPAR_HOST_CONFIG  Explicit host config TOML (optional)
 #   PEPPAR_PTP_DEV      PTP device (default: /dev/ptp0)
 #   PEPPAR_NTRIP_CONF   NTRIP config file
 #   PEPPAR_EPH_MOUNT    Ephemeris mountpoint
@@ -34,21 +38,36 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PYTHON_BIN="python3"
+if [[ -x "$REPO_ROOT/venv/bin/python" ]]; then
+    PYTHON_BIN="$REPO_ROOT/venv/bin/python"
+fi
+export PYTHONPATH="$REPO_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
 
 # ── Defaults from environment ───────────────────────────────────────────── #
 
 SERIAL="${PEPPAR_SERIAL:-}"
-BAUD="${PEPPAR_BAUD:-9600}"
-PORT_TYPE="${PEPPAR_PORT_TYPE:-USB}"
-PTP_DEV="${PEPPAR_PTP_DEV:-/dev/ptp0}"
+BAUD="${PEPPAR_BAUD:-}"
+UBX_PORT="${PEPPAR_UBX_PORT:-${PEPPAR_PORT_TYPE:-}}"
+RECEIVER="${PEPPAR_RECEIVER:-}"
+PTP_PROFILE="${PEPPAR_PTP_PROFILE:-}"
+PTP_DEV="${PEPPAR_PTP_DEV:-}"
 NTRIP_CONF="${PEPPAR_NTRIP_CONF:-}"
 EPH_MOUNT="${PEPPAR_EPH_MOUNT:-}"
 SSR_MOUNT="${PEPPAR_SSR_MOUNT:-}"
 KNOWN_POS="${PEPPAR_KNOWN_POS:-}"
-POSITION_FILE="${PEPPAR_POSITION_FILE:-data/position.json}"
-SYSTEMS="${PEPPAR_SYSTEMS:-gps,gal,bds}"
+POSITION_FILE="${PEPPAR_POSITION_FILE:-}"
+SYSTEMS="${PEPPAR_SYSTEMS:-}"
 DURATION="${PEPPAR_DURATION:-}"
 LOG_FILE="${PEPPAR_LOG:-}"
+
+is_kernel_gnss_device() {
+    local path="${1:-}"
+    local base
+    base="$(basename "$path")"
+    [[ "$base" =~ ^gnss[0-9]+$ ]]
+}
 
 # ── Parse CLI overrides ─────────────────────────────────────────────────── #
 
@@ -61,7 +80,11 @@ GNSS-disciplined PTP clock appliance.
 Options:
   --serial PORT        Serial port (e.g. /dev/gnss-top)
   --baud RATE          Baud rate (default: 9600)
-  --port-type TYPE     UART or USB (default: USB)
+  --ubx-port TYPE      u-blox logical output port: UART, USB, or SPI (default: USB)
+  --port-type TYPE     Deprecated alias for --ubx-port
+  --receiver NAME      Receiver profile (default: f9t)
+  --ptp-profile NAME   PTP profile (e.g. i226, e810)
+  --host-config FILE   Explicit host config TOML
   --ptp-dev DEV        PTP device (default: /dev/ptp0)
   --ntrip-conf FILE    NTRIP config file
   --eph-mount MOUNT    Broadcast ephemeris mountpoint
@@ -78,11 +101,16 @@ EOF
     exit 0
 }
 
+HOST_CONFIG="${PEPPAR_HOST_CONFIG:-}"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --serial)       SERIAL="$2"; shift 2 ;;
         --baud)         BAUD="$2"; shift 2 ;;
-        --port-type)    PORT_TYPE="$2"; shift 2 ;;
+        --ubx-port|--port-type) UBX_PORT="$2"; shift 2 ;;
+        --receiver)     RECEIVER="$2"; shift 2 ;;
+        --ptp-profile)  PTP_PROFILE="$2"; shift 2 ;;
+        --host-config)  HOST_CONFIG="$2"; shift 2 ;;
         --ptp-dev)      PTP_DEV="$2"; shift 2 ;;
         --ntrip-conf)   NTRIP_CONF="$2"; shift 2 ;;
         --eph-mount)    EPH_MOUNT="$2"; shift 2 ;;
@@ -96,6 +124,29 @@ while [[ $# -gt 0 ]]; do
         *)              echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
+
+HOSTCFG_PATH=""
+if hostcfg_eval="$("$PYTHON_BIN" "$SCRIPT_DIR/peppar_host_config.py" --repo-root "$REPO_ROOT" --explicit "$HOST_CONFIG")"; then
+    eval "$hostcfg_eval"
+fi
+
+SERIAL="${SERIAL:-${HOSTCFG_SERIAL:-}}"
+BAUD="${BAUD:-${HOSTCFG_BAUD:-9600}}"
+if is_kernel_gnss_device "$SERIAL"; then
+    BAUD=""
+fi
+UBX_PORT="${UBX_PORT:-${HOSTCFG_UBX_PORT:-${HOSTCFG_PORT_TYPE:-USB}}}"
+RECEIVER="${RECEIVER:-${HOSTCFG_RECEIVER:-f9t}}"
+PTP_PROFILE="${PTP_PROFILE:-${HOSTCFG_PTP_PROFILE:-}}"
+PTP_DEV="${PTP_DEV:-${HOSTCFG_PTP_DEV:-/dev/ptp0}}"
+NTRIP_CONF="${NTRIP_CONF:-${HOSTCFG_NTRIP_CONF:-}}"
+EPH_MOUNT="${EPH_MOUNT:-${HOSTCFG_EPH_MOUNT:-}}"
+SSR_MOUNT="${SSR_MOUNT:-${HOSTCFG_SSR_MOUNT:-}}"
+KNOWN_POS="${KNOWN_POS:-${HOSTCFG_KNOWN_POS:-}}"
+POSITION_FILE="${POSITION_FILE:-${HOSTCFG_POSITION_FILE:-data/position.json}}"
+SYSTEMS="${SYSTEMS:-${HOSTCFG_SYSTEMS:-gps,gal,bds}}"
+DURATION="${DURATION:-${HOSTCFG_DURATION:-}}"
+LOG_FILE="${LOG_FILE:-${HOSTCFG_LOG:-}}"
 
 # ── Validate required config ────────────────────────────────────────────── #
 
@@ -132,8 +183,20 @@ echo "=== peppar-fix: Step 1 — Receiver configuration ==="
 rx_backoff=5
 rx_max_retries=3
 for ((rx_try=1; rx_try<=rx_max_retries; rx_try++)); do
-    if python3 "$SCRIPT_DIR/peppar_rx_config.py" \
-        "$SERIAL" --baud "$BAUD" --port-type "$PORT_TYPE"; then
+    rx_args=(
+        "$SERIAL"
+    )
+    if [[ -n "$BAUD" ]]; then
+        rx_args+=(--baud "$BAUD")
+    fi
+    rx_args+=(
+        --port-type "$UBX_PORT"
+        --receiver "$RECEIVER"
+    )
+    if [[ -n "$PTP_PROFILE" ]]; then
+        rx_args+=(--ptp-profile "$PTP_PROFILE")
+    fi
+    if "$PYTHON_BIN" "$SCRIPT_DIR/peppar_rx_config.py" "${rx_args[@]}"; then
         break
     fi
     if [[ $rx_try -eq $rx_max_retries ]]; then
@@ -150,17 +213,20 @@ done
 bootstrap_position() {
     echo "=== peppar-fix: Step 2 — Position bootstrap ==="
     local pos_args=(
-        --serial "$SERIAL" --baud "$BAUD"
+        --serial "$SERIAL"
         --systems "$SYSTEMS"
         --save --position-file "$POSITION_FILE"
     )
+    if [[ -n "$BAUD" ]]; then
+        pos_args+=(--baud "$BAUD")
+    fi
     if [[ -n "$KNOWN_POS" ]]; then
         pos_args+=(--seed-pos "$KNOWN_POS")
     fi
     # shellcheck disable=SC2046
     pos_args+=($(ntrip_args))
 
-    python3 "$SCRIPT_DIR/peppar_find_position.py" "${pos_args[@]}"
+    "$PYTHON_BIN" "$SCRIPT_DIR/peppar_find_position.py" "${pos_args[@]}"
 }
 
 if [[ -n "$KNOWN_POS" ]]; then
@@ -173,7 +239,7 @@ fi
 
 # ── Step 3: Run servo with retry logic ──────────────────────────────────── #
 
-echo "=== peppar-fix: Step 3 — PHC servo ==="
+echo "=== peppar-fix: Step 3 — Unified engine ==="
 
 servo_backoff=5
 
@@ -208,10 +274,19 @@ rotate_position_file() {
 
 build_servo_args() {
     local args=(
-        --serial "$SERIAL" --baud "$BAUD"
-        --ptp-dev "$PTP_DEV"
+        --serial "$SERIAL"
+        --receiver "$RECEIVER"
         --systems "$SYSTEMS"
     )
+    if [[ -n "$BAUD" ]]; then
+        args+=(--baud "$BAUD")
+    fi
+    if [[ -n "$PTP_PROFILE" ]]; then
+        args+=(--ptp-profile "$PTP_PROFILE")
+    fi
+    if [[ -n "$PTP_DEV" ]]; then
+        args+=(--servo "$PTP_DEV")
+    fi
     if [[ -n "$KNOWN_POS" ]]; then
         args+=(--known-pos "$KNOWN_POS")
     elif [[ -f "$POSITION_FILE" ]]; then
@@ -223,7 +298,7 @@ build_servo_args() {
         args+=(--duration "$DURATION")
     fi
     if [[ -n "$LOG_FILE" ]]; then
-        args+=(--log "$LOG_FILE")
+        args+=(--servo-log "$LOG_FILE")
     fi
     echo "${args[@]}"
 }
@@ -231,7 +306,7 @@ build_servo_args() {
 while true; do
     set +e
     # shellcheck disable=SC2046
-    python3 "$SCRIPT_DIR/peppar_phc_servo.py" $(build_servo_args)
+    "$PYTHON_BIN" "$SCRIPT_DIR/peppar_fix_engine.py" $(build_servo_args)
     rc=$?
     set -e
 

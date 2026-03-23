@@ -169,6 +169,25 @@ What it contains:
 
 This is a GNSS-receiver-side timing-quality input. It is not a host timestamp and it is not a PHC timestamp.
 
+Important semantic detail:
+
+- `UBX-TIM-TP` describes the timing of the next timepulse, not the previous one
+- `qErr` therefore applies to the following PPS edge
+
+Live probing on `timehat` showed:
+
+- `RXM-RAWX.rcvTow ~= N.997`
+- the immediately preceding `TIM-TP.towMS == round(RXM-RAWX.rcvTow) * 1000`
+
+That is the right association for the PPS edge aligned with the RAWX epoch.
+
+Reference:
+
+- u-blox F9 TIM 2.20 Interface Description, `UBX-TIM-TP`:
+  “This message contains information on the timing of the next pulse at the
+  TIMEPULSE0 output.”
+  https://content.u-blox.com/sites/default/files/u-blox-F9-TIM-2.20_InterfaceDescription_UBX-21048598.pdf
+
 ### 4. TICC stream
 
 Relevant code:
@@ -432,6 +451,30 @@ This fits the current architecture:
 - the delay hook lives at the reader boundary
 - the existing move toward event envelopes and timing metadata makes the
   resulting behavior diagnosable
+
+### Startup verification vs runtime watchdogs
+
+These should remain distinct:
+
+- startup verification
+  - used for configurable sources like GNSS receivers
+  - confirms required message types before sinks begin consuming live data
+  - for the F9T family, this should include at least:
+    - `RXM-RAWX`
+    - `RXM-SFRBX`
+    - `NAV-PVT`
+    - `TIM-TP`
+  - if this check fails, re-running receiver configuration is reasonable
+- runtime stream watchdogs
+  - log when a source has been quiet longer than a configured timeout
+  - should bark during synthetic stutter tests
+  - should not automatically reconfigure hardware for ordinary runtime stutters
+
+The runtime watchdog is a diagnostic signal:
+
+- it tells us which source thread went quiet
+- it does not replace sink-level gates
+- it does not imply the process should stop
 
 ### What the first meaningful gate-forcing run looked like
 

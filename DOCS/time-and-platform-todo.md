@@ -46,6 +46,8 @@ This file turns the recent bring-up and correlation findings into a concrete wor
 
 - [ ] Keep `ObservationEvent` and `PpsEvent` as the minimum standard for new time-bearing streams
 - [ ] Add a corresponding event wrapper for TICC lines
+- [ ] Add GNSS receiver startup verification to the unified entry path using the
+  existing required-message checks before steady-state sinks begin
 - [ ] Ensure every new stream carries:
   - source-native time
   - host monotonic receive time
@@ -78,6 +80,13 @@ This file turns the recent bring-up and correlation findings into a concrete wor
   - expected `deferred_waiting` behavior under injected queueing
 - [ ] Move away from `epoch_offset_s` as the primary robustness gate
   for strict sinks; keep it as a secondary symptom only
+- [ ] Add per-source runtime stream watchdogs that log when:
+  - GNSS UBX has been quiet too long
+  - PPS/EXTTS has been quiet too long
+  - RTCM has been quiet too long
+  - TICC has been quiet too long
+- [ ] Exercise those watchdogs under injected stutter and confirm they bark
+  without forcing sink shutdown
 
 ### Drop policy
 

@@ -20,6 +20,7 @@ Exit codes:
 
 import argparse
 import logging
+import os
 import sys
 import time
 import tomllib
@@ -30,7 +31,7 @@ from peppar_fix.receiver import (
     full_configure, configure_signals, configure_gps_l5_health,
     configure_messages, configure_nmea_off, configure_tmode,
     configure_rate, configure_uart_baud,
-    warm_restart, reopen_after_reset, factory_reset,
+    warm_restart, reopen_after_reset, factory_reset, get_driver,
 )
 
 log = logging.getLogger("peppar_rx_config")
@@ -107,7 +108,8 @@ def run(args):
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    port_id = 1 if args.port_type == "UART" else 3
+    port_id = {"UART": 1, "USB": 3, "SPI": 4}[args.port_type]
+    driver = get_driver(args.receiver)
 
     # ── Factory reset if requested ──────────────────────────────────────
     if args.factory_reset:
@@ -122,7 +124,7 @@ def run(args):
             ser, ubr = reopen_after_reset(args.serial, wait_s=5)
             # After factory reset, definitely need full configuration
             log.info("Configuring after factory reset...")
-            _do_configure(ser, ubr, args, port_id)
+            _do_configure(ser, ubr, args, port_id, driver)
             ser.close()
             log.info("Factory reset + configure complete")
             return EXIT_OK
@@ -145,7 +147,7 @@ def run(args):
 
     # ── Passive listen phase ────────────────────────────────────────────
     log.info("Listening for UBX messages...")
-    seen, missing, signal_info = listen_for_messages(ser, ubr)
+    seen, missing, signal_info = listen_for_messages(ser, ubr, driver=driver)
 
     # Report findings
     log.info(f"  Messages detected: {sorted(seen)}")
@@ -214,14 +216,21 @@ def run(args):
     for r in reasons:
         log.info(f"  Reason: {r}")
 
-    _do_configure(ser, ubr, args, port_id)
+    _do_configure(ser, ubr, args, port_id, driver)
     ser.close()
 
     # ── Verify after configuration ──────────────────────────────────────
     log.info("Verifying configuration...")
     baud = probe_baud(args.serial) or args.baud
     ser, ubr = open_receiver(args.serial, baud)
-    seen2, missing2, signal_info2 = listen_for_messages(ser, ubr)
+    if hasattr(ser, "discard_input"):
+        try:
+            drained = ser.discard_input(idle_s=0.5)
+            if drained:
+                log.info(f"  Drained {drained} queued kernel-GNSS bytes before verify")
+        except Exception as e:
+            log.debug(f"  Kernel-GNSS drain skipped: {e}")
+    seen2, missing2, signal_info2 = listen_for_messages(ser, ubr, driver=driver)
     ser.close()
 
     if missing2:
@@ -232,9 +241,9 @@ def run(args):
     return EXIT_OK
 
 
-def _do_configure(ser, ubr, args, port_id):
+def _do_configure(ser, ubr, args, port_id, driver):
     """Apply receiver configuration (signals, messages, rate, tmode, L5)."""
-    configure_signals(ser, ubr)
+    configure_signals(ser, ubr, driver=driver)
     l5_ok = configure_gps_l5_health(ser, ubr)
 
     if l5_ok:
@@ -248,7 +257,9 @@ def _do_configure(ser, ubr, args, port_id):
     configure_nmea_off(ser, ubr, port_id)
     configure_tmode(ser, ubr, args.survey_dur, args.survey_acc)
 
-    if args.port_type == "UART" and args.target_baud != args.baud:
+    basename = os.path.basename(args.serial)
+    is_kernel_gnss = basename.startswith("gnss") and basename[4:].isdigit()
+    if args.port_type == "UART" and args.target_baud != args.baud and not is_kernel_gnss:
         configure_uart_baud(ser, ubr, args.target_baud)
 
     log.info("  Configuration saved to RAM + BBR + Flash")
@@ -285,10 +296,15 @@ Examples:
     ap.add_argument("serial", help="Serial port (e.g. /dev/gnss-top)")
     ap.add_argument("--baud", type=int, default=9600,
                     help="Initial baud rate (default: 9600)")
+    ap.add_argument(
+        "--receiver",
+        default="f9t",
+        help="Receiver model/profile: f9t, f9t-l5, f10t (default: f9t)",
+    )
     ap.add_argument("--target-baud", type=int, default=460800,
-                    help="Target UART baud rate (default: 460800, ignored for USB)")
-    ap.add_argument("--port-type", default="USB", choices=["UART", "USB"],
-                    help="Connection type (default: USB)")
+                    help="Target UART baud rate (default: 460800, ignored for non-UART ports)")
+    ap.add_argument("--port-type", default="USB", choices=["UART", "USB", "SPI"],
+                    help="u-blox logical port to configure (default: USB)")
     ap.add_argument("--rate", type=int, default=1,
                     help="Measurement rate in Hz (default: 1)")
     ap.add_argument("--survey-dur", type=int, default=300,

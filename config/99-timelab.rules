@@ -20,3 +20,7 @@ SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="0403", ENV{ID_SERIAL_SHORT}=="D30GD1PE", S
 
 # -- PTP hardware clocks (igc driver, TimeHAT / OTC boards) --
 SUBSYSTEM=="ptp", KERNEL=="ptp[0-9]*", DRIVERS=="igc", MODE="0664", GROUP="dialout"
+
+# Intel E810 onboard timing/GNSS path on hosts like oxco.
+SUBSYSTEM=="gnss", KERNEL=="gnss[0-9]*", SUBSYSTEMS=="pci", DRIVERS=="ice", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="ptp", KERNEL=="ptp[0-9]*", SUBSYSTEMS=="pci", DRIVERS=="ice", MODE="0660", GROUP="dialout"

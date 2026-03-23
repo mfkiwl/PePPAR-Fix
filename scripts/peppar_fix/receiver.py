@@ -4,6 +4,7 @@ Extracted from configure_f9t.py for reuse by peppar-rx-config and other tools.
 """
 
 import logging
+import os
 import sys
 import time
 
@@ -220,6 +221,9 @@ def get_driver(name):
 
 def probe_baud(port):
     """Try common baud rates and return the one that produces valid UBX/NMEA."""
+    basename = os.path.basename(port)
+    if basename.startswith("gnss") and basename[4:].isdigit():
+        return None
     _ensure_imports()
     for baud in [9600, 38400, 115200, 230400, 460800]:
         try:
@@ -238,6 +242,12 @@ def probe_baud(port):
 def open_receiver(port, baud=9600):
     """Open serial port and return (Serial, UBXReader) pair."""
     _ensure_imports()
+    basename = os.path.basename(port)
+    if basename.startswith("gnss") and basename[4:].isdigit():
+        from peppar_fix.gnss_stream import open_gnss
+        ser, _device_type = open_gnss(port, baud)
+        ubr = _UBXReader(ser, protfilter=2)
+        return ser, ubr
     ser = _Serial(port, baudrate=baud, timeout=1)
     ubr = _UBXReader(ser, protfilter=2)  # UBX protocol only
     return ser, ubr
@@ -310,20 +320,43 @@ def reopen_after_reset(port, wait_s=5, retries=2):
 
     Returns (Serial, UBXReader) or raises RuntimeError.
     """
+    basename = os.path.basename(port)
+    is_kernel_gnss = basename.startswith("gnss") and basename[4:].isdigit()
     for attempt in range(retries):
         time.sleep(wait_s)
-        baud = probe_baud(port)
-        if baud is not None:
-            log.info(f"  Receiver found at {baud} baud after reset")
-            return open_receiver(port, baud)
-        log.info(f"  Probe attempt {attempt + 1} failed, retrying...")
+        if is_kernel_gnss:
+            try:
+                log.info(f"  Reopening kernel GNSS device {port} after reset")
+                return open_receiver(port, 115200)
+            except Exception:
+                log.info(f"  Reopen attempt {attempt + 1} failed, retrying...")
+                continue
+        else:
+            baud = probe_baud(port)
+            if baud is not None:
+                log.info(f"  Receiver found at {baud} baud after reset")
+                return open_receiver(port, baud)
+            log.info(f"  Probe attempt {attempt + 1} failed, retrying...")
     raise RuntimeError(f"Cannot find receiver on {port} after reset")
 
 
-def configure_signals(ser, ubr):
-    """Enable dual-frequency signals for PPP-AR."""
-    return send_cfg(ser, ubr, SIGNAL_CONFIG,
-                    "Signals: GPS L1+L5, GAL E1+E5a, BDS B1+B2a")
+def _driver_band_summary(driver):
+    """Return a short human-readable summary of the receiver IF plan."""
+    parts = []
+    for sys_name, f1, f2, _rinex_prefix in getattr(driver, "if_pairs", ()):
+        parts.append(f"{sys_name} {f1}+{f2}")
+    return ", ".join(parts) if parts else driver.name
+
+
+def configure_signals(ser, ubr, driver=None):
+    """Enable dual-frequency signals for the selected receiver profile."""
+    driver = driver or get_driver("f9t")
+    return send_cfg(
+        ser,
+        ubr,
+        driver.signal_config,
+        f"Signals: {_driver_band_summary(driver)}",
+    )
 
 
 def configure_gps_l5_health(ser, ubr):
@@ -414,7 +447,7 @@ def configure_uart_baud(ser, ubr, baud):
 
 # ── Passive verification ───────────────────────────────────────────────────── #
 
-def listen_for_messages(ser, ubr, required=None, timeout_map=None):
+def listen_for_messages(ser, ubr, required=None, timeout_map=None, driver=None):
     """Passively listen and report which UBX messages arrive.
 
     For each required message, waits up to its timeout (from timeout_map).
@@ -451,18 +484,13 @@ def listen_for_messages(ser, ubr, required=None, timeout_map=None):
     rawx_times = []  # monotonic times of RAWX arrivals
     systems_seen = set()
     sig_pairs = {}   # sv -> set of signal roles seen
-    SIG_NAMES = {
-        (0, 0): 'GPS-L1CA', (0, 6): 'GPS-L5I', (0, 7): 'GPS-L5Q',
-        (2, 0): 'GAL-E1C', (2, 1): 'GAL-E1B',
-        (2, 3): 'GAL-E5aI', (2, 4): 'GAL-E5aQ',
-        (3, 0): 'BDS-B1I', (3, 5): 'BDS-B2aI',
-    }
+    driver = driver or get_driver("f9t")
+    SIG_NAMES = driver.signal_names
     SYS_NAMES = {0: 'gps', 2: 'gal', 3: 'bds'}
-    FREQ_BAND = {
-        'GPS-L1CA': 'L1', 'GPS-L5I': 'L5', 'GPS-L5Q': 'L5',
-        'GAL-E1C': 'E1', 'GAL-E1B': 'E1', 'GAL-E5aI': 'E5a', 'GAL-E5aQ': 'E5a',
-        'BDS-B1I': 'B1', 'BDS-B2aI': 'B2a',
-    }
+    FREQ_BAND = {}
+    for _sys_name, sig1, sig2, _rinex_prefix in getattr(driver, "if_pairs", ()):
+        FREQ_BAND[sig1] = sig1.split("-")[-1]
+        FREQ_BAND[sig2] = sig2.split("-")[-1]
 
     while time.monotonic() < deadline and pending:
         # Check per-message deadlines
@@ -533,7 +561,7 @@ def listen_for_messages(ser, ubr, required=None, timeout_map=None):
 
 def full_configure(port, baud=9600, port_type="USB", rate_hz=1,
                    survey_dur_s=300, survey_acc_m=5.0, target_baud=460800,
-                   do_reset=True):
+                   do_reset=True, receiver="f9t"):
     """Run full receiver configuration sequence.
 
     This is the programmatic equivalent of the old configure_f9t.py main().
@@ -541,6 +569,7 @@ def full_configure(port, baud=9600, port_type="USB", rate_hz=1,
     """
     _ensure_imports()
     port_id = 1 if port_type == "UART" else 3
+    driver = get_driver(receiver)
 
     ser, ubr = open_receiver(port, baud)
 
@@ -549,7 +578,7 @@ def full_configure(port, baud=9600, port_type="USB", rate_hz=1,
         ser.close()
         ser, ubr = reopen_after_reset(port, wait_s=5)
 
-    configure_signals(ser, ubr)
+    configure_signals(ser, ubr, driver=driver)
     l5_ok = configure_gps_l5_health(ser, ubr)
 
     if l5_ok:
@@ -568,9 +597,12 @@ def full_configure(port, baud=9600, port_type="USB", rate_hz=1,
 
     log.info("  Configuration saved to RAM + BBR + Flash.")
 
-    seen, missing, _ = listen_for_messages(ser, ubr, timeout_map={
-        m: 15 for m in REQUIRED_MESSAGES
-    })
+    seen, missing, _ = listen_for_messages(
+        ser,
+        ubr,
+        timeout_map={m: 15 for m in REQUIRED_MESSAGES},
+        driver=driver,
+    )
     ser.close()
 
     if missing:
