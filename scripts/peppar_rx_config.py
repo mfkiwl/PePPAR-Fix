@@ -108,7 +108,7 @@ def run(args):
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    port_id = {"UART": 1, "USB": 3, "SPI": 4}[args.port_type]
+    port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4}[args.port_type]
     driver = get_driver(args.receiver)
 
     # ── Factory reset if requested ──────────────────────────────────────
@@ -303,7 +303,7 @@ Examples:
     )
     ap.add_argument("--target-baud", type=int, default=460800,
                     help="Target UART baud rate (default: 460800, ignored for non-UART ports)")
-    ap.add_argument("--port-type", default="USB", choices=["UART", "USB", "SPI"],
+    ap.add_argument("--port-type", default="USB", choices=["UART", "UART2", "USB", "SPI"],
                     help="u-blox logical port to configure (default: USB)")
     ap.add_argument("--rate", type=int, default=1,
                     help="Measurement rate in Hz (default: 1)")

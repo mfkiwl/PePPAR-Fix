@@ -4,8 +4,10 @@
 import argparse
 import csv
 import os
+import signal
 import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -48,6 +50,14 @@ def parse_args():
     ap.add_argument("--min-correction-consumed-fresh", type=int, default=None)
     ap.add_argument("--max-correction-deferred-waiting", type=int, default=None)
     ap.add_argument("--max-correction-dropped-stale", type=int, default=None)
+    ap.add_argument("--allow-holdover", action="store_true",
+                    help="Do not fail the run if holdover is entered")
+    ap.add_argument("--max-holdover-entered", type=int, default=None,
+                    help="Maximum allowed holdover-entered count")
+    ap.add_argument("--mute-gnss-at-s", type=float, default=None,
+                    help="Send SIGUSR1 to mute GNSS delivery at this many seconds into the run")
+    ap.add_argument("--unmute-gnss-at-s", type=float, default=None,
+                    help="Send SIGUSR2 to unmute GNSS delivery at this many seconds into the run")
     return ap.parse_args()
 
 
@@ -180,9 +190,48 @@ def main():
     if args.gate_stats:
         cmd.extend(["--gate-stats", args.gate_stats])
 
-    result = subprocess.run(cmd, env=env)
-    if result.returncode != 0:
-        return result.returncode
+    pid_file = ""
+    if args.mute_gnss_at_s is not None or args.unmute_gnss_at_s is not None:
+        pid_file = str(Path(args.servo_log).with_suffix(".pid"))
+        cmd.extend(["--pid-file", pid_file])
+        preserve.append("PYTHONPATH")
+
+    proc = subprocess.Popen(cmd, env=env)
+    start = time.monotonic()
+    sent_mute = False
+    sent_unmute = False
+    engine_pid = None
+    while True:
+        rc = proc.poll()
+        now = time.monotonic()
+        if engine_pid is None and pid_file and Path(pid_file).exists():
+            try:
+                engine_pid = int(Path(pid_file).read_text().strip())
+            except (OSError, ValueError):
+                engine_pid = None
+        if (
+            engine_pid is not None and
+            args.mute_gnss_at_s is not None and
+            not sent_mute and
+            now - start >= args.mute_gnss_at_s
+        ):
+            subprocess.run(["sudo", "kill", "-USR1", str(engine_pid)], check=True)
+            sent_mute = True
+            print(f"sent_signal=SIGUSR1 pid={engine_pid} at_s={now - start:.3f}")
+        if (
+            engine_pid is not None and
+            args.unmute_gnss_at_s is not None and
+            not sent_unmute and
+            now - start >= args.unmute_gnss_at_s
+        ):
+            subprocess.run(["sudo", "kill", "-USR2", str(engine_pid)], check=True)
+            sent_unmute = True
+            print(f"sent_signal=SIGUSR2 pid={engine_pid} at_s={now - start:.3f}")
+        if rc is not None:
+            if rc != 0:
+                return rc
+            break
+        time.sleep(0.1)
 
     servo_summary = summarize_servo_log(args.servo_log)
     print(f"servo_rows={servo_summary['rows']}")
@@ -237,6 +286,8 @@ def main():
         print(f"gate_stats={gate_summary}")
         strict_gate = gate_summary.get("strict_correlation", {})
         correction_gate = gate_summary.get("correction_freshness", {})
+        holdover = gate_summary.get("holdover", {})
+        print(f"holdover={holdover}")
         if (
             args.min_gate_consumed is not None
             and strict_gate.get("consumed_correlated", 0) < args.min_gate_consumed
@@ -307,6 +358,23 @@ def main():
                 file=sys.stderr,
             )
             return 11
+        holdover_entered = holdover.get("entered", 0)
+        if not args.allow_holdover and holdover_entered > 0:
+            print(
+                f"holdover entered {holdover_entered} times unexpectedly",
+                file=sys.stderr,
+            )
+            return 12
+        if (
+            args.max_holdover_entered is not None
+            and holdover_entered > args.max_holdover_entered
+        ):
+            print(
+                f"holdover entered {holdover_entered} times exceeds "
+                f"{args.max_holdover_entered}",
+                file=sys.stderr,
+            )
+            return 13
 
     return 0
 

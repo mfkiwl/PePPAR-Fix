@@ -568,7 +568,7 @@ def full_configure(port, baud=9600, port_type="USB", rate_hz=1,
     Returns True on success.
     """
     _ensure_imports()
-    port_id = 1 if port_type == "UART" else 3
+    port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4}[port_type]
     driver = get_driver(receiver)
 
     ser, ubr = open_receiver(port, baud)

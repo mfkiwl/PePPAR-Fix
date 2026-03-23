@@ -77,7 +77,7 @@ from peppar_fix.event_time import (
     estimate_correlation_confidence,
 )
 from peppar_fix.timebase_estimator import TimebaseRelationEstimator
-from peppar_fix.fault_injection import get_delay_injector
+from peppar_fix.fault_injection import get_delay_injector, get_source_mute_controller
 
 log = logging.getLogger(__name__)
 
@@ -346,6 +346,7 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
     epoch_ts = None
     n_epochs = 0
     delay_injector = get_delay_injector()
+    mute_controller = get_source_mute_controller()
     source_name = f"gnss:{port}"
     last_qerr_invalid_log = 0.0
     # GNSS delivery can legitimately batch by seconds on some hosts
@@ -370,6 +371,9 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
             if parsed is None:
                 continue
             delay_injector.maybe_inject_delay(source_name)
+            if mute_controller.should_drop(source_name):
+                mute_controller.note_drop(source_name)
+                continue
 
             msg_id = parsed.identity
 
@@ -605,6 +609,7 @@ def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP"):
     msg_counts = defaultdict(int)
     n_total = 0
     delay_injector = get_delay_injector()
+    mute_controller = get_source_mute_controller()
     source_name = f"ntrip:{label}"
 
     try:
@@ -612,6 +617,9 @@ def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP"):
             if stop_event.is_set():
                 break
             delay_injector.maybe_inject_delay(source_name)
+            if mute_controller.should_drop(source_name):
+                mute_controller.note_drop(source_name)
+                continue
 
             identity = str(getattr(msg, 'identity', ''))
             event = RtcmEvent(

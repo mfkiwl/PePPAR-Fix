@@ -16,7 +16,7 @@
 # Configuration via environment variables or command-line overrides:
 #   PEPPAR_SERIAL       Serial port (e.g. /dev/gnss-top)
 #   PEPPAR_BAUD         Baud rate (default: 9600)
-#   PEPPAR_UBX_PORT     u-blox logical output port: UART, USB, or SPI (default: USB)
+#   PEPPAR_UBX_PORT     u-blox logical output port: UART, UART2, USB, or SPI (default: USB)
 #   PEPPAR_PORT_TYPE    Deprecated alias for PEPPAR_UBX_PORT
 #   PEPPAR_RECEIVER     Receiver profile (default: f9t)
 #   PEPPAR_PTP_PROFILE  PTP profile (optional)
@@ -80,7 +80,7 @@ GNSS-disciplined PTP clock appliance.
 Options:
   --serial PORT        Serial port (e.g. /dev/gnss-top)
   --baud RATE          Baud rate (default: 9600)
-  --ubx-port TYPE      u-blox logical output port: UART, USB, or SPI (default: USB)
+  --ubx-port TYPE      u-blox logical output port: UART, UART2, USB, or SPI (default: USB)
   --port-type TYPE     Deprecated alias for --ubx-port
   --receiver NAME      Receiver profile (default: f9t)
   --ptp-profile NAME   PTP profile (e.g. i226, e810)

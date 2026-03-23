@@ -6,6 +6,7 @@ import csv
 import logging
 import os
 import random
+import signal
 import threading
 import time
 
@@ -20,6 +21,7 @@ _ENV_SYS_PCT = "SYS_DELAY_PROB_PCT"
 _ENV_SYS_MEAN = "SYS_DELAY_MEAN_MS"
 _ENV_SYS_RANGE = "SYS_DELAY_RANGE_MS"
 _ENV_SYS_SOURCES = "SYS_DELAY_SOURCES"
+_ENV_SIGNAL_MUTE_SOURCES = "SIGNAL_MUTE_SOURCES"
 
 
 def _env_float(name):
@@ -202,6 +204,8 @@ class DelayInjector:
 
 _INJECTOR = None
 _INJECTOR_LOCK = threading.Lock()
+_MUTE_CONTROLLER = None
+_MUTE_LOCK = threading.Lock()
 
 
 def get_delay_injector():
@@ -211,3 +215,79 @@ def get_delay_injector():
         if _INJECTOR is None:
             _INJECTOR = DelayInjector()
         return _INJECTOR
+
+
+class SourceMuteController:
+    """Deterministic source muting controlled by SIGUSR1/SIGUSR2."""
+
+    def __init__(self):
+        value = os.getenv(_ENV_SIGNAL_MUTE_SOURCES, "gnss:")
+        self.targets = tuple(part.strip() for part in value.split(",") if part.strip())
+        self._lock = threading.Lock()
+        self._muted = False
+        self._mute_started_mono = None
+        self._drop_counts = {}
+        self._last_drop_log_mono = {}
+        self._installed = False
+
+    def install_signal_handlers(self):
+        if self._installed:
+            return
+        signal.signal(signal.SIGUSR1, self._on_sigusr1)
+        signal.signal(signal.SIGUSR2, self._on_sigusr2)
+        self._installed = True
+
+    def _on_sigusr1(self, signum, frame):
+        with self._lock:
+            self._muted = True
+            self._mute_started_mono = time.monotonic()
+        log.warning(
+            "Signal-controlled source mute enabled by SIGUSR1 for targets=%s at mono=%.6f",
+            self.targets,
+            self._mute_started_mono,
+        )
+
+    def _on_sigusr2(self, signum, frame):
+        with self._lock:
+            active = self._muted
+            started = self._mute_started_mono
+            self._muted = False
+            self._mute_started_mono = None
+        now = time.monotonic()
+        if active:
+            log.warning(
+                "Signal-controlled source mute disabled by SIGUSR2 after %.3fs for targets=%s",
+                now - started if started is not None else 0.0,
+                self.targets,
+            )
+        else:
+            log.info("SIGUSR2 received with source mute already inactive")
+
+    def should_drop(self, source_name):
+        with self._lock:
+            return self._muted and any(part in source_name for part in self.targets)
+
+    def note_drop(self, source_name):
+        now = time.monotonic()
+        with self._lock:
+            self._drop_counts[source_name] = self._drop_counts.get(source_name, 0) + 1
+            last = self._last_drop_log_mono.get(source_name, 0.0)
+            if now - last < 5.0:
+                return
+            self._last_drop_log_mono[source_name] = now
+            count = self._drop_counts[source_name]
+        log.warning(
+            "Signal-controlled mute dropping source=%s count=%d mono=%.6f",
+            source_name,
+            count,
+            now,
+        )
+
+
+def get_source_mute_controller():
+    """Return a lazily constructed signal-controlled mute controller."""
+    global _MUTE_CONTROLLER
+    with _MUTE_LOCK:
+        if _MUTE_CONTROLLER is None:
+            _MUTE_CONTROLLER = SourceMuteController()
+        return _MUTE_CONTROLLER

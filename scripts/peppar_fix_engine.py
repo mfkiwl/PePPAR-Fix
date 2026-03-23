@@ -35,6 +35,7 @@ import csv
 import json
 import logging
 import math
+import os
 import queue
 import signal
 from statistics import pvariance
@@ -64,7 +65,7 @@ from peppar_fix import (
     save_position,
 )
 from peppar_fix.event_time import PpsEvent
-from peppar_fix.fault_injection import get_delay_injector
+from peppar_fix.fault_injection import get_delay_injector, get_source_mute_controller
 from peppar_fix.receiver import get_driver
 
 log = logging.getLogger("peppar-fix")
@@ -155,6 +156,12 @@ def apply_ptp_profile(args):
         args.min_ssr_confidence = profile.get(
             "min_ssr_confidence", args.min_ssr_confidence
         )
+    if args.track_max_ppb is None:
+        args.track_max_ppb = profile.get("track_max_ppb", args.track_max_ppb)
+    if args.track_restep_ns is None:
+        args.track_restep_ns = profile.get("track_restep_ns", args.track_restep_ns)
+    if args.obs_idle_timeout_s is None:
+        args.obs_idle_timeout_s = profile.get("obs_idle_timeout_s", args.obs_idle_timeout_s)
 
 
 # ── Convergence detection (from peppar_find_position) ─────────────────── #
@@ -463,8 +470,17 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
         "too_few_meas": 0,
         "servo_no_pps": 0,
         "servo_outlier": 0,
+        "obs_idle_holdover": 0,
+        "obs_input_timeouts": 0,
+        "obs_deferred_stalls": 0,
+        "obs_dropped_expired": 0,
     }
     last_skip_log = start_time
+    last_obs_wall = time.monotonic()
+    last_obs_input_wall = last_obs_wall
+    last_usable_obs_wall = last_obs_wall
+    obs_idle_alarm = False
+    deferred_alarm = False
     # Sink policy: steady-state + servo is a correlated-window consumer.
     # Preserve receive order here and let the correlator decide when an epoch
     # is too old to be useful, rather than draining the queue at phase entry.
@@ -478,7 +494,22 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             try:
                 added_obs = _append_queue_history(obs_history, obs_queue, timeout=5)
             except queue.Empty:
+                skip_stats["obs_input_timeouts"] += 1
+                idle_s = time.monotonic() - last_obs_wall
+                if (
+                    servo_ctx is not None and
+                    args.obs_idle_timeout_s is not None and
+                    idle_s >= args.obs_idle_timeout_s and
+                    not obs_idle_alarm
+                ):
+                    skip_stats["obs_idle_holdover"] += 1
+                    _enter_obs_holdover(
+                        servo_ctx, args, "no_obs_input", f"no observation epochs for {idle_s:.1f}s"
+                    )
+                    obs_idle_alarm = True
                 continue
+            if added_obs:
+                last_obs_input_wall = time.monotonic()
 
             if servo_ctx is not None:
                 gate = servo_ctx["correlation_gate"]
@@ -499,6 +530,21 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 dropped_obs = gate.stats.dropped_unmatched - dropped_before
                 if obs_event is None:
                     skip_stats["gate_wait_obs"] += 1
+                    stall_s = time.monotonic() - last_usable_obs_wall
+                    if (
+                        args.obs_idle_timeout_s is not None and
+                        stall_s >= args.obs_idle_timeout_s and
+                        not deferred_alarm
+                    ):
+                        skip_stats["obs_deferred_stalls"] += 1
+                        log.warning(
+                            "Observation pipeline stalled without holdover: reason=obs_received_but_deferred "
+                            "stalled_for=%.1fs queued=%d input_quiet_for=%.1fs",
+                            stall_s,
+                            len(obs_history),
+                            time.monotonic() - last_obs_input_wall,
+                        )
+                        deferred_alarm = True
                     if added_obs and n_epochs % 10 == 0:
                         log.info(f"  [{n_epochs}] Awaiting correlatable observation "
                                  f"(queued={len(obs_history)})")
@@ -507,6 +553,13 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 obs_event = obs_history.popleft()
                 pps_match = None
                 dropped_obs = 0
+
+            last_obs_wall = time.monotonic()
+            obs_idle_alarm = False
+            deferred_alarm = False
+            last_usable_obs_wall = last_obs_wall
+            if servo_ctx is not None:
+                _exit_holdover(servo_ctx, "fresh usable observation epoch received")
 
             ok_corr, corr_reason, corr_snapshot = correction_gate.accept(
                 corrections,
@@ -531,6 +584,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
 
             if dropped_obs and n_epochs % 10 == 0:
                 log.info(f"  [{n_epochs}] Dropped {dropped_obs} expired observation epochs")
+            skip_stats["obs_dropped_expired"] += dropped_obs
             gps_time, observations = obs_event
 
             # EKF predict
@@ -627,6 +681,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 "strict_correlation": servo_ctx["correlation_gate"].stats.as_dict(),
                 "correction_freshness": correction_gate.stats.as_dict(),
                 "steady_state_skips": skip_stats,
+                "holdover": dict(servo_ctx["holdover"]),
             }
         else:
             gate_stats = {
@@ -789,6 +844,14 @@ def _setup_servo(args, known_ecef, qerr_store):
         'tmode_set': False,
         'position_saved': False,
         'compute_error_sources': compute_error_sources,
+        'tracking_large_error_count': 0,
+        'holdover': {
+            'active': False,
+            'reason': '',
+            'entered': 0,
+            'exited': 0,
+            'reasons': {},
+        },
     }
 
 
@@ -798,6 +861,53 @@ def _pps_fractional_error(phc_nsec):
         return float(phc_nsec)
     else:
         return float(phc_nsec) - 1_000_000_000
+
+
+def _enter_obs_holdover(ctx, args, reason_code, detail):
+    """Return servo to a safe state after an observation outage."""
+    holdover = ctx['holdover']
+    if holdover['active']:
+        return
+    holdover['active'] = True
+    holdover['reason'] = reason_code
+    holdover['entered'] += 1
+    holdover['reasons'][reason_code] = holdover['reasons'].get(reason_code, 0) + 1
+    log.warning(
+        "Entering holdover: reason=%s detail=%s; resetting PHC steering to safe holdover",
+        reason_code,
+        detail,
+    )
+    try:
+        ctx['ptp'].adjfine(0.0)
+    except Exception as exc:
+        log.warning("Failed to zero PHC adjfine during holdover: %s", exc)
+    ctx['adjfine_ppb'] = 0.0
+    _purge_pps_state(ctx)
+    from peppar_fix import PIServo, DisciplineScheduler
+    ctx['servo'] = PIServo(args.track_kp, args.track_ki, max_ppb=ctx['caps']['max_adj'])
+    ctx['scheduler'] = DisciplineScheduler(
+        base_interval=args.discipline_interval,
+        adaptive=args.adaptive_interval,
+        min_interval=args.min_interval,
+        max_interval=args.max_interval,
+    )
+    ctx['phase'] = 'warmup'
+    ctx['tracking_large_error_count'] = 0
+
+
+def _exit_holdover(ctx, detail):
+    """Leave holdover after fresh usable observations return."""
+    holdover = ctx['holdover']
+    if not holdover['active']:
+        return
+    log.info(
+        "Leaving holdover: reason=%s detail=%s",
+        holdover['reason'],
+        detail,
+    )
+    holdover['active'] = False
+    holdover['reason'] = ''
+    holdover['exited'] += 1
 
 
 def _phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec):
@@ -877,6 +987,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     GAIN_MAX_SCALE = 1.0
     CONVERGE_ERROR_NS = 500
     CONVERGE_MIN_SCALE = 2.0
+    TRACK_RESTEP_NS = args.track_restep_ns
 
     # Once filter converges: switch F9T to timing mode
     if n_epochs >= 300 and dt_rx_sigma < 100.0:
@@ -1090,6 +1201,21 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
 
     scheduler.accumulate(best.error_ns, best.confidence_ns, best.name)
 
+    if TRACK_RESTEP_NS is not None:
+        if abs(best.error_ns) >= TRACK_RESTEP_NS:
+            ctx['tracking_large_error_count'] += 1
+        else:
+            ctx['tracking_large_error_count'] = 0
+        if ctx['tracking_large_error_count'] >= 3:
+            log.warning(
+                "  Tracking error persisted above %.0fns for %d epochs; re-entering step",
+                TRACK_RESTEP_NS,
+                ctx['tracking_large_error_count'],
+            )
+            ctx['phase'] = 'step'
+            ctx['tracking_large_error_count'] = 0
+            return "restep"
+
     if ctx['prev_source'] != best.name:
         if ctx['prev_source'] is not None:
             log.info(f"  Source: {ctx['prev_source']} → {best.name} "
@@ -1108,9 +1234,20 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         servo.ki = BASE_KI * gain_scale
 
         adjfine_ppb = -servo.update(avg_error, dt=float(n_samples))
+        max_track_ppb = min(
+            ctx['caps']['max_adj'],
+            args.track_max_ppb if args.track_max_ppb is not None else ctx['caps']['max_adj'],
+        )
+        if abs(adjfine_ppb) > max_track_ppb:
+            log.warning(
+                "  Tracking clamp: adj=%+.1fppb limited to %+.1fppb",
+                adjfine_ppb,
+                math.copysign(max_track_ppb, adjfine_ppb),
+            )
+            adjfine_ppb = math.copysign(max_track_ppb, adjfine_ppb)
         # Anti-windup: if adjfine is at the rail, reset integral
         # to prevent windup-driven oscillation
-        if abs(adjfine_ppb) >= ctx['caps']['max_adj'] * 0.95:
+        if abs(adjfine_ppb) >= max_track_ppb * 0.95:
             servo.integral = -adjfine_ppb / servo.ki if servo.ki != 0 else 0
             log.warning(f'  Anti-windup: adj={adjfine_ppb:+.0f}ppb at rail, integral reset')
         ptp.adjfine(adjfine_ppb)
@@ -1265,11 +1402,17 @@ def run(args):
     gate_stats = None
     driver = get_driver(args.receiver)
     log.info(f"Receiver: {driver.name} (PROTVER {driver.protver})")
+    mute_controller = get_source_mute_controller()
+    mute_controller.install_signal_handlers()
 
     def on_signal(signum, frame):
         log.info("Signal received, shutting down")
         stop_event.set()
     signal.signal(signal.SIGTERM, on_signal)
+    if args.pid_file:
+        with open(args.pid_file, "w") as f:
+            f.write(f"{os.getpid()}\n")
+        log.info("Wrote PID file: %s", args.pid_file)
 
     # Shared state
     beph = BroadcastEphemeris()
@@ -1430,6 +1573,11 @@ def run(args):
             with open(args.gate_stats, "w") as f:
                 json.dump(gate_stats, f, indent=2, sort_keys=True)
 
+    if args.pid_file:
+        try:
+            os.unlink(args.pid_file)
+        except FileNotFoundError:
+            pass
     return 0
 
 
@@ -1537,6 +1685,14 @@ Two-phase operation:
                        help="Minimum discipline interval (default: 1)")
     servo.add_argument("--servo-log", default=None,
                        help="CSV log file for servo data")
+    servo.add_argument("--track-max-ppb", type=float, default=None,
+                       help="Clamp tracking corrections to this ppb magnitude")
+    servo.add_argument("--track-restep-ns", type=float, default=None,
+                       help="Re-enter step if |tracking error| exceeds this for 3 epochs")
+    servo.add_argument("--obs-idle-timeout-s", type=float, default=None,
+                       help="Log and enter safe holdover if no observation epochs arrive for this long")
+    servo.add_argument("--pid-file", default=None,
+                       help="Write engine PID here for external test control")
 
     # NTRIP caster output (optional, future)
     caster = ap.add_argument_group("NTRIP caster output (optional)")
@@ -1567,6 +1723,10 @@ Two-phase operation:
         args.max_ssr_age_s = 30.0
     if args.min_correlation_confidence is None:
         args.min_correlation_confidence = 0.5
+    if args.track_restep_ns is None:
+        args.track_restep_ns = 100_000.0
+    if args.obs_idle_timeout_s is None:
+        args.obs_idle_timeout_s = 15.0
     if args.min_broadcast_confidence is None:
         args.min_broadcast_confidence = 0.0
     if args.min_ssr_confidence is None:
