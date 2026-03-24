@@ -271,7 +271,7 @@ class PtpDevice:
             raise OSError(errno, f"clock_settime failed: {os.strerror(errno)}")
 
     def step_to(self, target_ns=0, target_error_ns=5000, max_time_ms=500,
-                mean_compensation_ns=0,
+                settime_lag_ns=0,
                 pps_anchor_ns=None, pps_realtime_ns=None):
         """Step the PHC to a target time, retrying within a time budget.
 
@@ -290,6 +290,13 @@ class PtpDevice:
         CLOCK_REALTIME's frequency error over seconds (negligible), not
         its absolute phase error (~1 ms from NTP).
 
+        settime_lag_ns is the mean delay from the clock_settime() call
+        to the value landing on the PHC hardware (from characterization).
+        The value passed to clock_settime includes this lag so the PHC
+        reads the correct time at the moment the write completes:
+
+            V = PHC_pps + (RT_now − RT_pps) + settime_lag_ns
+
         The residual is measured from the PTP_SYS_OFFSET cross-timestamp
         returned by read_phc_ns(), using the same transfer-standard
         cancellation for the expected value.
@@ -306,7 +313,7 @@ class PtpDevice:
                 # NTP phase error cancels in the subtraction.
                 rt_now = time.clock_gettime_ns(time.CLOCK_REALTIME)
                 target_ns = pps_anchor_ns + (rt_now - pps_realtime_ns)
-            aim_ns = target_ns - mean_compensation_ns
+            aim_ns = target_ns + settime_lag_ns
             self.set_phc_ns(aim_ns)
             phc_after, sys_at_read = self.read_phc_ns()
 

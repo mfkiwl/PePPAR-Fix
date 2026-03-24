@@ -166,8 +166,8 @@ def main():
                     help="Target step accuracy in ns")
     ap.add_argument("--step-budget-ms", type=int, default=500,
                     help="Max time for step retry loop in ms")
-    ap.add_argument("--mean-compensation-ns", type=int, default=0,
-                    help="Mean clock_settime latency compensation in ns")
+    ap.add_argument("--settime-lag-ns", type=int, default=0,
+                    help="Mean clock_settime-to-PHC landing lag in ns (from characterization)")
     ap.add_argument("--position-check-m", type=float, default=100.0,
                     help="Max acceptable LS-vs-stored position delta in meters")
     args = ap.parse_args()
@@ -440,7 +440,7 @@ def main():
             pps_realtime_ns=pps_realtime_ns,
             target_error_ns=args.step_error_ns,
             max_time_ms=args.step_budget_ms,
-            mean_compensation_ns=args.mean_compensation_ns,
+            settime_lag_ns=args.settime_lag_ns,
         )
         log.info("Step result: residual=%+.0f ns, attempts=%d, %s",
                  residual, attempts, "HIT" if met else "TIMEOUT")
@@ -481,7 +481,7 @@ def main():
                 pps_realtime_ns=pps_realtime_ns,
                 target_error_ns=args.step_error_ns,
                 max_time_ms=args.step_budget_ms,
-                mean_compensation_ns=args.mean_compensation_ns,
+                settime_lag_ns=args.settime_lag_ns,
             )
             log.info("Retry result: residual=%+.0f ns, attempts=%d, %s",
                      residual, attempts, "HIT" if met else "TIMEOUT")
