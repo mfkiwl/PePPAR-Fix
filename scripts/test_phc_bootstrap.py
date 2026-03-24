@@ -43,6 +43,14 @@ def read_drift(path):
         return None
 
 
+def write_drift(path, adjfine_ppb, phc_dev):
+    """Write a drift file, creating parent directories if needed."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"adjfine_ppb": adjfine_ppb, "phc": phc_dev,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, f)
+
+
 def run_bootstrap(args, extra_args=None):
     """Run phc_bootstrap.py, return (exit_code, stdout)."""
     cmd = [
@@ -88,7 +96,7 @@ def parse_output(output):
     return info
 
 
-def setup_good_state(ptp, args):
+def setup_good_state(args):
     """Run bootstrap once to get PHC into a known-good state."""
     print("  Setting up known-good PHC state (running bootstrap)...")
     rc, output = run_bootstrap(args)
@@ -99,14 +107,14 @@ def setup_good_state(ptp, args):
     return rc, output
 
 
-def test_bless_no_intervention(ptp, args):
+def test_bless_no_intervention(args):
     """Test 1: Well-disciplined PHC should be blessed without intervention."""
     print("\n" + "=" * 60)
     print("TEST 1: Well-disciplined PHC → bless without intervention")
     print("=" * 60)
 
     # First, get PHC into good state
-    setup_good_state(ptp, args)
+    setup_good_state(args)
 
     # Now run bootstrap — it should bless
     print("  Running bootstrap (expecting bless)...")
@@ -127,22 +135,25 @@ def test_bless_no_intervention(ptp, args):
     return passed
 
 
-def test_bad_phase_good_freq(ptp, args):
+def test_bad_phase_good_freq(args):
     """Test 2: Bad phase should step phase only, leave frequency alone."""
     print("\n" + "=" * 60)
     print("TEST 2: Bad phase, good frequency → step phase only")
     print("=" * 60)
 
     # Get to good state first
-    setup_good_state(ptp, args)
+    setup_good_state(args)
 
     # Save current drift file
     drift_before = read_drift(args.drift_file)
 
     # Inject phase error: nudge PHC by 5 seconds
+    # Open PTP device briefly for fault injection, then release
     print("  Injecting phase fault: +5 seconds...")
+    ptp = PtpDevice(args.ptp_dev)
     phc_now, _ = ptp.read_phc_ns()
     ptp.set_phc_ns(phc_now + 5_000_000_000)
+    ptp.close()
 
     # Run bootstrap
     print("  Running bootstrap (expecting phase step only)...")
@@ -172,26 +183,23 @@ def test_bad_phase_good_freq(ptp, args):
     return passed
 
 
-def test_good_phase_bad_freq(ptp, args):
+def test_good_phase_bad_freq(args):
     """Test 3: Bad frequency should set frequency only, leave phase alone."""
     print("\n" + "=" * 60)
     print("TEST 3: Good phase, bad frequency → set frequency only")
     print("=" * 60)
 
     # Get to good state first
-    setup_good_state(ptp, args)
+    setup_good_state(args)
 
-    # Inject frequency error: set adjfine to something way off
+    # Inject frequency error: open PTP briefly for fault injection
     print("  Injecting frequency fault: +5000 ppb...")
+    ptp = PtpDevice(args.ptp_dev)
     ptp.adjfine(5000.0)
+    ptp.close()
 
-    # Write a drift file that reflects the bad frequency so the
-    # PPS-vs-drift comparison triggers
-    import json as _json
-    drift_path = args.drift_file
-    with open(drift_path, "w") as f:
-        _json.dump({"adjfine_ppb": 5000.0, "phc": args.ptp_dev,
-                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, f)
+    # Write a drift file that reflects the bad frequency
+    write_drift(args.drift_file, 5000.0, args.ptp_dev)
 
     # Run bootstrap
     print("  Running bootstrap (expecting frequency set only)...")
@@ -214,26 +222,26 @@ def test_good_phase_bad_freq(ptp, args):
     return passed
 
 
-def test_bad_phase_bad_freq(ptp, args):
+def test_bad_phase_bad_freq(args):
     """Test 4: Bad phase + bad frequency → fix both."""
     print("\n" + "=" * 60)
     print("TEST 4: Bad phase + bad frequency → fix both")
     print("=" * 60)
 
     # Get to good state first
-    setup_good_state(ptp, args)
+    setup_good_state(args)
 
-    # Inject both faults
-    print("  Injecting phase fault: random time...")
+    # Inject both faults: open PTP briefly
     import random as _random
+    print("  Injecting phase fault: random time...")
+    ptp = PtpDevice(args.ptp_dev)
     target_sec = _random.randint(0, 2**31 - 1)
     ptp.set_phc_ns(target_sec * 1_000_000_000)
-
     print("  Injecting frequency fault: +5000 ppb...")
     ptp.adjfine(5000.0)
-    with open(args.drift_file, "w") as f:
-        json.dump({"adjfine_ppb": 5000.0, "phc": args.ptp_dev,
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, f)
+    ptp.close()
+
+    write_drift(args.drift_file, 5000.0, args.ptp_dev)
 
     # Run bootstrap
     print("  Running bootstrap (expecting both interventions)...")
@@ -277,7 +285,9 @@ def main():
                     help="Comma-separated test numbers to run (default: 1,2,3,4)")
     args = ap.parse_args()
 
-    ptp = PtpDevice(args.ptp_dev)
+    # Ensure drift file directory exists
+    os.makedirs(os.path.dirname(args.drift_file) or ".", exist_ok=True)
+
     tests_to_run = set(int(t) for t in args.tests.split(","))
 
     results = {}
@@ -292,12 +302,10 @@ def main():
         if num not in tests_to_run:
             continue
         try:
-            results[name] = func(ptp, args)
+            results[name] = func(args)
         except Exception as e:
             print(f"\n  EXCEPTION in test {num}: {e}")
             results[name] = False
-
-    ptp.close()
 
     # Summary
     print("\n" + "=" * 60)
