@@ -170,3 +170,121 @@ class PtpDevice:
         if ret < 0:
             errno = ctypes.get_errno()
             raise OSError(errno, f"clock_adjtime ADJ_SETOFFSET failed: {os.strerror(errno)}")
+
+    # ── PTP_SYS_OFFSET: cross-timestamp PHC vs system clock ───────── #
+
+    _PTP_SYS_OFFSET_SIZE = 832  # 16-byte header + 51 * 16-byte timestamps
+    _PTP_SYS_OFFSET = None  # resolved on first call
+
+    def _resolve_sys_offset_ioctl(self):
+        """Try PTP_SYS_OFFSET2 then PTP_SYS_OFFSET."""
+        PTP_CLK = ord('=')
+        _IOC_W = 1
+        def iow(nr, sz):
+            return (_IOC_W << 30) | (sz << 16) | (PTP_CLK << 8) | nr
+        for nr in (14, 5):  # SYS_OFFSET2 then SYS_OFFSET
+            ioctl_nr = iow(nr, self._PTP_SYS_OFFSET_SIZE)
+            buf = bytearray(self._PTP_SYS_OFFSET_SIZE)
+            struct.pack_into('<I', buf, 0, 3)  # n_samples=3
+            try:
+                fcntl.ioctl(self.fd, ioctl_nr, buf, True)
+                self._PTP_SYS_OFFSET = ioctl_nr
+                return
+            except OSError:
+                continue
+        raise OSError("PTP_SYS_OFFSET not supported on this device")
+
+    def read_phc_ns(self, n_samples=5):
+        """Read PHC time cross-referenced to system clock.
+
+        Uses PTP_SYS_OFFSET to get interleaved sys/PHC/sys timestamps,
+        picks the tightest triplet. Returns (phc_ns, sys_ns).
+        """
+        if self._PTP_SYS_OFFSET is None:
+            self._resolve_sys_offset_ioctl()
+        buf = bytearray(self._PTP_SYS_OFFSET_SIZE)
+        struct.pack_into('<I', buf, 0, n_samples)
+        fcntl.ioctl(self.fd, self._PTP_SYS_OFFSET, buf, True)
+
+        def _ts(offset):
+            sec = struct.unpack_from('<q', buf, offset)[0]
+            nsec = struct.unpack_from('<I', buf, offset + 8)[0]
+            return sec * 1_000_000_000 + nsec
+
+        best_span = float('inf')
+        best_phc = 0
+        best_sys = 0
+        for i in range(n_samples):
+            base = 16 + i * 32  # each pair is sys(16) + phc(16)
+            sys_before = _ts(base)
+            phc = _ts(base + 16)
+            sys_after = _ts(base + 32) if i < n_samples - 1 else _ts(16 + (2 * n_samples) * 16)
+            # Actually interleaved: ts[0]=sys, ts[1]=phc, ts[2]=sys, ts[3]=phc, ..., ts[2n]=sys
+            pass
+
+        # Re-parse correctly: timestamps are at 16-byte intervals after 16-byte header
+        # Layout: sys0, phc0, sys1, phc1, ..., phcN-1, sysN  (2*n_samples + 1 entries)
+        timestamps = []
+        for i in range(2 * n_samples + 1):
+            timestamps.append(_ts(16 + i * 16))
+
+        for i in range(n_samples):
+            sys_before = timestamps[2 * i]
+            phc = timestamps[2 * i + 1]
+            sys_after = timestamps[2 * i + 2]
+            span = sys_after - sys_before
+            if span < best_span:
+                best_span = span
+                best_phc = phc
+                best_sys = (sys_before + sys_after) // 2
+
+        return best_phc, best_sys
+
+    def set_phc_ns(self, time_ns):
+        """Set the PHC to an absolute time in nanoseconds."""
+        sec = int(time_ns // 1_000_000_000)
+        nsec = int(time_ns % 1_000_000_000)
+
+        class Timespec(ctypes.Structure):
+            _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
+
+        ts = Timespec(sec, nsec)
+        ret = self._libc.clock_settime(
+            ctypes.c_int32(self.clock_id), ctypes.byref(ts))
+        if ret != 0:
+            errno = ctypes.get_errno()
+            raise OSError(errno, f"clock_settime failed: {os.strerror(errno)}")
+
+    def step_to(self, target_ns, target_error_ns=5000, max_time_ms=500,
+                mean_compensation_ns=0):
+        """Step the PHC to target_ns, retrying within a time budget.
+
+        Each clock_settime overwrites the PHC — there is no keeping the
+        best. We either meet the target and stop, or try again (the
+        previous result is gone). On timeout, we're stuck with the last
+        attempt.
+
+        The residual is measured by reading back the PHC and subtracting
+        the elapsed time since the set (measured via CLOCK_MONOTONIC),
+        so PHC drift between set and readback doesn't inflate the error.
+
+        Returns (residual_ns, attempts, met_target).
+        """
+        deadline = time.monotonic() + max_time_ms / 1000.0
+        attempts = 0
+
+        while True:
+            attempts += 1
+            aim_ns = target_ns - mean_compensation_ns
+            mono_before = time.monotonic_ns()
+            self.set_phc_ns(aim_ns)
+            phc_after, _ = self.read_phc_ns()
+            mono_after = time.monotonic_ns()
+            elapsed_ns = mono_after - mono_before
+            residual_ns = phc_after - (target_ns + elapsed_ns)
+
+            if abs(residual_ns) < target_error_ns:
+                return residual_ns, attempts, True
+
+            if time.monotonic() >= deadline:
+                return residual_ns, attempts, False

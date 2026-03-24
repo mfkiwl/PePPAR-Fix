@@ -270,6 +270,11 @@ def wait_ack(ubr, cls_name="CFG", msg_name="VALSET", timeout=3.0):
 def send_cfg(ser, ubr, key_values, description="", layers=7):
     """Send a VALSET configuration and wait for ACK.
 
+    UBX ACK/NAK responses are sequenced against commands but asynchronous.
+    We MUST wait for the ACK/NAK from each command before sending the next,
+    or a NAK could be misattributed to the wrong command. A timeout (3s)
+    is treated as equivalent to NAK. See docs/receiver-signals.md.
+
     Args:
         layers: 1=RAM, 2=BBR, 4=Flash, 7=all (default).
     """
@@ -607,3 +612,179 @@ def full_configure(port, baud=9600, port_type="USB", rate_hz=1,
 
     log.info("All expected messages confirmed.")
     return True
+
+
+# ── Startup signal validation ─────────────────────────────────────────────── #
+
+def _check_dual_freq(port, baud, driver, systems, timeout_s=8):
+    """Listen for one RAWX epoch and check for dual-frequency observations.
+
+    Returns (dual_count, total_count, sig_ids_seen) where dual_count is
+    the number of GPS+GAL SVs with both f1 and f2 observations.
+    """
+    _ensure_imports()
+    from collections import defaultdict
+    ser, ubr = open_receiver(port, baud)
+    SIG_NAMES = driver.signal_names
+
+    # Build role lookup from driver's IF pairs
+    sig_roles = {}
+    for _sys, sig_f1, sig_f2, prefix in driver.if_pairs:
+        sig_roles[sig_f1] = ('f1', prefix)
+        sig_roles[sig_f2] = ('f2', prefix)
+
+    deadline = time.monotonic() + timeout_s
+    dual_count = 0
+    total_count = 0
+    sig_ids_seen = set()
+
+    while time.monotonic() < deadline:
+        try:
+            raw, parsed = ubr.read()
+        except Exception:
+            continue
+        if parsed is None:
+            continue
+        if not hasattr(parsed, 'identity') or parsed.identity != 'RXM-RAWX':
+            continue
+
+        # Process one RAWX epoch
+        sv_roles = defaultdict(set)
+        n = getattr(parsed, 'numMeas', 0)
+        for i in range(1, n + 1):
+            i2 = f"{i:02d}"
+            gnss_id = getattr(parsed, f'gnssId_{i2}', None)
+            sig_id = getattr(parsed, f'sigId_{i2}', None)
+            sv_id = getattr(parsed, f'svId_{i2}', None)
+            if gnss_id is None or sig_id is None:
+                continue
+            sig_ids_seen.add((gnss_id, sig_id))
+            sig_name = SIG_NAMES.get((gnss_id, sig_id))
+            if sig_name is None or sig_name not in sig_roles:
+                continue
+            role, prefix = sig_roles[sig_name]
+            # Only count GPS and GAL for the check (BDS optional)
+            sys_name = SYS_MAP.get(gnss_id)
+            if systems and sys_name not in systems:
+                continue
+            sv = f"{prefix}{int(sv_id):02d}"
+            sv_roles[sv].add(role)
+
+        for sv, roles in sv_roles.items():
+            total_count += 1
+            if 'f1' in roles and 'f2' in roles:
+                dual_count += 1
+        break  # one epoch is enough
+
+    ser.close()
+    return dual_count, total_count, sig_ids_seen
+
+
+def _detect_second_freq(sig_ids_seen):
+    """Determine whether receiver is outputting L5/E5a or L2/E5b signals.
+
+    Returns 'l5' if L5/E5a signals detected, 'l2' if L2/E5b detected,
+    None if only L1/E1 (single-frequency).
+    """
+    # GPS sigId 7 = L5Q, sigId 3 = L2CL
+    # GAL sigId 4 = E5aQ, sigId 6 = E5bQ
+    has_l5 = (0, 7) in sig_ids_seen or (2, 4) in sig_ids_seen
+    has_l2 = (0, 3) in sig_ids_seen or (2, 6) in sig_ids_seen
+    if has_l5:
+        return 'l5'
+    if has_l2:
+        return 'l2'
+    return None
+
+
+def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
+                          timeout_s=10):
+    """Check that dual-frequency observations are arriving; reconfigure if not.
+
+    This is the single entry point for receiver readiness. It:
+    1. Listens for RAWX and checks for dual-freq GPS+GAL observations
+    2. Auto-detects whether L5 or L2 is the active second frequency
+    3. If single-frequency only, reconfigures for L1+L5 and retries
+    4. Returns the appropriate driver for the detected signal plan
+
+    Returns:
+        driver: ReceiverDriver instance matching the active signals
+        None if receiver cannot be brought to dual-frequency state
+
+    Note on UBX command sequencing: each CFG-VALSET is sent and its
+    ACK/NAK awaited synchronously before the next command. This avoids
+    misattributing a NAK to the wrong command (see docs/receiver-signals.md).
+    """
+    if systems is None:
+        systems = {'gps', 'gal'}
+
+    # First check: are dual-freq observations already arriving?
+    log.info("Checking receiver signal status...")
+    dual, total, sigs = _check_dual_freq(port, baud, F9TL5Driver(), systems,
+                                         timeout_s=timeout_s)
+
+    if dual >= 4:
+        freq_type = _detect_second_freq(sigs)
+        if freq_type == 'l5':
+            driver = F9TL5Driver()
+        elif freq_type == 'l2':
+            driver = F9TDriver()
+        else:
+            driver = F9TL5Driver()
+        log.info("Receiver OK: %d/%d SVs dual-freq (%s), using %s",
+                 dual, total, freq_type or "?", driver.name)
+        return driver
+
+    log.warning("Only %d/%d SVs have dual-freq observations — reconfiguring",
+                dual, total)
+
+    # Reconfigure for L1+L5
+    _ensure_imports()
+    port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4, "I2C": 0}
+    pid = port_id.get(port_type, 3)
+    driver = F9TL5Driver()
+
+    ser, ubr = open_receiver(port, baud)
+
+    # Each command is sent and ACK/NAK awaited before the next.
+    # A timeout is treated as failure (equivalent to NAK).
+    ok = configure_signals(ser, ubr, driver=driver)
+    if not ok:
+        log.warning("Signal configuration NAK'd — trying with factory reset")
+        ser.close()
+        ser, ubr = open_receiver(port, baud)
+        factory_reset(ser, ubr)
+        ser.close()
+        ser, ubr = reopen_after_reset(port, wait_s=5)
+        ok = configure_signals(ser, ubr, driver=driver)
+        if not ok:
+            log.error("Signal configuration failed even after factory reset")
+            ser.close()
+            return None
+
+    # GPS L5 health override (see docs/receiver-signals.md)
+    l5_ok = configure_gps_l5_health(ser, ubr)
+    if l5_ok:
+        log.info("GPS L5 health override applied — warm restarting")
+        warm_restart(ser)
+        ser.close()
+        ser, ubr = reopen_after_reset(port, wait_s=10)
+    else:
+        log.info("GPS L5 health override not supported by this firmware")
+
+    # Enable required messages on the correct port
+    configure_messages(ser, ubr, pid)
+    configure_nmea_off(ser, ubr, pid)
+    ser.close()
+
+    # Verify: re-check for dual-freq observations
+    log.info("Verifying dual-frequency observations after reconfiguration...")
+    dual, total, sigs = _check_dual_freq(port, baud, driver, systems,
+                                         timeout_s=timeout_s)
+    if dual >= 4:
+        log.info("Receiver reconfigured OK: %d/%d SVs dual-freq", dual, total)
+        return driver
+
+    log.error("Receiver still not producing dual-freq observations "
+              "after reconfiguration (%d/%d SVs)", dual, total)
+    return None
