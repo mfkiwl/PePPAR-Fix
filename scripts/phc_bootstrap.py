@@ -96,10 +96,12 @@ def _realtime_to_phc_offset_s(phc_timescale, leap, tai_minus_gps):
 # ── PPS frequency measurement ────────────────────────────────────── #
 
 
-def measure_pps_frequency_ppb(ptp, channel, n_samples=5, timeout_s=8):
+def measure_pps_frequency(ptp, channel, n_samples=5, timeout_s=8):
     """Measure PHC frequency error from PPS-to-PPS intervals.
 
-    Returns frequency error in ppb, or None if not enough samples.
+    Returns (median_ppb, sigma_ppb, n_intervals) or (None, None, 0)
+    if not enough samples.  The median is the frequency error estimate;
+    sigma is the standard deviation of individual interval measurements.
     """
     ptp.enable_extts(channel, rising_edge=True)
     intervals = []
@@ -124,9 +126,11 @@ def measure_pps_frequency_ppb(ptp, channel, n_samples=5, timeout_s=8):
     ptp.disable_extts(channel)
 
     if len(intervals) < 2:
-        return None
+        return None, None, 0
     import statistics
-    return statistics.median(intervals)
+    return (statistics.median(intervals),
+            statistics.stdev(intervals),
+            len(intervals))
 
 
 # ── Main ─────────────────────────────────────────────────────────── #
@@ -211,11 +215,14 @@ def main():
 
     # Measure PPS frequency
     log.info("Measuring PHC frequency from PPS intervals...")
-    pps_freq_ppb = measure_pps_frequency_ppb(
+    pps_freq_ppb, pps_freq_sigma, pps_freq_n = measure_pps_frequency(
         ptp, args.extts_channel, n_samples=args.epochs, timeout_s=args.epochs + 3)
     if pps_freq_ppb is not None:
-        log.info("PPS-measured frequency error: %.1f ppb", pps_freq_ppb)
+        pps_freq_unc = pps_freq_sigma / math.sqrt(pps_freq_n)
+        log.info("PPS frequency error: %.1f ±%.1f ppb (σ=%.1f, n=%d)",
+                 pps_freq_ppb, pps_freq_unc, pps_freq_sigma, pps_freq_n)
     else:
+        pps_freq_unc = None
         log.warning("Could not measure PPS frequency (no PPS?)")
 
     # Ensure receiver is producing dual-frequency observations.
@@ -392,20 +399,20 @@ def main():
              "total_phase_error=%+.0f ns (realtime_utc=%d, target=%d)",
              epoch_offset, pps_error_ns, phase_error_ns, utc_sec, target_sec)
 
-    # Frequency sanity check
+    # Frequency sanity check — PPS measurement alone is sufficient.
+    # pps_freq_ppb is the PHC's total frequency error (crystal + current
+    # adjfine) as seen by PPS intervals.  If it's outside tolerance, the
+    # PHC frequency needs correction regardless of whether we have a drift
+    # file.
     freq_sane = True
-    if pps_freq_ppb is not None and drift:
-        freq_delta = abs(pps_freq_ppb - drift["adjfine_ppb"])
-        if freq_delta > args.freq_tolerance_ppb:
-            log.warning("Frequency mismatch: PPS=%.1f ppb, drift=%.1f ppb "
-                        "(delta=%.1f > %.1f)",
-                        pps_freq_ppb, drift["adjfine_ppb"],
-                        freq_delta, args.freq_tolerance_ppb)
+    if pps_freq_ppb is not None:
+        if abs(pps_freq_ppb) > args.freq_tolerance_ppb:
+            log.warning("Frequency error: PPS=%.1f ±%.1f ppb — outside ±%.1f ppb",
+                        pps_freq_ppb, pps_freq_unc, args.freq_tolerance_ppb)
             freq_sane = False
         else:
-            log.info("Frequency sane: PPS=%.1f ppb, drift=%.1f ppb "
-                     "(delta=%.1f ppb)",
-                     pps_freq_ppb, drift["adjfine_ppb"], freq_delta)
+            log.info("Frequency sane: PPS=%.1f ±%.1f ppb (within ±%.1f ppb)",
+                     pps_freq_ppb, pps_freq_unc, args.freq_tolerance_ppb)
 
     # Phase sanity check
     phase_sane = abs(phase_error_ns) < args.step_error_ns
@@ -484,9 +491,23 @@ def main():
         log.info("Phase OK (%+.0f ns) — leaving PHC time alone", phase_error_ns)
 
     if not freq_sane:
-        if pps_freq_ppb is not None:
-            new_freq = pps_freq_ppb
-            source = "PPS measurement"
+        # Read current hardware adjfine to compute correction.
+        # new_adjfine = current_adjfine - pps_freq_ppb  (cancel the error)
+        current_adj = ptp.read_adjfine()
+        log.info("Current PHC adjfine: %.1f ppb", current_adj)
+
+        if pps_freq_ppb is not None and pps_freq_unc is not None:
+            # Decide: trust PPS measurement or drift file?
+            # Low sigma/sqrt(n) → PPS is reliable, use it.
+            # High sigma → PPS is noisy, prefer drift file if available.
+            if drift and pps_freq_unc > args.freq_tolerance_ppb:
+                new_freq = drift["adjfine_ppb"]
+                source = ("drift file (PPS σ/√n=%.1f ppb too high)" %
+                          pps_freq_unc)
+            else:
+                new_freq = current_adj - pps_freq_ppb
+                source = ("PPS correction: %.1f - %.1f" %
+                          (current_adj, pps_freq_ppb))
         elif drift:
             new_freq = drift["adjfine_ppb"]
             source = "drift file"
