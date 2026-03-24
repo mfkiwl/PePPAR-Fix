@@ -138,16 +138,16 @@ class PtpDevice:
     def read_adjfine(self):
         """Read current PHC frequency adjustment in ppb."""
         timex_size = 208
-        buf = bytearray(timex_size)
+        buf = ctypes.create_string_buffer(timex_size)
         # modes=0: read-only query
         ret = self._libc.clock_adjtime(
             ctypes.c_int32(self.clock_id),
-            ctypes.c_char_p(bytes(buf)),
+            buf,
         )
         if ret < 0:
             errno = ctypes.get_errno()
             raise OSError(errno, f"clock_adjtime read failed: {os.strerror(errno)}")
-        freq = struct.unpack_from('<q', buf, 16)[0]
+        freq = struct.unpack_from('<q', buf.raw, 16)[0]
         return freq / 65.536
 
     def adjfine(self, ppb):
