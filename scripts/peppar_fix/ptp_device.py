@@ -256,23 +256,28 @@ class PtpDevice:
             raise OSError(errno, f"clock_settime failed: {os.strerror(errno)}")
 
     def step_to(self, target_ns=0, target_error_ns=5000, max_time_ms=500,
-                mean_compensation_ns=0, realtime_offset_ns=None):
+                mean_compensation_ns=0,
+                pps_anchor_ns=None, pps_realtime_ns=None):
         """Step the PHC to a target time, retrying within a time budget.
 
-        If realtime_offset_ns is provided, the target is recomputed each
-        iteration as CLOCK_REALTIME + realtime_offset_ns.  This keeps
-        the target fresh when the caller cannot predict exactly when the
-        set will execute (e.g. seconds may elapse between computing the
-        target and reaching this code).
+        Two modes:
 
-        Each clock_settime overwrites the PHC — there is no keeping the
-        best. We either meet the target and stop, or try again (the
-        previous result is gone). On timeout, we're stuck with the last
-        attempt.
+        Static target (default): set PHC to target_ns.  Useful for
+        characterization where accuracy relative to wall time doesn't
+        matter.
 
-        The residual is measured by reading back the PHC and subtracting
-        the elapsed time since the set (measured via CLOCK_MONOTONIC),
-        so PHC drift between set and readback doesn't inflate the error.
+        PPS-anchored target (pps_anchor_ns + pps_realtime_ns): the PHC
+        should read pps_anchor_ns at the moment CLOCK_REALTIME was
+        pps_realtime_ns.  Each iteration recomputes the target using
+        CLOCK_REALTIME as a *transfer standard*: the NTP phase error in
+        pps_realtime_ns and in the current CLOCK_REALTIME read cancel
+        in the subtraction, so the step accuracy is limited only by
+        CLOCK_REALTIME's frequency error over seconds (negligible), not
+        its absolute phase error (~1 ms from NTP).
+
+        The residual is measured from the PTP_SYS_OFFSET cross-timestamp
+        returned by read_phc_ns(), using the same transfer-standard
+        cancellation for the expected value.
 
         Returns (residual_ns, attempts, met_target).
         """
@@ -281,15 +286,24 @@ class PtpDevice:
 
         while True:
             attempts += 1
-            if realtime_offset_ns is not None:
-                target_ns = time.clock_gettime_ns(time.CLOCK_REALTIME) + realtime_offset_ns
+            if pps_anchor_ns is not None:
+                # Transfer standard: elapsed since PPS via CLOCK_REALTIME.
+                # NTP phase error cancels in the subtraction.
+                rt_now = time.clock_gettime_ns(time.CLOCK_REALTIME)
+                target_ns = pps_anchor_ns + (rt_now - pps_realtime_ns)
             aim_ns = target_ns - mean_compensation_ns
-            mono_before = time.monotonic_ns()
             self.set_phc_ns(aim_ns)
-            phc_after, _ = self.read_phc_ns()
-            mono_after = time.monotonic_ns()
-            elapsed_ns = mono_after - mono_before
-            residual_ns = phc_after - (target_ns + elapsed_ns)
+            phc_after, sys_at_read = self.read_phc_ns()
+
+            if pps_anchor_ns is not None:
+                # Residual via transfer standard: sys_at_read is
+                # CLOCK_REALTIME at the PHC snapshot.  NTP error
+                # in sys_at_read and pps_realtime_ns cancel.
+                expected_ns = pps_anchor_ns + (sys_at_read - pps_realtime_ns)
+                residual_ns = phc_after - expected_ns
+            else:
+                # Static target: simple comparison (for characterization)
+                residual_ns = phc_after - target_ns
 
             if abs(residual_ns) < target_error_ns:
                 return residual_ns, attempts, True

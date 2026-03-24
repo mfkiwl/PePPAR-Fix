@@ -765,6 +765,62 @@ Correlation logs should include at least:
 - queue/history depth
 - reason for discard
 
+### Rule 6: CLOCK_REALTIME is a transfer standard only
+
+CLOCK_REALTIME tracks UTC via NTP with ~1 ms phase error.  Any code that
+uses it as an *absolute* time source inherits that error.  This matters
+because the PHC bootstrap sets the hardware clock — if we set PHC =
+CLOCK_REALTIME + offset, the PHC inherits the NTP error, and any
+downstream consumer (PTP, servo, CLOCK_REALTIME itself) inherits it too.
+The tautology is invisible: readback checks that compare PHC against
+CLOCK_REALTIME will always agree because they share the same bias.
+
+**Safe use — transfer standard:**
+
+Read CLOCK_REALTIME twice to measure the elapsed time between two events
+on different timescales.  The NTP phase error appears in both reads and
+cancels in the subtraction:
+
+```
+rt_at_pps   = CLOCK_REALTIME           # read at PPS edge
+rt_at_step  = CLOCK_REALTIME           # read at step time
+elapsed     = rt_at_step - rt_at_pps   # NTP error cancels
+target_phc  = pps_truth + elapsed      # anchored to PPS, not NTP
+```
+
+The residual error is CLOCK_REALTIME's *frequency* error (NTP steers this
+to < 1 ppb) multiplied by the interval between the two reads.  For a 10s
+interval at 1 ppb, that's 10 ns — negligible.
+
+**Safe use — whole-second identification:**
+
+`round(CLOCK_REALTIME)` identifies which UTC second a PPS edge belongs to.
+This requires NTP accuracy < 0.5 s, which NTP guarantees under all
+non-pathological conditions.
+
+**Unsafe — absolute phase reference:**
+
+```
+# BAD: PHC inherits NTP's ~1 ms error
+target_phc = CLOCK_REALTIME + tai_offset
+```
+
+**Where this applies:**
+
+- `ptp_device.py: step_to()` — PPS-anchored mode uses CLOCK_REALTIME as
+  transfer standard; sys_ns from PTP_SYS_OFFSET cross-timestamp provides
+  the second transfer event for residual computation
+- `phc_bootstrap.py` — PPS capture + CLOCK_REALTIME identifies the second;
+  the PPS edge *is* the sub-second truth
+- Any future code that relates PHC time to wall time
+
+**Patrol guidance:**
+
+Review any new use of `CLOCK_REALTIME` or `time.time()` in timing-critical
+paths.  Ask: "Is this a transfer (two reads, subtracted) or an absolute
+use (one read, used directly)?"  Absolute uses in paths that feed the PHC
+or affect time accuracy are bugs.
+
 ## Recommended follow-up work
 
 - move the legacy servo paths toward the same event-history model as the unified path

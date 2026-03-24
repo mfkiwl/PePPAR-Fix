@@ -420,15 +420,17 @@ def main():
     # ── Intervene on whichever is wrong, leave the other alone ───── #
 
     if not phase_sane:
-        # Step using CLOCK_REALTIME as the common reference.  Each retry
-        # recomputes target = CLOCK_REALTIME + offset_ns, so the target
-        # stays fresh regardless of elapsed time since the PPS edge.
-        offset_ns = offset_s * 1_000_000_000
-        log.info("Stepping PHC phase (CLOCK_REALTIME+%ds, "
+        # PPS-anchored step: the PHC should read target_sec.000000000
+        # at the PPS edge.  CLOCK_REALTIME is used only as a transfer
+        # standard — its phase error cancels in the subtraction of two
+        # reads.  See docs/stream-timescale-correlation.md Rule 6.
+        pps_anchor_ns = target_sec * 1_000_000_000
+        log.info("Stepping PHC phase (PPS-anchored, target_sec=%d, "
                  "target_error=%d ns, budget=%d ms)",
-                 offset_s, args.step_error_ns, args.step_budget_ms)
+                 target_sec, args.step_error_ns, args.step_budget_ms)
         residual, attempts, met = ptp.step_to(
-            realtime_offset_ns=offset_ns,
+            pps_anchor_ns=pps_anchor_ns,
+            pps_realtime_ns=pps_realtime_ns,
             target_error_ns=args.step_error_ns,
             max_time_ms=args.step_budget_ms,
             mean_compensation_ns=args.mean_compensation_ns,
@@ -436,9 +438,9 @@ def main():
         log.info("Step result: residual=%+.0f ns, attempts=%d, %s",
                  residual, attempts, "HIT" if met else "TIMEOUT")
 
-        # Close the loop: capture a few PPS events to independently
-        # confirm the step landed.  step_to validates via readback
-        # (same syscall path); PPS is a true hardware check.
+        # Close the loop: capture fresh PPS events to confirm the step.
+        # The PPS edge IS the ground truth — the readback residual above
+        # is consistent but PPS is the independent check.
         log.info("Verifying step with fresh PPS capture...")
         ptp.enable_extts(args.extts_channel, rising_edge=True)
         last_verify_error = None
@@ -447,6 +449,9 @@ def main():
             if evt is None:
                 log.warning("  PPS verify [%d]: no event", i + 1)
                 continue
+            # Use CLOCK_REALTIME as transfer standard to identify
+            # the PPS second (phase error < 0.5s from NTP — fine for
+            # whole-second identification).
             v_realtime_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
             v_sec, v_nsec = evt[0], evt[1]
             v_rounded = v_sec if v_nsec < 500_000_000 else v_sec + 1
@@ -456,13 +461,17 @@ def main():
             last_verify_error = v_epoch_off * 1_000_000_000 + v_sub_ns
             log.info("  PPS verify [%d]: %+.0f ns (epoch_offset=%d)",
                      i + 1, last_verify_error, v_epoch_off)
+            # Update anchor for any retry: this PPS edge is fresher
+            pps_anchor_ns = v_target * 1_000_000_000
+            pps_realtime_ns = v_realtime_ns
         ptp.disable_extts(args.extts_channel)
 
         if last_verify_error is not None and abs(last_verify_error) > args.step_error_ns:
             log.warning("Post-step PPS shows %+.0f ns error — retrying step",
                         last_verify_error)
             residual, attempts, met = ptp.step_to(
-                realtime_offset_ns=offset_ns,
+                pps_anchor_ns=pps_anchor_ns,
+                pps_realtime_ns=pps_realtime_ns,
                 target_error_ns=args.step_error_ns,
                 max_time_ms=args.step_budget_ms,
                 mean_compensation_ns=args.mean_compensation_ns,
