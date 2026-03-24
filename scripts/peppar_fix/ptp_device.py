@@ -255,9 +255,15 @@ class PtpDevice:
             errno = ctypes.get_errno()
             raise OSError(errno, f"clock_settime failed: {os.strerror(errno)}")
 
-    def step_to(self, target_ns, target_error_ns=5000, max_time_ms=500,
-                mean_compensation_ns=0):
-        """Step the PHC to target_ns, retrying within a time budget.
+    def step_to(self, target_ns=0, target_error_ns=5000, max_time_ms=500,
+                mean_compensation_ns=0, realtime_offset_ns=None):
+        """Step the PHC to a target time, retrying within a time budget.
+
+        If realtime_offset_ns is provided, the target is recomputed each
+        iteration as CLOCK_REALTIME + realtime_offset_ns.  This keeps
+        the target fresh when the caller cannot predict exactly when the
+        set will execute (e.g. seconds may elapse between computing the
+        target and reaching this code).
 
         Each clock_settime overwrites the PHC — there is no keeping the
         best. We either meet the target and stop, or try again (the
@@ -275,6 +281,8 @@ class PtpDevice:
 
         while True:
             attempts += 1
+            if realtime_offset_ns is not None:
+                target_ns = time.clock_gettime_ns(time.CLOCK_REALTIME) + realtime_offset_ns
             aim_ns = target_ns - mean_compensation_ns
             mono_before = time.monotonic_ns()
             self.set_phc_ns(aim_ns)

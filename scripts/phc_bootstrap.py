@@ -79,15 +79,17 @@ def ecef_to_lla(x, y, z):
     return _lla(x, y, z)
 
 
-def _target_timescale_sec(gps_time, phc_timescale, leap, tai_minus_gps):
-    """Map a RAWX GPS epoch to the PPS second it aligns with."""
-    gps_sec = int(gps_time.timestamp())  # floor, not round
-    if phc_timescale == "gps":
-        return gps_sec
+def _realtime_to_phc_offset_s(phc_timescale, leap, tai_minus_gps):
+    """Seconds to add to CLOCK_REALTIME (UTC) to get PHC timescale.
+
+    CLOCK_REALTIME tracks UTC.  GPS = UTC + leap.  TAI = GPS + 19 = UTC + leap + 19.
+    """
     if phc_timescale == "utc":
-        return gps_sec - leap
+        return 0
+    if phc_timescale == "gps":
+        return leap
     if phc_timescale == "tai":
-        return gps_sec + tai_minus_gps
+        return leap + tai_minus_gps
     raise ValueError(f"Unsupported timescale: {phc_timescale}")
 
 
@@ -361,6 +363,7 @@ def main():
     # We need to capture one more PPS event to compare
     ptp.enable_extts(args.extts_channel, rising_edge=True)
     pps_event = ptp.read_extts(timeout_ms=2000)
+    pps_realtime_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
     ptp.disable_extts(args.extts_channel)
 
     if pps_event is None:
@@ -370,8 +373,14 @@ def main():
 
     phc_sec, phc_nsec, _idx, _mono, _qr, _pa = pps_event
     phc_rounded_sec = phc_sec if phc_nsec < 500_000_000 else phc_sec + 1
-    target_sec = _target_timescale_sec(
-        gps_time, args.phc_timescale, args.leap, args.tai_minus_gps)
+
+    # Determine which second this PPS belongs to using CLOCK_REALTIME.
+    # PPS fires on the second boundary; CLOCK_REALTIME (UTC via NTP) tells
+    # us which one — avoids stale gps_time from the filter loop.
+    offset_s = _realtime_to_phc_offset_s(
+        args.phc_timescale, args.leap, args.tai_minus_gps)
+    utc_sec = round(pps_realtime_ns / 1_000_000_000)
+    target_sec = utc_sec + offset_s
 
     epoch_offset = phc_rounded_sec - target_sec
     pps_error_ns = phc_nsec if phc_nsec < 500_000_000 else phc_nsec - 1_000_000_000
@@ -380,8 +389,8 @@ def main():
     phase_error_ns = epoch_offset * 1_000_000_000 + pps_error_ns
 
     log.info("PHC phase: epoch_offset=%ds, pps_error=%+.0f ns, "
-             "total_phase_error=%+.0f ns",
-             epoch_offset, pps_error_ns, phase_error_ns)
+             "total_phase_error=%+.0f ns (realtime_utc=%d, target=%d)",
+             epoch_offset, pps_error_ns, phase_error_ns, utc_sec, target_sec)
 
     # Frequency sanity check
     freq_sane = True
@@ -411,17 +420,57 @@ def main():
     # ── Intervene on whichever is wrong, leave the other alone ───── #
 
     if not phase_sane:
-        target_phc_ns = target_sec * 1_000_000_000
-        log.info("Stepping PHC phase to %d (target_error=%d ns, budget=%d ms)",
-                 target_phc_ns, args.step_error_ns, args.step_budget_ms)
+        # Step using CLOCK_REALTIME as the common reference.  Each retry
+        # recomputes target = CLOCK_REALTIME + offset_ns, so the target
+        # stays fresh regardless of elapsed time since the PPS edge.
+        offset_ns = offset_s * 1_000_000_000
+        log.info("Stepping PHC phase (CLOCK_REALTIME+%ds, "
+                 "target_error=%d ns, budget=%d ms)",
+                 offset_s, args.step_error_ns, args.step_budget_ms)
         residual, attempts, met = ptp.step_to(
-            target_phc_ns,
+            realtime_offset_ns=offset_ns,
             target_error_ns=args.step_error_ns,
             max_time_ms=args.step_budget_ms,
             mean_compensation_ns=args.mean_compensation_ns,
         )
         log.info("Step result: residual=%+.0f ns, attempts=%d, %s",
                  residual, attempts, "HIT" if met else "TIMEOUT")
+
+        # Close the loop: capture a few PPS events to independently
+        # confirm the step landed.  step_to validates via readback
+        # (same syscall path); PPS is a true hardware check.
+        log.info("Verifying step with fresh PPS capture...")
+        ptp.enable_extts(args.extts_channel, rising_edge=True)
+        last_verify_error = None
+        for i in range(3):
+            evt = ptp.read_extts(timeout_ms=2000)
+            if evt is None:
+                log.warning("  PPS verify [%d]: no event", i + 1)
+                continue
+            v_realtime_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
+            v_sec, v_nsec = evt[0], evt[1]
+            v_rounded = v_sec if v_nsec < 500_000_000 else v_sec + 1
+            v_target = round(v_realtime_ns / 1_000_000_000) + offset_s
+            v_epoch_off = v_rounded - v_target
+            v_sub_ns = v_nsec if v_nsec < 500_000_000 else v_nsec - 1_000_000_000
+            last_verify_error = v_epoch_off * 1_000_000_000 + v_sub_ns
+            log.info("  PPS verify [%d]: %+.0f ns (epoch_offset=%d)",
+                     i + 1, last_verify_error, v_epoch_off)
+        ptp.disable_extts(args.extts_channel)
+
+        if last_verify_error is not None and abs(last_verify_error) > args.step_error_ns:
+            log.warning("Post-step PPS shows %+.0f ns error — retrying step",
+                        last_verify_error)
+            residual, attempts, met = ptp.step_to(
+                realtime_offset_ns=offset_ns,
+                target_error_ns=args.step_error_ns,
+                max_time_ms=args.step_budget_ms,
+                mean_compensation_ns=args.mean_compensation_ns,
+            )
+            log.info("Retry result: residual=%+.0f ns, attempts=%d, %s",
+                     residual, attempts, "HIT" if met else "TIMEOUT")
+        elif last_verify_error is not None:
+            log.info("Post-step PPS verified: %+.0f ns", last_verify_error)
     else:
         log.info("Phase OK (%+.0f ns) — leaving PHC time alone", phase_error_ns)
 
