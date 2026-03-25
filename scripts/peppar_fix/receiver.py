@@ -738,39 +738,48 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
     log.warning("Only %d/%d SVs have dual-freq observations — reconfiguring",
                 dual, total)
 
-    # Reconfigure for L1+L5
+    # Reconfigure: try L1+L5 first, fall back to L1+L2C if NAK'd.
+    # Newer F9T firmware (-20B) supports L5; older (-00B) only has L2C.
     _ensure_imports()
     port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4, "I2C": 0}
     pid = port_id.get(port_type, 3)
-    driver = F9TL5Driver()
 
     ser, ubr = open_receiver(port, baud)
 
-    # Each command is sent and ACK/NAK awaited before the next.
-    # A timeout is treated as failure (equivalent to NAK).
+    # Try L5 first (preferred — better geometry, no health override needed on newer FW)
+    driver = F9TL5Driver()
     ok = configure_signals(ser, ubr, driver=driver)
     if not ok:
-        log.warning("Signal configuration NAK'd — trying with factory reset")
+        # L5 NAK'd — this firmware only supports L2C
+        log.info("L5 signal config NAK'd — falling back to L2C")
+        driver = F9TDriver()
+        ok = configure_signals(ser, ubr, driver=driver)
+    if not ok:
+        log.warning("L2C also NAK'd — trying with factory reset")
         ser.close()
         ser, ubr = open_receiver(port, baud)
         factory_reset(ser, ubr)
         ser.close()
         ser, ubr = reopen_after_reset(port, wait_s=5)
+        driver = F9TDriver()
         ok = configure_signals(ser, ubr, driver=driver)
         if not ok:
             log.error("Signal configuration failed even after factory reset")
             ser.close()
             return None
 
-    # GPS L5 health override (see docs/receiver-signals.md)
-    l5_ok = configure_gps_l5_health(ser, ubr)
-    if l5_ok:
-        log.info("GPS L5 health override applied — warm restarting")
-        warm_restart(ser)
-        ser.close()
-        ser, ubr = reopen_after_reset(port, wait_s=10)
+    # GPS L5 health override — only needed for L5 drivers
+    if isinstance(driver, F9TL5Driver):
+        l5_ok = configure_gps_l5_health(ser, ubr)
+        if l5_ok:
+            log.info("GPS L5 health override applied — warm restarting")
+            warm_restart(ser)
+            ser.close()
+            ser, ubr = reopen_after_reset(port, wait_s=10)
+        else:
+            log.info("GPS L5 health override not supported by this firmware")
     else:
-        log.info("GPS L5 health override not supported by this firmware")
+        log.info("L2C driver — no L5 health override needed")
 
     # Enable required messages on the correct port
     configure_messages(ser, ubr, pid)
