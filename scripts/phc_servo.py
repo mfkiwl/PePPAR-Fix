@@ -442,8 +442,17 @@ def run_servo(args):
 
     # Receiver signal check is done by ensure_receiver_ready() above.
 
-    # Initialize PPP filter
+    # Initialize PPP filter.
+    # Bootstrap guarantees PHC is within ±10µs of truth, so the receiver
+    # clock residual at the PPS edge is also near zero.  Seed clock at 0
+    # with a moderate P — this makes sigma an honest convergence metric.
+    # Without this, the LS pseudorange seed puts dt_rx at ~ms (the raw
+    # receiver clock offset), and sigma drops to 0.1ns in one epoch
+    # while the estimate is still ms off.
     filt = FixedPosFilter(known_ecef)
+    filt.x[filt.IDX_CLK] = 0.0
+    filt.P[filt.IDX_CLK, filt.IDX_CLK] = 100.0 ** 2  # 100m ≈ 333ns 1σ
+    filt.initialized = True  # skip pseudorange seeding
     filt.prev_clock = 0.0
 
     # PI gains — base values, scaled by error source confidence at runtime
@@ -706,11 +715,15 @@ def run_servo(args):
             qerr_ns, _ = qerr_store.get()
 
             # Compute competitive error sources (M6).
-            # Gate carrier-phase on convergence: the PPP filter's dt_rx is
-            # seeded from pseudoranges (~ms accuracy) and takes ~10 epochs to
-            # converge.  Until then, PPS-only or PPS+qErr should drive.
-            # After bootstrap, PPS error is <10µs, so dt_rx should converge
-            # toward 0.  If |dt_rx| > 100µs, the filter isn't ready.
+            # dt_rx tracks the RECEIVER clock offset from GPS time, not
+            # the PHC-to-GPS offset.  The formula PPS+PPP = pps_error +
+            # dt_rx is only valid once the filter has transitioned from
+            # absolute pseudorange mode to time-differenced carrier phase,
+            # where dt_rx changes track PHC changes.  Sigma is honest
+            # (formal EKF uncertainty given the measurements) but doesn't
+            # distinguish between "converged on receiver clock" and
+            # "converged on PHC-relative correction."  Gate on abs(dt_rx)
+            # to ensure the filter state is PHC-compatible.
             use_dt_rx = dt_rx_ns if abs(dt_rx_ns) < 100_000 else None
             use_sigma = dt_rx_sigma if use_dt_rx is not None else None
             sources = compute_error_sources(
