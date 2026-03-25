@@ -109,7 +109,7 @@ MESSAGE_TIMEOUTS = {
 }
 
 # Port ID mapping
-PORT_SUFFIX = {1: "UART1", 2: "UART2", 3: "USB", 4: "SPI"}
+PORT_SUFFIX = {0: "I2C", 1: "UART1", 2: "UART2", 3: "USB", 4: "SPI"}
 
 SIGNAL_NAMES = {
     (0, 0): "GPS-L1CA",
@@ -569,7 +569,7 @@ def full_configure(port, baud=9600, port_type="USB", rate_hz=1,
     Returns True on success.
     """
     _ensure_imports()
-    port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4}[port_type]
+    port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4, "I2C": 0}[port_type]
     driver = get_driver(receiver)
 
     ser, ubr = open_receiver(port, baud)
