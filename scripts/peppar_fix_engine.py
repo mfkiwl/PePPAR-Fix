@@ -1791,8 +1791,18 @@ def run(args):
     """Main entry point: bootstrap → steady state."""
     stop_event = threading.Event()
     gate_stats = None
-    driver = get_driver(args.receiver)
-    log.info(f"Receiver: {driver.name} (PROTVER {driver.protver})")
+    # Verify receiver config on open (defensive: re-applies if needed).
+    # This opens/closes the serial port to check for dual-freq observations,
+    # reconfigures if single-freq, then releases the port for serial_reader.
+    from peppar_fix.receiver import ensure_receiver_ready
+    port_type = getattr(args, 'port_type', 'USB') or 'USB'
+    systems_for_check = set(args.systems.split(',')) if args.systems else {'gps', 'gal'}
+    driver = ensure_receiver_ready(args.serial, args.baud, port_type=port_type,
+                                   systems=systems_for_check)
+    if driver is None:
+        driver = get_driver(args.receiver)
+        log.warning("Receiver check failed — falling back to %s (may lack dual-freq)",
+                    driver.name)
     mute_controller = get_source_mute_controller()
     mute_controller.install_signal_handlers()
 
@@ -2009,6 +2019,9 @@ Two-phase operation:
     serial.add_argument("--baud", type=int, default=115200)
     serial.add_argument("--receiver", default="f9t",
                         help="Receiver model/profile: f9t, f9t-l5, f10t (default: f9t)")
+    serial.add_argument("--port-type", default="USB",
+                        choices=["UART", "UART2", "USB", "SPI", "I2C"],
+                        help="Receiver port type for UBX message routing (default: USB)")
 
     # GNSS
     gnss = ap.add_argument_group("GNSS")

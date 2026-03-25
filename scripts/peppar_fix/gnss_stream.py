@@ -222,12 +222,15 @@ def _open_serial_exclusive(device, baud):
         raise
 
     original_close = ser.close
+    _lock_released = [False]  # mutable so closure can write it
 
     def close_with_lock():
         try:
             return original_close()
         finally:
-            release_device_lock(lock_fd)
+            if not _lock_released[0]:
+                _lock_released[0] = True
+                release_device_lock(lock_fd)
 
     ser.close = close_with_lock
     ser._peppar_lock_fd = lock_fd
