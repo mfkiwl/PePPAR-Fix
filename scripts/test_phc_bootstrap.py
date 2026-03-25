@@ -70,6 +70,7 @@ def run_bootstrap(args, extra_args=None):
         "--epochs", str(args.epochs),
         "--step-error-ns", str(args.step_error_ns),
         "--settime-lag-ns", str(args.settime_lag_ns),
+        "--max-pps-iterations", str(args.max_pps_iterations),
     ]
     if args.program_pin:
         cmd.append("--program-pin")
@@ -165,8 +166,11 @@ def test_bad_phase_good_freq(args):
 
     stepped = info["stepped_phase"]
     freq_untouched = info["freq_ok"] and not info["set_frequency"]
-    drift_unchanged = (drift_before is not None and drift_after is not None and
-                       drift_before.get("adjfine_ppb") == drift_after.get("adjfine_ppb"))
+    drift_unchanged = (
+        (drift_before is None and drift_after is None) or
+        (drift_before is not None and drift_after is not None and
+         drift_before.get("adjfine_ppb") == drift_after.get("adjfine_ppb"))
+    )
 
     passed = stepped and freq_untouched and drift_unchanged
     print(f"  Exit code: {rc}")
@@ -289,6 +293,8 @@ def main():
                     help="Phase sanity threshold in ns (default: 10000)")
     ap.add_argument("--settime-lag-ns", type=int, default=0,
                     help="Mean clock_settime-to-PHC landing lag in ns (from characterization)")
+    ap.add_argument("--max-pps-iterations", type=int, default=8,
+                    help="Max PPS feedback iterations (default: 8)")
     ap.add_argument("--tests", default="1,2,3,4",
                     help="Comma-separated test numbers to run (default: 1,2,3,4)")
     args = ap.parse_args()

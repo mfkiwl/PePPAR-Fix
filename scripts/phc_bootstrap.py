@@ -168,6 +168,8 @@ def main():
                     help="Max time for step retry loop in ms")
     ap.add_argument("--settime-lag-ns", type=int, default=0,
                     help="Mean clock_settime-to-PHC landing lag in ns (from characterization)")
+    ap.add_argument("--max-pps-iterations", type=int, default=8,
+                    help="Max PPS feedback iterations for step convergence (default: 8)")
     ap.add_argument("--position-check-m", type=float, default=100.0,
                     help="Max acceptable LS-vs-stored position delta in meters")
     args = ap.parse_args()
@@ -452,7 +454,7 @@ def main():
         ptp.enable_extts(args.extts_channel, rising_edge=True)
         last_verify_error = None
         current_lag = args.settime_lag_ns
-        max_pps_iterations = 5
+        max_pps_iterations = args.max_pps_iterations
         for iteration in range(max_pps_iterations):
             # Capture one PPS event to measure actual phase error
             evt = ptp.read_extts(timeout_ms=2000)
