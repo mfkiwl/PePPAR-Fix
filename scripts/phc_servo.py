@@ -9,7 +9,11 @@ corrections to the GNSS PPS signal:
 Each correction layer improves absolute UTC phase accuracy.
 The servo selects the best available correction at each epoch.
 
-M7 adds adaptive discipline interval: instead of calling adjfine every
+Requires phc_bootstrap.py to have run first — the bootstrap ensures
+the PHC starts within ±10µs phase and ±10ppb frequency.  The servo
+has no warmup or step logic: PI tracking begins from epoch 1.
+
+Adaptive discipline interval: instead of calling adjfine every
 second (which injects ~7.5 ppb of correction jitter), the servo
 accumulates error samples over N epochs and applies one averaged
 correction.  This reduces TDEV at short tau while preserving tracking
@@ -247,18 +251,30 @@ def run_servo(args):
 
     The source with the lowest confidence interval drives the servo.
     PI gains scale with selected confidence: better measurement → more
-    aggressive correction.  No discrete mode transitions after the
-    initial warmup/step bootstrap.
+    aggressive correction.  No warmup or step phases — phc_bootstrap.py
+    ensures the PHC starts within ±10µs and ±10ppb, so PI tracking
+    begins from epoch 1.
     """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    # ── Receiver driver ──────────────────────────────────────────────────
-    from peppar_fix.receiver import get_driver
-    driver = get_driver(args.receiver)
-    log.info(f"Receiver: {driver.name} (PROTVER {driver.protver})")
+    # ── Receiver driver: verify config on open ─────────────────────────
+    # The F9T stores config in three layers (RAM, BBR, Flash).
+    # configure_f9t.py writes all three, so config survives power cycles.
+    # But DTR toggles on serial open can reset RAM, so we verify here
+    # and reconfigure if needed.  This is our defensive stance:
+    # never assume the receiver is configured; always verify.
+    from peppar_fix.receiver import ensure_receiver_ready
+    systems = set(args.systems.split(',')) if args.systems else None
+    driver = ensure_receiver_ready(
+        args.serial, args.baud, port_type=args.port_type, systems=systems)
+    if driver is None:
+        log.error("Receiver not producing dual-frequency observations — "
+                  "cannot proceed. Run configure_f9t.py first.")
+        return
+    log.info(f"Receiver: {driver.name}")
 
     # ── Resolve position: --known-pos > position file > error ────────────
     position_source = None  # tracks where the position came from
@@ -295,9 +311,10 @@ def run_servo(args):
     log.info(f"PHC: {args.ptp_dev}, max_adj={caps['max_adj']} ppb, "
              f"n_extts={caps['n_ext_ts']}, n_pins={caps['n_pins']}")
 
-    # Reset adjfine to 0 (clear stale settings from previous runs)
-    ptp.adjfine(0.0)
-    log.info("PHC adjfine reset to 0")
+    # Read current adjfine — bootstrap should have set a good value.
+    # Do NOT reset to 0; that destroys the bootstrap's frequency calibration.
+    current_adj = ptp.read_adjfine()
+    log.info("PHC adjfine at start: %.1f ppb", current_adj)
 
     # Configure SDP pin for extts
     extts_channel = args.extts_channel
@@ -384,9 +401,6 @@ def run_servo(args):
         log.info(f"  Warmup: {beph.summary()}")
     log.info(f"Warmup complete: {beph.summary()}")
 
-    # Parse systems filter
-    systems = set(args.systems.split(',')) if args.systems else None
-
     # Config queue: main thread can send UBX config to receiver via serial_reader
     config_queue = queue.Queue(maxsize=10)
 
@@ -426,53 +440,11 @@ def run_servo(args):
     t_serial.start()
     log.info(f"Serial: {args.serial} at {args.baud} baud")
 
-    # ── Receiver signal diagnostic ──────────────────────────────────────
-    log.info("Checking receiver signals (3 epochs)...")
-    sys_counts = {}
-    for _diag_i in range(3):
-        try:
-            obs_event = obs_queue.get(timeout=10)
-        except queue.Empty:
-            log.warning("  No observations received — check serial connection "
-                        "and receiver configuration")
-            break
-        for o in obs_event.observations:
-            s = o.get('sys', '?')
-            sys_counts[s] = sys_counts.get(s, 0) + 1
-        obs_queue.put(obs_event)
-
-    if sys_counts:
-        parts = [f"{s.upper()}={n//3}" for s, n in sorted(sys_counts.items())]
-        log.info(f"  Dual-freq SVs per epoch: {', '.join(parts)}")
-
-        if 'gps' in (systems or set()) and sys_counts.get('gps', 0) == 0:
-            log.warning(
-                "  NO GPS dual-frequency observations! GPS L5 is not being tracked.\n"
-                "  The receiver needs: (1) GPS L5 signal enabled, (2) L5 health override\n"
-                "  (App Note UBX-21038688), and (3) a warm restart after the override.\n"
-                "  Run: python scripts/configure_f9t.py <port> --port-type USB\n"
-                "  (Full factory reset + configure + L5 override + restart)")
-        if 'gal' in (systems or set()) and sys_counts.get('gal', 0) == 0:
-            log.warning(
-                "  NO Galileo dual-frequency observations!\n"
-                "  Run: python scripts/configure_f9t.py <port> --port-type USB --skip-reset")
-        n_total = sum(sys_counts.values()) // 3
-        if n_total < 4:
-            log.warning(
-                f"  Only {n_total} dual-freq SVs per epoch — filter needs ≥4.\n"
-                "  Check antenna, receiver config, and sky view.")
-    else:
-        log.warning("  No observation epochs received in 30s. Check:\n"
-                    "  1. Serial port and baud rate\n"
-                    "  2. Receiver is in timing mode (run configure_f9t.py)\n"
-                    "  3. UBX messages enabled (RXM-RAWX, RXM-SFRBX)")
+    # Receiver signal check is done by ensure_receiver_ready() above.
 
     # Initialize PPP filter
     filt = FixedPosFilter(known_ecef)
     filt.prev_clock = 0.0
-
-    # Servo parameters
-    STEP_THRESHOLD_NS = 10_000     # 10 µs — step if offset larger
 
     # PI gains — base values, scaled by error source confidence at runtime
     BASE_KP = args.track_kp        # default 0.3
@@ -499,10 +471,9 @@ def run_servo(args):
     watchdog = PositionWatchdog(
         threshold_m=args.watchdog_threshold,
     )
-    phase = 'warmup'
+    phase = 'tracking'
     prev_t = None
     n_epochs = 0
-    warmup_epochs = args.warmup    # default 20
     prev_source = None
     position_saved = False  # track whether we've saved position to file
     tmode_set = False       # track whether F9T has been switched to timing mode
@@ -589,7 +560,7 @@ def run_servo(args):
         ])
 
     start_time = time.time()
-    adjfine_ppb = 0.0
+    adjfine_ppb = current_adj
     gain_scale = 1.0
 
     try:
@@ -734,82 +705,18 @@ def run_servo(args):
             # Get qErr from TIM-TP (None if stale or unavailable)
             qerr_ns, _ = qerr_store.get()
 
-            # Compute competitive error sources (M6)
+            # Compute competitive error sources (M6).
+            # Gate carrier-phase on convergence: the PPP filter's dt_rx is
+            # seeded from pseudoranges (~ms accuracy) and takes ~10 epochs to
+            # converge.  Until then, PPS-only or PPS+qErr should drive.
+            # After bootstrap, PPS error is <10µs, so dt_rx should converge
+            # toward 0.  If |dt_rx| > 100µs, the filter isn't ready.
+            use_dt_rx = dt_rx_ns if abs(dt_rx_ns) < 100_000 else None
+            use_sigma = dt_rx_sigma if use_dt_rx is not None else None
             sources = compute_error_sources(
-                pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma,
+                pps_error_ns, qerr_ns, use_dt_rx, use_sigma,
             )
             best = sources[0]
-
-            # ── Bootstrap: warmup ──────────────────────────────────────
-            if phase == 'warmup':
-                if n_epochs >= warmup_epochs:
-                    log.info(f"  Warmup complete ({n_epochs} epochs, "
-                             f"best={best}, epoch_offset={epoch_offset}s)")
-                    if epoch_offset != 0 or abs(best.error_ns) > STEP_THRESHOLD_NS:
-                        phase = 'step'
-                    else:
-                        phase = 'tracking'
-                        log.info(f"  → tracking (no step needed)")
-                elif n_epochs % 10 == 0:
-                    log.info(f"  [{n_epochs}] warmup: best={best} "
-                             f"dt_rx={dt_rx_ns:+.1f}±{dt_rx_sigma:.1f}ns")
-                # Log but don't steer during warmup
-                if log_w:
-                    log_w.writerow([
-                        ts_str, target_sec, phc_sec, phc_nsec,
-                        phc_rounded_sec, epoch_offset, f'{timescale_error_ns:.1f}',
-                        extts_index, stale_pps_dropped, pps_queue_depth,
-                        f'{dt_rx_ns:.3f}', f'{dt_rx_sigma:.3f}',
-                        f'{pps_error_ns:.1f}', f'{qerr_ns:.3f}' if qerr_ns is not None else '',
-                        best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
-                        f'{adjfine_ppb:.3f}', phase, n_used, f'{gain_scale:.3f}',
-                        scheduler.interval, 0, int(watchdog.alarmed),
-                        f'{isb_ns.get("gal", 0):.3f}', f'{isb_ns.get("bds", 0):.3f}',
-                    ])
-                continue
-
-            # ── Bootstrap: step ────────────────────────────────────────
-            if phase == 'step':
-                # Use the best available error source for the step
-                total_offset_ns = epoch_offset * 1_000_000_000 + best.error_ns
-                log.info(f"  STEP: epoch_offset={epoch_offset}s, "
-                         f"source={best}, total={total_offset_ns:+.0f}ns")
-
-                import subprocess
-                adj_s = -total_offset_ns / 1_000_000_000
-                result = subprocess.run(
-                    ['/usr/sbin/phc_ctl', args.ptp_dev, '--',
-                     'adj', f'{adj_s:.9f}'],
-                    capture_output=True, text=True,
-                )
-                if result.returncode == 0:
-                    log.info(f"  phc_ctl adj {adj_s:.6f}s: {result.stdout.strip()}")
-                else:
-                    log.error(f"  phc_ctl adj failed (rc={result.returncode}): "
-                              f"{result.stderr.strip()} {result.stdout.strip()}")
-
-                pps_history.clear()
-                while True:
-                    try:
-                        pps_queue.get_nowait()
-                    except queue.Empty:
-                        break
-
-                # Reset servo, scheduler, and watchdog for clean start after step
-                servo = PIServo(BASE_KP, BASE_KI, max_ppb=caps['max_adj'])
-                scheduler = DisciplineScheduler(
-                    base_interval=args.discipline_interval,
-                    adaptive=args.adaptive_interval,
-                    min_interval=args.min_interval,
-                    max_interval=args.max_interval,
-                )
-                watchdog = PositionWatchdog(
-                    threshold_m=args.watchdog_threshold,
-                )
-                phase = 'tracking'
-                # Leave event histories intact; strict sink gate decides what
-                # is too old to match instead of draining queues ad hoc.
-                continue
 
             # ── Continuous tracking with competitive error sources ──────
             # Outlier rejection
@@ -939,6 +846,9 @@ def main():
                     help="Receiver model: f9t, f10t (default: f9t)")
     ap.add_argument("--baud", type=int, default=9600,
                     help="Serial baud rate (default: 9600)")
+    ap.add_argument("--port-type", default="USB",
+                    choices=["UART", "UART2", "USB", "SPI", "I2C"],
+                    help="Receiver port type for UBX message routing (default: USB)")
 
     # NTRIP (direct args or config file)
     ap.add_argument("--ntrip-conf", help="NTRIP config file (INI format)")
@@ -981,10 +891,6 @@ def main():
                     help="Minimum acceptable confidence for observation/PPS correlation")
 
     # Servo tuning
-    ap.add_argument("--warmup", type=int, default=20,
-                    help="Warmup epochs before steering (default: 20)")
-    ap.add_argument("--step-threshold", type=float, default=10000,
-                    help="Step clock if offset > this (ns, default: 10000)")
     ap.add_argument("--track-kp", type=float, default=0.3,
                     help="Tracking mode Kp gain (default: 0.3)")
     ap.add_argument("--track-ki", type=float, default=0.1,
