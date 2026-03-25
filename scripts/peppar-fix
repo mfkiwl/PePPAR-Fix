@@ -244,6 +244,31 @@ else
     echo "  Position file exists: $POSITION_FILE"
 fi
 
+# ── Step 2b: PHC bootstrap (if PTP device configured) ──────────────────── #
+# Sets PHC phase within ±10µs and frequency within ±10ppb so the engine's
+# servo can start PI tracking from epoch 1 with no warmup or step logic.
+
+if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
+    echo "=== peppar-fix: Step 2b — PHC bootstrap ==="
+    bootstrap_phc_args=(
+        --serial "$SERIAL"
+        --baud "$BAUD"
+        --port-type "$UBX_PORT"
+        --position-file "$POSITION_FILE"
+        --ptp-dev "$PTP_DEV"
+        --step-error-ns 10000
+    )
+    # shellcheck disable=SC2046
+    bootstrap_phc_args+=($(ntrip_args))
+    if "$PYTHON_BIN" "$SCRIPT_DIR/phc_bootstrap.py" "${bootstrap_phc_args[@]}"; then
+        echo "  PHC bootstrap complete"
+    else
+        echo "  PHC bootstrap failed (non-fatal, engine will start without it)"
+    fi
+else
+    echo "  No PTP device — skipping PHC bootstrap"
+fi
+
 # ── Step 3: Run servo with retry logic ──────────────────────────────────── #
 
 echo "=== peppar-fix: Step 3 — Unified engine ==="
