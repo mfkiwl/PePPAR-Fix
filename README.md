@@ -8,6 +8,41 @@ carrier-phase corrections.
 
 *"Arr" = Ambiguity Resolution (and pirates).*
 
+## System structure
+
+```
+peppar-fix (orchestration)
+│
+├── Cold boot (no state files)
+│   └── Bootstrap position → save position file
+│   └── Bootstrap PHC → save drift file, characterization
+│
+├── Warm boot (state files exist, sanity-checked)
+│   └── Load position, verify against live LS fix
+│   └── Bootstrap PHC phase + frequency from PPS
+│
+└── Engine (always runs after boot)
+    ├── Observations: serial reader (UBX RAWX, SFRBX, TIM-TP)
+    ├── Corrections: NTRIP streams (broadcast eph, SSR orbits/clocks/biases)
+    ├── EKF: FixedPosFilter (clock + ISBs, 1 Hz)
+    ├── EKF: fine position refinement (slow, mm-level, future AR)
+    ├── Position watchdog (detect antenna movement)
+    ├── NTRIP caster output (bootstrap peers)
+    └── PHC servo (optional, when --servo /dev/ptpN)
+        ├── Error sources compete: PPS, PPS+qErr, PPS+PPP
+        ├── PI controller → adjfine()
+        └── Adaptive discipline interval (M7)
+```
+
+The engine runs with or without a PHC. Without `--servo`, it still combines
+observations with corrections, runs the EKFs, refines position, and can
+serve as an NTRIP caster. With `--servo`, the PHC discipline loop runs
+as one more consumer of the engine's output.
+
+Bootstrap (`phc_bootstrap.py`) guarantees the PHC starts within ±10 us
+phase and ±10 ppb frequency, so the engine's servo has no warmup or step
+logic — PI tracking begins from epoch 1.
+
 ## Why this exists
 
 The best PPS-based PHC discipline (SatPulse with qErr correction) achieves
