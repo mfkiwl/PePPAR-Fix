@@ -111,12 +111,29 @@ the correct port or observations won't arrive on the host.
 
 ## Hardware variants
 
-Two F9T hardware revisions exist in the lab:
+Two F9T firmware generations exist in the lab.  The key difference:
+**TIM 2.20 NAKs L5/E5a/B2a signal config keys** — it only accepts L2C/E5b/B2.
+TIM 2.25 (-20B module) accepts both L5 and L2C configs.
 
-| Variant | Module | Bands | L5 support | Notes |
-|---------|--------|-------|------------|-------|
-| ZED-F9T-00B | Original | L1+L2 or L1+L5 | Yes (with health override) | EVK-F9T boards |
-| ZED-F9T-20B | Updated | L1+L2 or L1+L5 | Yes (with health override) | -20B variant, no GLONASS |
+| | ocxo (E810) | PiPuss | TimeHat |
+|---|---|---|---|
+| **MOD** | ZED-F9T | ZED-F9T | ZED-F9T-20B |
+| **FWVER** | TIM 2.20 | TIM 2.20 | TIM 2.25 |
+| **PROTVER** | 29.20 | 29.20 | 29.25 |
+| **ROM** | 0x118B2060 | 0x118B2060 | 0x3BFC8935 |
+| **Constellations** | GPS;GLO;GAL;BDS | GPS;GLO;GAL;BDS | GPS;GAL;BDS (no GLO) |
+| **Second freq** | L2C, E5b, B2 only | L2C, E5b, B2 only | L5, E5a, B2a (preferred); also L2C |
+| **L5 signal config** | NAK | NAK (assumed) | OK |
+| **Transport** | I2C (/dev/gnss0, kernel) | USB serial | USB serial |
+| **Host** | x86 E810-XXVDA4T, OCXO | Raspberry Pi 4 | Raspberry Pi 4, i226 |
 
-Both variants support dual-frequency L1+L5 operation. The signal
-configuration code works identically on both.
+### Auto-detection in peppar-fix
+
+`ensure_receiver_ready()` handles this automatically:
+1. Tries L5 signal config (F9TL5Driver)
+2. If NAK'd, falls back to L2C (F9TDriver)
+3. Returns the appropriate driver for the detected signal plan
+
+No profile or manual configuration is needed — the receiver's firmware
+response determines which driver is used.  PROTVER is available in the
+driver object for code that needs to branch on firmware generation.
