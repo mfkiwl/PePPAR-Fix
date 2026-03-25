@@ -318,19 +318,35 @@ def pps_calibrate_lag(ptp_dev, extts_channel, pps_pin, program_pin,
         ptp.close()
         return None, None, 0
 
-    # Sweep: set PHC with several lag values, capture PPS phase error at
-    # each.  phase_error = ε + L - true_lag (where ε = NTP error, constant
-    # during the sweep).  Linear fit gives true_lag = L at phase_error = 0.
+    # PPS-anchored sweep: capture a PPS event first to establish the anchor
+    # (what the PHC should read at the PPS edge), then set the PHC with
+    # various lag values using CLOCK_REALTIME as transfer standard.
+    # The NTP error cancels in the transfer (appears in both pps_realtime
+    # and rt_ref, subtracted out).
     #
-    # Each trial does a SINGLE clock_settime (no retry) to avoid retry
-    # loop distortion.  The PPS EXTTS gives the unbiased phase reading.
+    # For each lag value L:
+    #   aim = pps_anchor + (rt_ref - pps_realtime) + L
+    #   At next PPS: phase_error = L - true_lag  (NTP cancels)
+    #   Zero crossing: L = true_lag
     sweep_points = []
     lag_values = [0, 50000, 100000, 150000, 200000, 250000]
     for lag_test in lag_values:
         phases = []
         for _ in range(max(2, n_trials // len(lag_values))):
+            # Capture fresh PPS anchor each iteration
+            evt_anchor = ptp.read_extts(timeout_ms=2000)
+            if evt_anchor is None:
+                continue
+            pps_realtime = time.clock_gettime_ns(time.CLOCK_REALTIME)
+            a_sec, a_nsec = evt_anchor[0], evt_anchor[1]
+            a_rounded = a_sec if a_nsec < 500_000_000 else a_sec + 1
+            a_utc = round(pps_realtime / 1_000_000_000)
+            pps_anchor = (a_utc + offset_s) * 1_000_000_000
+
+            # Set PHC using transfer standard: aim = anchor + elapsed + L
             rt_ref = time.clock_gettime_ns(time.CLOCK_REALTIME)
-            ptp.set_phc_ns(rt_ref + offset_ns + lag_test)
+            aim = pps_anchor + (rt_ref - pps_realtime) + lag_test
+            ptp.set_phc_ns(aim)
 
             evt = ptp.read_extts(timeout_ms=2000)
             if evt is None:
