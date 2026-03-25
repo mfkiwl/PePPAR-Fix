@@ -116,7 +116,7 @@ class NtripStream:
             f"GET /{self.mountpoint} HTTP/1.0\r\n"
             f"Host: {self.caster}:{self.port}\r\n"
             f"Ntrip-Version: Ntrip/2.0\r\n"
-            f"User-Agent: PePPAR-Fix/0.4\r\n"
+            f"User-Agent: NTRIP PePPAR-Fix/0.5\r\n"
         )
 
         if self.user and self.password:

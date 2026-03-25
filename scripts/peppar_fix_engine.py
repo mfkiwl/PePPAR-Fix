@@ -492,7 +492,7 @@ def wait_for_ephemeris(beph, stop_event, systems=None, timeout_s=120):
         time.sleep(1)
         if int(time.time() - warmup_start) % 10 == 0:
             log.info(f"  Warmup: {beph.summary()}")
-    log.info(f"Warmup complete: {beph.summary()}")
+    log.info(f"Broadcast ephemeris ready: {beph.summary()}")
     return True
 
 
@@ -822,6 +822,14 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 log.info(f"  [{n_epochs}] Dropped {dropped_obs} expired observation epochs")
             skip_stats["obs_dropped_expired"] += dropped_obs
             gps_time, observations = obs_event
+
+            # After a PHC step, the filter's clock state is stale.
+            # Reset dt_rx to near-zero so the servo doesn't over-correct.
+            if servo_ctx and servo_ctx.pop('filter_needs_clock_reset', False):
+                filt.x[filt.IDX_CLK] = 0.0
+                filt.P[filt.IDX_CLK, filt.IDX_CLK] = 2500.0 ** 2
+                prev_t = None
+                log.info("  EKF clock state reset after PHC step")
 
             # EKF predict
             if prev_t is not None:
@@ -1216,8 +1224,14 @@ def _phc_gps_offset_s(phc_sec, phc_nsec, gps_unix_sec):
 
 
 def _target_timescale_sec(gps_time, args):
-    """Map a RAWX GPS epoch to the requested PHC timescale."""
-    gps_sec = int(round(gps_time.timestamp()))
+    """Map a RAWX GPS epoch to the PPS second it aligns with.
+
+    RAWX rcvTow is typically ~N.997 — just before the integer second.
+    The PPS edge that aligns with this epoch is second N (floor), not
+    N+1 (round).  Using round() here introduces a systematic +1s error
+    in the epoch_offset calculation.
+    """
+    gps_sec = int(gps_time.timestamp())  # floor, not round
     if args.phc_timescale == "gps":
         return gps_sec
     if args.phc_timescale == "utc":
@@ -1513,16 +1527,22 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
 
     # Step phase
     if ctx['phase'] == 'step':
-        total_offset_ns = epoch_offset * 1_000_000_000 + best.error_ns
-        step_bias_ns = args.phase_step_bias_ns or 0.0
-        compensated_offset_ns = total_offset_ns - step_bias_ns
-        log.info(f"  STEP: epoch_offset={epoch_offset}s, "
-                 f"source={best}, total={total_offset_ns:+.0f}ns "
-                 f"bias={step_bias_ns:+.0f}ns "
-                 f"compensated={compensated_offset_ns:+.0f}ns")
-
+        # Use timescale_error_ns for the step, not best.error_ns.
+        # timescale_error_ns is the raw PHC-to-target offset from PPS capture.
+        # best.error_ns includes the PPP filter's dt_rx (receiver clock state)
+        # which should NOT be corrected by a PHC step — the filter tracks it.
+        step_offset_ns = timescale_error_ns
         import subprocess
+
+        step_bias_ns = args.phase_step_bias_ns or 0.0
+        compensated_offset_ns = step_offset_ns - step_bias_ns
         adj_s = -compensated_offset_ns / 1_000_000_000
+        log.info(f"  STEP (adj): epoch_offset={epoch_offset}s, "
+                 f"timescale_error={timescale_error_ns:+.0f}ns "
+                 f"pps_error={pps_error_ns:+.0f}ns "
+                 f"bias={step_bias_ns:+.0f}ns "
+                 f"compensated={compensated_offset_ns:+.0f}ns "
+                 f"adj={adj_s:+.9f}s")
         result = subprocess.run(
             ['/usr/sbin/phc_ctl', args.servo, '--',
              'adj', f'{adj_s:.9f}'],
@@ -1533,9 +1553,15 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         else:
             log.error(f"  phc_ctl adj failed: {result.stderr.strip()}")
 
+        # Zero frequency correction so PHC doesn't drift during cooldown.
+        ctx['ptp'].adjfine(0.0)
+        ctx['adjfine_ppb'] = 0.0
+
         _purge_pps_state(ctx)
 
-        # Reset servo and scheduler
+        # Reset servo, scheduler, and signal the outer loop to reset the
+        # EKF clock state.  After a PHC step, the filter's dt_rx is stale
+        # and will drive the servo to over-correct if not reset.
         from peppar_fix import PIServo, DisciplineScheduler
         ctx['servo'] = PIServo(BASE_KP, BASE_KI, max_ppb=ctx['caps']['max_adj'])
         servo = ctx['servo']
@@ -1549,6 +1575,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             unconverge_factor=args.scheduler_unconverge_factor,
         )
         scheduler = ctx['scheduler']
+        ctx['filter_needs_clock_reset'] = True
+        ctx['post_step_cooldown'] = 30  # epochs to skip frequency corrections
         ctx['phase'] = 'tracking'
         ctx['tracking_mode'] = 'pull_in'
         ctx['ticc_prev_error_ns'] = None
@@ -1586,13 +1614,17 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     scheduler.accumulate(best.error_ns, best.confidence_ns, best.name)
 
     if TRACK_RESTEP_NS is not None:
-        if abs(best.error_ns) >= TRACK_RESTEP_NS:
+        # Use pps_error_ns (raw PHC fractional offset) for the restep
+        # check, not best.error_ns which includes the filter's dt_rx.
+        # After a step, dt_rx is stale and large while the filter
+        # reconverges — checking it would cause spurious resteps.
+        if abs(pps_error_ns) >= TRACK_RESTEP_NS:
             ctx['tracking_large_error_count'] += 1
         else:
             ctx['tracking_large_error_count'] = 0
         if ctx['tracking_large_error_count'] >= 3:
             log.warning(
-                "  Tracking error persisted above %.0fns for %d epochs; re-entering step",
+                "  PHC error persisted above %.0fns for %d epochs; re-entering step",
                 TRACK_RESTEP_NS,
                 ctx['tracking_large_error_count'],
             )
@@ -1600,11 +1632,25 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             ctx['tracking_large_error_count'] = 0
             return "restep"
 
+    # TODO(ta-e744, ta-7j06): Re-enable timescale restep once the step
+    # source is GNSS-derived (not system clock).  The PI servo tracks
+    # frequency well from any starting phase; absolute phase alignment
+    # requires a reliable step source.
+
     if ctx['prev_source'] != best.name:
         if ctx['prev_source'] is not None:
             log.info(f"  Source: {ctx['prev_source']} → {best.name} "
                      f"(confidence {best.confidence_ns:.1f}ns)")
         ctx['prev_source'] = best.name
+
+    # Post-step cooldown: skip frequency corrections while the filter
+    # reconverges.  Without this, stale dt_rx drives the servo to
+    # over-correct, undoing the step.
+    cooldown = ctx.get('post_step_cooldown', 0)
+    if cooldown > 0:
+        ctx['post_step_cooldown'] = cooldown - 1
+        scheduler.flush()  # drain accumulated samples
+        return "cooldown"
 
     if scheduler.should_correct():
         avg_error, avg_confidence, n_samples = scheduler.flush()
@@ -2187,7 +2233,7 @@ Two-phase operation:
     if args.extts_channel is None:
         args.extts_channel = 0
     if args.phc_timescale is None:
-        args.phc_timescale = "utc"
+        args.phc_timescale = "tai"
     if args.max_broadcast_age_s is None:
         args.max_broadcast_age_s = 30.0
     if args.require_ssr is None:

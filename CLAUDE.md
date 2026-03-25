@@ -16,6 +16,7 @@ passwordless for user `bob`.
 | Onocoy | `ssh Onocoy.local` | F10T, PX1125T, TICC #2 | F10T on `/dev/f10t`, PX1125T on `/dev/ttyUSB0` | F10T uses ArduSimple FTDI, not CDC ACM |
 | otcBob1 | `ssh otcBob1` | Timebeat OTC SBC, OCXO, Renesas ClockMatrix | F9T on `/dev/ttyAMA0` at 460800 | Stop `timebeat` before accessing I2C or GNSS |
 | ptBoat | `ssh ptBoat` | Timebeat OTC Mini PT, weatherproof, PoE | F9T on `/dev/ttyAMA0` at 115200 | Same Renesas ClockMatrix as otcBob1 |
+| ocxo | `ssh ocxo` | E810-XXVDA4T x86 host, OCXO, DPLL | F9T on `/dev/gnss0` (kernel, I2C) | PHC at `/dev/ptp1`, trusted net + PTP net |
 | bbb | `ssh bbb` | BeagleBone, GPS L1 only | `/dev/gps0` at 9600 | Legacy NTP/PTP GM |
 
 **Hostname resolution**: Try `<host>` first (DNS search domain VanValzah.Com).
@@ -171,6 +172,31 @@ TimeHAT v5 TCXO with heatsink: TDEV(1s) = 100-130 ps free-running.
 This is the discipline floor — the PHC cannot be quieter at tau=1s.
 The F9T PPS sawtooth is 1.6-1.7 ns TDEV(1s) during "jumpy" periods,
 0.7 ns during "smooth ramp" periods.
+
+## Design Documentation
+
+The `docs/` directory contains design documents and research notes. Start
+here before changing anything in the areas they cover.
+
+| File | Summary |
+|---|---|
+| [stream-timescale-correlation.md](docs/stream-timescale-correlation.md) | **Read this first.** How to correctly correlate events from independent timescales (GNSS, PPS, TICC, NTRIP). Covers why queue-order matching fails, the strict correlation gate design, confidence scoring, and fault injection testing. |
+| [full-data-flow.md](docs/full-data-flow.md) | Complete inventory of live data sources, their timescales, sink policies (freshest-only vs loss-free vs correlated-window), freshness requirements, and decimation effects. |
+| [platform-support.md](docs/platform-support.md) | Per-platform status for TimeHat (i226) and ocxo (E810). Documents device paths, PHC behavior, GNSS transport differences, and bring-up checklists. |
+| [time-and-platform-todo.md](docs/time-and-platform-todo.md) | Concrete work breakdown: remaining tasks for E810 GNSS, TimeHat PPS, correlation model, legacy cleanup, diagnostics. |
+| [timebeat-otc-research.md](docs/timebeat-otc-research.md) | Renesas 8A34002 ClockMatrix research: I2C access, DPLL modes, TDC phase measurement, clock tree configuration. Essential for Timebeat OTC work. |
+| [timebeat-otc-signal-routing.md](docs/timebeat-otc-signal-routing.md) | Signal flow architecture: which DPLLs drive which outputs, DPLL mode mapping, how to open the loop for software steering. |
+| [data-flow.md](docs/data-flow.md) | Original data flow sketch (superseded by full-data-flow.md for sink policy details). |
+| [position-convergence.md](docs/position-convergence.md) | PPP position bootstrap convergence analysis and tuning. |
+| [nic-survey.md](docs/nic-survey.md) | Survey of NICs with PTP hardware timestamping support. |
+| [e810-cm5-research.md](docs/e810-cm5-research.md) | E810 on Raspberry Pi CM5: showstopper (ice driver x86-only). |
+| [phc-initialization.md](docs/phc-initialization.md) | PHC bootstrap design: cold/warm start, frequency/phase initialization, characterization method, drift file, how the servo starts with bounded error. |
+| [correction-sources.md](docs/correction-sources.md) | How to get SSR corrections: registration, caster options, which streams for float PPP vs PPP-AR, why AR requires a single analysis center. |
+| [galileo-has-research.md](docs/galileo-has-research.md) | Galileo HAS: free PPP-AR corrections via E6-B signal. |
+| [peer-bootstrap-sketch.md](docs/peer-bootstrap-sketch.md) | NTRIP caster mode for peer-to-peer bootstrap. |
+| [ticc-calibration-2026-03-19.md](docs/ticc-calibration-2026-03-19.md) | TICC calibration procedure and results. |
+| [hw-labels.md](docs/hw-labels.md) | Hardware labeling conventions for beads. |
+| [draft-dupage-inquiry.md](docs/draft-dupage-inquiry.md) | Draft inquiry to DuPage County about GNSS antenna siting. |
 
 ## Lab Documentation Pointers
 
