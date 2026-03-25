@@ -445,20 +445,20 @@ def main():
         log.info("Step result: residual=%+.0f ns, attempts=%d, %s",
                  residual, attempts, "HIT" if met else "TIMEOUT")
 
-        # Close the loop: capture fresh PPS events to confirm the step.
-        # The PPS edge IS the ground truth — the readback residual above
-        # is consistent but PPS is the independent check.
-        log.info("Verifying step with fresh PPS capture...")
+        # PPS feedback loop: the PPS edge is ground truth.  Readback
+        # (PTP_SYS_OFFSET) has ~100µs asymmetry, so we can't rely on it
+        # for absolute accuracy.  Instead, capture PPS, measure the real
+        # error, and correct iteratively.  Converges in 2-3 PPS cycles.
         ptp.enable_extts(args.extts_channel, rising_edge=True)
         last_verify_error = None
-        for i in range(3):
+        current_lag = args.settime_lag_ns
+        max_pps_iterations = 5
+        for iteration in range(max_pps_iterations):
+            # Capture one PPS event to measure actual phase error
             evt = ptp.read_extts(timeout_ms=2000)
             if evt is None:
-                log.warning("  PPS verify [%d]: no event", i + 1)
+                log.warning("  PPS verify [%d]: no event", iteration + 1)
                 continue
-            # Use CLOCK_REALTIME as transfer standard to identify
-            # the PPS second (phase error < 0.5s from NTP — fine for
-            # whole-second identification).
             v_realtime_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
             v_sec, v_nsec = evt[0], evt[1]
             v_rounded = v_sec if v_nsec < 500_000_000 else v_sec + 1
@@ -467,25 +467,29 @@ def main():
             v_sub_ns = v_nsec if v_nsec < 500_000_000 else v_nsec - 1_000_000_000
             last_verify_error = v_epoch_off * 1_000_000_000 + v_sub_ns
             log.info("  PPS verify [%d]: %+.0f ns (epoch_offset=%d)",
-                     i + 1, last_verify_error, v_epoch_off)
-            # Update anchor for any retry: this PPS edge is fresher
+                     iteration + 1, last_verify_error, v_epoch_off)
+
+            if abs(last_verify_error) <= args.step_error_ns:
+                break  # within tolerance
+
+            # Accumulate correction: adjust lag from CURRENT value by
+            # the measured PPS error.  If PHC is behind (error < 0),
+            # increase lag; if ahead (error > 0), decrease lag.
             pps_anchor_ns = v_target * 1_000_000_000
             pps_realtime_ns = v_realtime_ns
-        ptp.disable_extts(args.extts_channel)
-
-        if last_verify_error is not None and abs(last_verify_error) > args.step_error_ns:
-            log.warning("Post-step PPS shows %+.0f ns error — retrying step",
-                        last_verify_error)
-            residual, attempts, met = ptp.step_to(
+            current_lag = current_lag - last_verify_error
+            log.info("  Correcting: lag → %d ns (PPS error %+.0f ns)",
+                     current_lag, last_verify_error)
+            ptp.step_to(
                 pps_anchor_ns=pps_anchor_ns,
                 pps_realtime_ns=pps_realtime_ns,
                 target_error_ns=args.step_error_ns,
                 max_time_ms=args.step_budget_ms,
-                settime_lag_ns=args.settime_lag_ns,
+                settime_lag_ns=current_lag,
             )
-            log.info("Retry result: residual=%+.0f ns, attempts=%d, %s",
-                     residual, attempts, "HIT" if met else "TIMEOUT")
-        elif last_verify_error is not None:
+        ptp.disable_extts(args.extts_channel)
+
+        if last_verify_error is not None and abs(last_verify_error) <= args.step_error_ns:
             log.info("Post-step PPS verified: %+.0f ns", last_verify_error)
     else:
         log.info("Phase OK (%+.0f ns) — leaving PHC time alone", phase_error_ns)

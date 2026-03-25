@@ -306,6 +306,12 @@ class PtpDevice:
         deadline = time.monotonic() + max_time_ms / 1000.0
         attempts = 0
 
+        # When PPS-calibrated lag is active, readback (PTP_SYS_OFFSET)
+        # has a different asymmetry than PPS truth.  The retry loop
+        # cannot converge on PPS accuracy using readback — single-shot
+        # the lag-compensated aim and let PPS verification handle it.
+        single_shot = (settime_lag_ns != 0 and pps_anchor_ns is not None)
+
         while True:
             attempts += 1
             if pps_anchor_ns is not None:
@@ -326,6 +332,9 @@ class PtpDevice:
             else:
                 # Static target: simple comparison (for characterization)
                 residual_ns = phc_after - target_ns
+
+            if single_shot:
+                return residual_ns, attempts, True
 
             if abs(residual_ns) < target_error_ns:
                 return residual_ns, attempts, True

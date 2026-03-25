@@ -69,6 +69,7 @@ def run_bootstrap(args, extra_args=None):
         "--drift-file", args.drift_file,
         "--epochs", str(args.epochs),
         "--step-error-ns", str(args.step_error_ns),
+        "--settime-lag-ns", str(args.settime_lag_ns),
     ]
     if args.program_pin:
         cmd.append("--program-pin")
@@ -192,14 +193,18 @@ def test_good_phase_bad_freq(args):
     # Get to good state first
     setup_good_state(args)
 
-    # Inject frequency error: open PTP briefly for fault injection
-    print("  Injecting frequency fault: +5000 ppb...")
+    # Inject frequency error: must be large enough to trigger correction
+    # (> freq_tolerance_ppb, default 10) but small enough that drift over
+    # the ~25s bootstrap window stays within step_error_ns.
+    # 100 ppb * 25s = 2500 ns drift — well within 10µs threshold.
+    freq_fault_ppb = 100.0
+    print(f"  Injecting frequency fault: +{freq_fault_ppb} ppb...")
     ptp = PtpDevice(args.ptp_dev)
-    ptp.adjfine(5000.0)
+    ptp.adjfine(freq_fault_ppb)
     ptp.close()
 
     # Write a drift file that reflects the bad frequency
-    write_drift(args.drift_file, 5000.0, args.ptp_dev)
+    write_drift(args.drift_file, freq_fault_ppb, args.ptp_dev)
 
     # Run bootstrap
     print("  Running bootstrap (expecting frequency set only)...")
@@ -237,11 +242,12 @@ def test_bad_phase_bad_freq(args):
     ptp = PtpDevice(args.ptp_dev)
     target_sec = _random.randint(0, 2**31 - 1)
     ptp.set_phc_ns(target_sec * 1_000_000_000)
-    print("  Injecting frequency fault: +5000 ppb...")
-    ptp.adjfine(5000.0)
+    freq_fault_ppb = 5000.0
+    print(f"  Injecting frequency fault: +{freq_fault_ppb} ppb...")
+    ptp.adjfine(freq_fault_ppb)
     ptp.close()
 
-    write_drift(args.drift_file, 5000.0, args.ptp_dev)
+    write_drift(args.drift_file, freq_fault_ppb, args.ptp_dev)
 
     # Run bootstrap
     print("  Running bootstrap (expecting both interventions)...")
@@ -279,8 +285,10 @@ def main():
     ap.add_argument("--phc-timescale", default="tai")
     ap.add_argument("--drift-file", default="data/drift-test.json")
     ap.add_argument("--epochs", type=int, default=10)
-    ap.add_argument("--step-error-ns", type=int, default=50000,
-                    help="Phase sanity threshold in ns (default: 50000 for i226)")
+    ap.add_argument("--step-error-ns", type=int, default=10000,
+                    help="Phase sanity threshold in ns (default: 10000)")
+    ap.add_argument("--settime-lag-ns", type=int, default=0,
+                    help="Mean clock_settime-to-PHC landing lag in ns (from characterization)")
     ap.add_argument("--tests", default="1,2,3,4",
                     help="Comma-separated test numbers to run (default: 1,2,3,4)")
     args = ap.parse_args()
