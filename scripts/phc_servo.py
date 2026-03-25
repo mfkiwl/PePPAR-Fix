@@ -260,21 +260,14 @@ def run_servo(args):
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    # ── Receiver driver: verify config on open ─────────────────────────
-    # The F9T stores config in three layers (RAM, BBR, Flash).
-    # configure_f9t.py writes all three, so config survives power cycles.
-    # But DTR toggles on serial open can reset RAM, so we verify here
-    # and reconfigure if needed.  This is our defensive stance:
-    # never assume the receiver is configured; always verify.
-    from peppar_fix.receiver import ensure_receiver_ready
+    # ── Receiver driver ──────────────────────────────────────────────────
+    # TODO(pf-vqq): verify config on open via ensure_receiver_ready once
+    # the exclusive_io lock bug is fixed.  For now, trust that bootstrap
+    # or configure_f9t.py has set up the receiver correctly.
+    from peppar_fix.receiver import get_driver
     systems = set(args.systems.split(',')) if args.systems else None
-    driver = ensure_receiver_ready(
-        args.serial, args.baud, port_type=args.port_type, systems=systems)
-    if driver is None:
-        log.error("Receiver not producing dual-frequency observations — "
-                  "cannot proceed. Run configure_f9t.py first.")
-        return
-    log.info(f"Receiver: {driver.name}")
+    driver = get_driver(args.receiver)
+    log.info(f"Receiver: {driver.name} (PROTVER {driver.protver})")
 
     # ── Resolve position: --known-pos > position file > error ────────────
     position_source = None  # tracks where the position came from
@@ -319,6 +312,7 @@ def run_servo(args):
     # Configure SDP pin for extts
     extts_channel = args.extts_channel
     if args.program_pin and caps['n_pins'] > 0:
+        from peppar_fix.ptp_device import PTP_PF_EXTTS
         try:
             ptp.set_pin_function(args.extts_pin, PTP_PF_EXTTS, extts_channel)
         except OSError:
