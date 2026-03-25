@@ -97,41 +97,63 @@ Compare the filter's clock estimate to the PHC's PPS timestamp:
   readback residual is within this bound. If the time budget expires
   first, accept the best attempt so far.
 
-The step function repeatedly sets the PHC and reads it back. Each
-`clock_settime` overwrites the PHC — there is no "keeping the best."
-If the readback meets the target, stop and accept. If not, try
-again (the previous result is already gone). If the time budget
-expires, we're stuck with whatever the last attempt left.
+### Step target derivation
 
-This means the target must be realistic for the NIC. Too tight and
-we timeout, stuck with a random last attempt that could be worse
-than what we'd have gotten with a looser target. Too loose and we
-accept on the first try without benefiting from retry.
+The value passed to `clock_settime()` is:
+
+```
+V = PHC_pps + (RT_now − RT_pps) + λ
+```
+
+Where:
+- `PHC_pps` = what the PHC should read at the PPS edge (target_sec × 10⁹)
+- `RT_pps` = `clock_gettime(CLOCK_REALTIME)` captured at PPS
+- `RT_now` = `clock_gettime(CLOCK_REALTIME)` just before `clock_settime()`
+- `λ` = mean `clock_settime()` call-to-PHC-landing lag (`--settime-lag-ns`)
+
+**CLOCK_REALTIME as transfer standard:** The NTP phase error `ε` appears
+in both `RT_pps` and `RT_now` and cancels in the subtraction:
+
+```
+RT_now − RT_pps = (UTC_now + ε) − (UTC_pps + ε) = UTC_now − UTC_pps
+```
+
+The residual error is CLOCK_REALTIME's *frequency* error (< 1 ppb from
+NTP) times the transfer interval — negligible over seconds.  See
+`docs/stream-timescale-correlation.md` Rule 6 for the full principle
+and patrol guidance.
+
+**Why λ matters:** `clock_settime()` doesn't land instantly.  The value
+appears on the PHC hardware `λ` nanoseconds after the call.  We aim
+`λ` into the future so the PHC reads the correct time at the moment
+the write completes.
+
+**Why the readback-based residual is biased:** The readback uses
+`PTP_SYS_OFFSET` which has a systematic asymmetry — the system clock
+midpoint doesn't perfectly correspond to the PHC snapshot.  On the
+i226, this asymmetry is ~177 µs.  The characterization script
+(`characterize_phc_step.py`) measures λ relative to its own readback,
+so it reports ~23 µs — the remaining ~177 µs is invisible to it.
+Only PPS (a hardware latch, no software asymmetry) reveals the true
+combined lag.
+
+**Calibrating λ from PPS:** Run bootstrap with several `--settime-lag-ns`
+values and plot PPS verify error vs. lag.  The zero crossing is the
+correct λ.  For the i226 on TimeHat: **λ ≈ 200 µs** (PPS verify
+lands at ±5 µs).  The readback residual at this lag is ~+65 µs, so
+`--step-error-ns` must be ≥ 200000 to avoid futile retries.
 
 **Measured step accuracy (2026-03-24):**
 
 Neither NIC supports `PTP_SYS_OFFSET_PRECISE`; both use the
 `PTP_SYS_OFFSET` fallback.
 
-With retry (target=5000 ns, budget=500 ms):
+With PPS-calibrated lag (λ=200 µs on i226):
 
-| NIC | Hit rate | Avg attempts | Mean residual | Stdev |
-|-----|----------|-------------|---------------|-------|
-| i226 (TimeHat) | 100% | ~1 | +216 ns | 2.2 µs |
-| E810 (ocxo) | 100% | 5.3 | +1,397 ns | 2.8 µs |
-
-With tighter target (500 ns, budget=500 ms):
-
-| NIC | Hit rate | Avg attempts | Timeout residual |
-|-----|----------|-------------|-----------------|
-| i226 (TimeHat) | 100% | 4.9 | — |
-| E810 (ocxo) | 70% | 34.1 | mean 19 µs, max 25 µs |
-
-The 500 ns target is too tight for the E810 — 30% of trials
-timeout and land at ~19 µs, worse than the 5 µs target. The
-5000 ns target is the right default: both NICs hit it 100% of the
-time. Per-PHC override can tighten this when characterization
-shows the NIC can do better (i226 can reliably hit 500 ns).
+| NIC | Step PPS verify | Freq after correction | Bless on 2nd run? |
+|-----|----------------|----------------------|-------------------|
+| i226 (TimeHat) | ±5 µs | 0.0 ±1.5 ppb | Yes |
+| E810 (ocxo) | Not yet calibrated | — | — |
 
 ## PHC characterization
 
