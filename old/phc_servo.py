@@ -461,8 +461,8 @@ def run_servo(args):
 
     # During convergence (large error), ensure minimum gain aggressiveness
     # so pull-in doesn't stall at PPS-only quality
-    CONVERGE_ERROR_NS = 500        # above this, boost gains
-    CONVERGE_MIN_SCALE = 2.0       # minimum gain scale during convergence
+    CONVERGE_ERROR_NS = 1_000_000   # effectively disabled — bootstrap handles convergence
+    CONVERGE_MIN_SCALE = 2.0       # minimum gain scale during convergence (unused with high threshold)
 
     servo = PIServo(BASE_KP, BASE_KI, max_ppb=caps['max_adj'])
     scheduler = DisciplineScheduler(

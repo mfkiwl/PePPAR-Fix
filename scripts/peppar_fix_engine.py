@@ -681,7 +681,15 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
     lat, lon, alt = ecef_to_lla(known_ecef[0], known_ecef[1], known_ecef[2])
     log.info(f"Position: {lat:.6f}, {lon:.6f}, {alt:.1f}m")
 
+    # Seed filter at dt_rx=0 — bootstrap guarantees PHC is within ±10µs
+    # of truth, so the receiver clock residual at the PPS edge is near zero.
+    # This makes sigma an honest convergence metric (starts large, shrinks
+    # as filter converges) instead of instantly collapsing on the raw
+    # receiver clock offset from pseudorange seeding.
     filt = FixedPosFilter(known_ecef)
+    filt.x[filt.IDX_CLK] = 0.0
+    filt.P[filt.IDX_CLK, filt.IDX_CLK] = 100.0 ** 2  # 100m ≈ 333ns 1σ
+    filt.initialized = True  # skip pseudorange seeding
     filt.prev_clock = 0.0
     watchdog = PositionWatchdog(threshold_m=args.watchdog_threshold)
     correction_gate = CorrectionFreshnessGate()
@@ -962,8 +970,9 @@ def _setup_servo(args, known_ecef, qerr_store):
     log.info(f"PHC: {args.servo}, max_adj={caps['max_adj']} ppb, "
              f"n_extts={caps['n_ext_ts']}, n_pins={caps['n_pins']}")
 
-    ptp.adjfine(0.0)
-    log.info("PHC adjfine reset to 0")
+    # Preserve adjfine from bootstrap — don't reset to 0.
+    current_adj = ptp.read_adjfine()
+    log.info("PHC adjfine at start: %.1f ppb", current_adj)
 
     # Import PTP constants for pin setup
     from peppar_fix.ptp_device import PTP_PF_EXTTS
@@ -1131,11 +1140,10 @@ def _setup_servo(args, known_ecef, qerr_store):
         'caps': caps,
         'log_f': log_f,
         'log_w': log_w,
-        'phase': 'warmup',
-        'adjfine_ppb': 0.0,
+        'phase': 'tracking',
+        'adjfine_ppb': current_adj,
         'gain_scale': 1.0,
         'prev_source': None,
-        'warmup_epochs': args.warmup,
         'tmode_set': False,
         'position_saved': False,
         'compute_error_sources': compute_error_sources,
@@ -1194,7 +1202,7 @@ def _enter_obs_holdover(ctx, args, reason_code, detail):
         settle_window=args.scheduler_settle_window,
         unconverge_factor=args.scheduler_unconverge_factor,
     )
-    ctx['phase'] = 'warmup'
+    ctx['phase'] = 'tracking'
     ctx['tracking_large_error_count'] = 0
     ctx['tracking_mode'] = 'pull_in'
     ctx['ticc_prev_error_ns'] = None
@@ -1295,13 +1303,14 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     ticc_only_error_source = ctx.get('ticc_only_error_source')
     skip_stats = ctx.get('skip_stats')
 
-    STEP_THRESHOLD_NS = 10_000
     BASE_KP = args.track_kp
     BASE_KI = args.track_ki
     GAIN_REF_SIGMA = args.gain_ref_sigma
     GAIN_MIN_SCALE = args.gain_min_scale
     GAIN_MAX_SCALE = args.gain_max_scale
-    CONVERGE_ERROR_NS = args.converge_error_ns
+    # Convergence boost disabled — bootstrap handles convergence.
+    # The boost caused oscillation with gentle gains (overnight run 2026-03-25).
+    CONVERGE_ERROR_NS = 1_000_000
     CONVERGE_MIN_SCALE = args.converge_min_scale
     TRACK_RESTEP_NS = args.track_restep_ns
     TRACK_OUTLIER_NS = args.track_outlier_ns
@@ -1322,8 +1331,9 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
 
         if not ctx['tmode_set'] and sigma_m < 0.1:
             try:
-                from phc_servo import build_tmode_fixed_msg
-                tmode_msg = build_tmode_fixed_msg(known_ecef)
+                from peppar_fix.receiver import get_driver as _get_driver
+                _drv = _get_driver(args.receiver)
+                tmode_msg = _drv.build_tmode_fixed_msg(known_ecef)
                 if tmode_msg is not None:
                     # Would need config_queue to serial_reader — skip for now
                     # The F9T timing mode can be set separately via configure_f9t.py
@@ -1488,102 +1498,24 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             return "no_ticc"
         sources = ticc_only_error_source(ticc_diff_ns, args.ticc_confidence_ns)
     else:
+        # Gate PPS+PPP on |dt_rx| < 100µs.  The filter's dt_rx tracks
+        # the receiver clock offset (ms), not the PHC correction.  Only
+        # use it once time-differenced carrier phase has converged.
+        use_dt_rx = dt_rx_ns if abs(dt_rx_ns) < 100_000 else None
+        use_sigma = dt_rx_sigma if use_dt_rx is not None else None
         sources = compute_error_sources(
             pps_error_ns,
             qerr_ns,
-            dt_rx_ns,
-            dt_rx_sigma,
+            use_dt_rx,
+            use_sigma,
             carrier_max_sigma=args.carrier_max_sigma_ns,
             ticc_error_ns=None,
             ticc_confidence=None,
         )
     best = sources[0]
 
-    # Warmup phase
-    if ctx['phase'] == 'warmup':
-        if n_epochs >= ctx['warmup_epochs']:
-            log.info(f"  Servo warmup complete ({n_epochs} epochs, "
-                     f"best={best}, epoch_offset={epoch_offset}s)")
-            if epoch_offset != 0 or abs(best.error_ns) > STEP_THRESHOLD_NS:
-                ctx['phase'] = 'step'
-            else:
-                ctx['phase'] = 'tracking'
-                log.info(f"  → tracking (no step needed)")
-        elif n_epochs % 10 == 0:
-            log.info(f"  [{n_epochs}] servo warmup: best={best} "
-                     f"dt_rx={dt_rx_ns:+.1f}±{dt_rx_sigma:.1f}ns")
-        _log_servo(log_w, ctx['log_f'], ts_str, target_sec, phc_sec, phc_nsec,
-                   phc_rounded_sec, epoch_offset, timescale_error_ns,
-                   extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
-                   obs_event, pps_event, _match_confidence, corr_snapshot,
-                   dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, qerr_age_s, qerr_tow_delta_ms,
-                   ticc_diff_ns, ticc_age_s, ticc_confidence,
-                   pps_var_ns2, pps_qerr_plus_var_ns2, qerr_plus_ratio,
-                   pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
-                   ctx['adjfine_ppb'], ctx['phase'], n_used,
-                   ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns,
-                   ctx.get('tracking_mode'), None)
-        return "warmup"
-
-    # Step phase
-    if ctx['phase'] == 'step':
-        # Use timescale_error_ns for the step, not best.error_ns.
-        # timescale_error_ns is the raw PHC-to-target offset from PPS capture.
-        # best.error_ns includes the PPP filter's dt_rx (receiver clock state)
-        # which should NOT be corrected by a PHC step — the filter tracks it.
-        step_offset_ns = timescale_error_ns
-        import subprocess
-
-        step_bias_ns = args.phase_step_bias_ns or 0.0
-        compensated_offset_ns = step_offset_ns - step_bias_ns
-        adj_s = -compensated_offset_ns / 1_000_000_000
-        log.info(f"  STEP (adj): epoch_offset={epoch_offset}s, "
-                 f"timescale_error={timescale_error_ns:+.0f}ns "
-                 f"pps_error={pps_error_ns:+.0f}ns "
-                 f"bias={step_bias_ns:+.0f}ns "
-                 f"compensated={compensated_offset_ns:+.0f}ns "
-                 f"adj={adj_s:+.9f}s")
-        result = subprocess.run(
-            ['/usr/sbin/phc_ctl', args.servo, '--',
-             'adj', f'{adj_s:.9f}'],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            log.info(f"  phc_ctl adj {adj_s:.6f}s: {result.stdout.strip()}")
-        else:
-            log.error(f"  phc_ctl adj failed: {result.stderr.strip()}")
-
-        # Zero frequency correction so PHC doesn't drift during cooldown.
-        ctx['ptp'].adjfine(0.0)
-        ctx['adjfine_ppb'] = 0.0
-
-        _purge_pps_state(ctx)
-
-        # Reset servo, scheduler, and signal the outer loop to reset the
-        # EKF clock state.  After a PHC step, the filter's dt_rx is stale
-        # and will drive the servo to over-correct if not reset.
-        from peppar_fix import PIServo, DisciplineScheduler
-        ctx['servo'] = PIServo(BASE_KP, BASE_KI, max_ppb=ctx['caps']['max_adj'])
-        servo = ctx['servo']
-        ctx['scheduler'] = DisciplineScheduler(
-            base_interval=args.discipline_interval,
-            adaptive=args.adaptive_interval,
-            min_interval=args.min_interval,
-            max_interval=args.max_interval,
-            converge_threshold_ns=args.scheduler_converge_threshold_ns,
-            settle_window=args.scheduler_settle_window,
-            unconverge_factor=args.scheduler_unconverge_factor,
-        )
-        scheduler = ctx['scheduler']
-        ctx['filter_needs_clock_reset'] = True
-        ctx['post_step_cooldown'] = 30  # epochs to skip frequency corrections
-        ctx['phase'] = 'tracking'
-        ctx['tracking_mode'] = 'pull_in'
-        ctx['ticc_prev_error_ns'] = None
-        ctx['ticc_prev_error_mono'] = None
-        ctx['ticc_settled_count'] = 0
-
-        return "step"
+    # No warmup or step phases — bootstrap handles PHC initialization.
+    # PI tracking from epoch 1.
 
     # Tracking phase
     mode_time_to_zero_s = None
@@ -1624,13 +1556,12 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             ctx['tracking_large_error_count'] = 0
         if ctx['tracking_large_error_count'] >= 3:
             log.warning(
-                "  PHC error persisted above %.0fns for %d epochs; re-entering step",
+                "  PHC error persisted above %.0fns for %d epochs — "
+                "bootstrap may need to re-run (no in-engine step)",
                 TRACK_RESTEP_NS,
                 ctx['tracking_large_error_count'],
             )
-            ctx['phase'] = 'step'
             ctx['tracking_large_error_count'] = 0
-            return "restep"
 
     # TODO(ta-e744, ta-7j06): Re-enable timescale restep once the step
     # source is GNSS-derived (not system clock).  The PI servo tracks
@@ -2127,8 +2058,6 @@ Two-phase operation:
                        help="Target PHC timescale for PPS alignment (profile/default if omitted)")
     servo.add_argument("--min-correlation-confidence", type=float, default=None,
                        help="Minimum acceptable confidence for observation/PPS correlation")
-    servo.add_argument("--warmup", type=int, default=20,
-                       help="Servo warmup epochs (default: 20)")
     servo.add_argument("--track-kp", type=float, default=0.3,
                        help="PI servo Kp gain (default: 0.3)")
     servo.add_argument("--track-ki", type=float, default=0.1,
