@@ -318,47 +318,74 @@ def pps_calibrate_lag(ptp_dev, extts_channel, pps_pin, program_pin,
         ptp.close()
         return None, None, 0
 
-    # Measure: set PHC with lag=0, capture PPS, compute true lag
-    lag_samples = []
-    for i in range(n_trials):
-        # Transfer standard: read CLOCK_REALTIME, set PHC
-        rt_ref = time.clock_gettime_ns(time.CLOCK_REALTIME)
-        ptp.set_phc_ns(rt_ref + offset_ns)  # lag=0
+    # Sweep: set PHC with several lag values, capture PPS phase error at
+    # each.  phase_error = ε + L - true_lag (where ε = NTP error, constant
+    # during the sweep).  Linear fit gives true_lag = L at phase_error = 0.
+    #
+    # Each trial does a SINGLE clock_settime (no retry) to avoid retry
+    # loop distortion.  The PPS EXTTS gives the unbiased phase reading.
+    sweep_points = []
+    lag_values = [0, 50000, 100000, 150000, 200000, 250000]
+    for lag_test in lag_values:
+        phases = []
+        for _ in range(max(2, n_trials // len(lag_values))):
+            rt_ref = time.clock_gettime_ns(time.CLOCK_REALTIME)
+            ptp.set_phc_ns(rt_ref + offset_ns + lag_test)
 
-        # Wait for PPS
-        evt = ptp.read_extts(timeout_ms=2000)
-        if evt is None:
-            continue
-        rt_at_pps = time.clock_gettime_ns(time.CLOCK_REALTIME)
+            evt = ptp.read_extts(timeout_ms=2000)
+            if evt is None:
+                continue
+            rt_at_pps = time.clock_gettime_ns(time.CLOCK_REALTIME)
 
-        phc_sec, phc_nsec = evt[0], evt[1]
-        phase_ns = phc_nsec if phc_nsec < 500_000_000 else phc_nsec - 1_000_000_000
+            phc_sec, phc_nsec = evt[0], evt[1]
+            rounded = phc_sec if phc_nsec < 500_000_000 else phc_sec + 1
+            utc_sec = round(rt_at_pps / 1_000_000_000)
+            target_sec = utc_sec + offset_s
+            if rounded - target_sec != 0:
+                continue
 
-        # Verify epoch_offset
-        rounded = phc_sec if phc_nsec < 500_000_000 else phc_sec + 1
-        utc_sec = round(rt_at_pps / 1_000_000_000)
-        target_sec = utc_sec + offset_s
-        if rounded - target_sec != 0:
-            continue
+            phase_ns = phc_nsec if phc_nsec < 500_000_000 else phc_nsec - 1_000_000_000
+            phases.append(phase_ns)
 
-        # PPS_error = lag_param - true_lag.  With lag_param=0: true_lag = -PPS_error
-        true_lag = -phase_ns
-        lag_samples.append(true_lag)
-        print(f"  [{i:2d}] PPS phase: {phase_ns:+8d} ns → lag = {true_lag:+8d} ns")
+        if phases:
+            mean_phase = statistics.mean(phases)
+            sweep_points.append((lag_test, mean_phase))
+            print(f"  lag={lag_test:7d} ns → PPS phase={mean_phase:+9.0f} ns "
+                  f"(n={len(phases)})")
+
+    # Linear fit: phase = slope * lag + intercept.  Zero crossing = -intercept/slope.
+    if len(sweep_points) < 2:
+        print("  Not enough sweep points for calibration")
+        ptp.disable_extts(extts_channel)
+        ptp.close()
+        return None, None, 0
+
+    lags = [p[0] for p in sweep_points]
+    phases = [p[1] for p in sweep_points]
+    n = len(lags)
+    mean_l = sum(lags) / n
+    mean_p = sum(phases) / n
+    ss_ll = sum((l - mean_l) ** 2 for l in lags)
+    ss_lp = sum((l - mean_l) * (p - mean_p) for l, p in zip(lags, phases))
+    slope = ss_lp / ss_ll if ss_ll > 0 else 1.0
+    intercept = mean_p - slope * mean_l
+    zero_crossing = -intercept / slope if abs(slope) > 0.01 else 0
+
+    # Residuals for stdev estimate
+    residuals = [p - (slope * l + intercept) for l, p in zip(lags, phases)]
+    fit_stdev = statistics.stdev(residuals) if len(residuals) > 2 else 0
+    lag_samples = [zero_crossing]  # single estimate from the fit
+    lag_stdev = abs(fit_stdev / slope) if abs(slope) > 0.01 else float('inf')
+
+    print(f"\n  Linear fit: phase = {slope:.3f} * lag + {intercept:.0f}")
+    print(f"  Slope: {slope:.3f} (expect ~1.0)")
+    print(f"  PPS-calibrated settime lag: {zero_crossing:.0f} ns "
+          f"(fit residual σ={fit_stdev:.0f} ns)")
 
     ptp.disable_extts(extts_channel)
     ptp.close()
 
-    if len(lag_samples) < 3:
-        print("  Not enough PPS samples for calibration")
-        return None, None, 0
-
-    lag_mean = statistics.mean(lag_samples)
-    lag_stdev = statistics.stdev(lag_samples)
-    lag_unc = lag_stdev / math.sqrt(len(lag_samples))
-    print(f"\n  PPS-calibrated settime lag: {lag_mean:.0f} ±{lag_unc:.0f} ns "
-          f"(σ={lag_stdev:.0f}, n={len(lag_samples)})")
-    return lag_mean, lag_stdev, len(lag_samples)
+    return zero_crossing, lag_stdev, n
 
 
 def main():
