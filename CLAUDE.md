@@ -198,6 +198,7 @@ here before changing anything in the areas they cover.
 | [ticc-calibration-2026-03-19.md](docs/ticc-calibration-2026-03-19.md) | TICC calibration procedure and results. |
 | [hw-labels.md](docs/hw-labels.md) | Hardware labeling conventions for beads. |
 | [draft-dupage-inquiry.md](docs/draft-dupage-inquiry.md) | Draft inquiry to DuPage County about GNSS antenna siting. |
+| [packaging-plan.md](docs/packaging-plan.md) | Plan for making peppar-fix pip-installable from GitHub Releases. Phased: pyproject.toml stub (done), flatten imports, versioned releases. |
 
 ## Lab Documentation Pointers
 

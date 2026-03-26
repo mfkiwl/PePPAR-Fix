@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "peppar-fix"
+version = "0.1.0"
+description = "GNSS-disciplined precision clock using carrier-phase PPP"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Bob Van Valzah"},
+]
+
+dependencies = [
+    "numpy",
+    "pyubx2>=1.2.55",
+    "pyserial",
+    "pyrtcm>=1.1.0",
+]
+
+[project.optional-dependencies]
+timebeat = ["smbus2"]
+analysis = ["allantools", "matplotlib", "pandas"]
+dev = ["pytest", "peppar-fix[analysis,timebeat]"]
+
+# Entry points — these become CLI commands after `pip install`.
+# Not yet functional: requires the import refactor (all bare imports
+# like `from solve_ppp import ...` must become `from peppar_fix.solve_ppp
+# import ...`).  For now, run scripts directly from a repo checkout.
+#
+# [project.scripts]
+# peppar-fix-engine = "peppar_fix.peppar_fix_engine:main"
+# peppar-fix-bootstrap = "peppar_fix.phc_bootstrap:main"
+# peppar-fix-configure = "peppar_fix.configure_f9t:main"
+# peppar-rx-config = "peppar_fix.peppar_rx_config:main"
+
+[tool.setuptools.packages.find]
+where = ["scripts"]
+
+[tool.setuptools.package-data]
+peppar_fix = ["*.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
