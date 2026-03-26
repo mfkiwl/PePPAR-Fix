@@ -91,6 +91,16 @@ This preserves all in-kernel features: EXTTS, DPLL, irdma, PTP, SyncE.
 **Always use the in-tree patch (0002) for PePPAR Fix.** The out-of-tree
 patch (0001) breaks PTP EXTTS ioctls needed for PPS capture.
 
+**Known issue**: The streaming patch changes `/dev/gnss0` reads from
+page-sized batches to 15-byte fragments.  The receiver configuration
+code (UBX CFG-VALSET + ACK wait) may time out when pyubx2's reader
+receives partial UBX frames across multiple reads.  The observation
+pipeline (`realtime_ppp.py`) handles reassembly correctly, but the
+config path in `peppar_fix/receiver.py` may need adjustment for
+fragment-mode delivery.  This only affects the initial receiver
+configuration at engine startup — once configured, observation flow
+works correctly with streaming delivery.
+
 ## Reverting
 
 To revert to the stock driver:
