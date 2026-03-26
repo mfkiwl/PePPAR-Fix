@@ -81,6 +81,22 @@ The script:
 5. Installs to `/lib/modules/$(uname -r)/updates/` (takes priority
    over the stock module on next boot)
 
+## Known limitation: PTP EXTTS incompatibility
+
+The Intel out-of-tree ice driver does not support `PTP_EXTTS_REQUEST`
+or `PTP_PIN_SETFUNC` ioctls on the E810's SDP pins.  These are needed
+by PePPAR Fix's PHC servo to capture PPS timestamps.  The out-of-tree
+driver manages SDP pins through the DPLL subsystem instead.
+
+**Impact**: With this patched module loaded, GNSS data delivery is fast
+but the PHC servo cannot capture PPS edges.  You cannot run both the
+GNSS streaming fix and the PHC servo simultaneously.
+
+**Workaround**: Revert to the in-kernel driver for servo operation
+(see below).  The GNSS streaming fix is most useful for non-servo
+workloads (position bootstrap, observation logging) or once upstream
+merges both the GNSS fix and EXTTS support into the same driver.
+
 ## Reverting
 
 To revert to the stock driver:
