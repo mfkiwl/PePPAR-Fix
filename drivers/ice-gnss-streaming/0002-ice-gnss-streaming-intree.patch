@@ -1,0 +1,85 @@
+From: Michal Schmidt <mschmidt@redhat.com> (adapted for Ubuntu 24.04 in-kernel ice driver)
+Subject: ice: GNSS streaming delivery and reduced polling delay (in-tree)
+
+Combines three upstream patches submitted to iwl-next (Dec 2024) by
+Michal Schmidt, adapted for the Ubuntu 24.04 in-kernel ice driver
+(linux-source-6.8.0).  This version preserves EXTTS and DPLL support.
+
+Apply to files extracted from linux-source-6.8.0 at:
+  drivers/net/ethernet/intel/ice/ice_gnss.c
+  drivers/net/ethernet/intel/ice/ice_gnss.h
+
+--- a/ice_gnss.c
++++ b/ice_gnss.c
+@@ -85,13 +85,12 @@
+ {
+ 	struct gnss_serial *gnss = container_of(work, struct gnss_serial,
+ 						read_work.work);
+-	unsigned long delay = ICE_GNSS_POLL_DATA_DELAY_TIME;
+ 	unsigned int i, bytes_read, data_len, count;
+ 	struct ice_aqc_link_topo_addr link_topo;
+ 	struct ice_pf *pf;
+ 	struct ice_hw *hw;
+ 	__be16 data_len_b;
+-	char *buf = NULL;
++	char buf[ICE_MAX_I2C_DATA_SIZE];
+ 	u8 i2c_params;
+ 	int err = 0;
+
+@@ -122,14 +121,6 @@
+
+ 	/* The u-blox has data_len bytes for us to read */
+
+-	data_len = min_t(typeof(data_len), data_len, PAGE_SIZE);
+-
+-	buf = (char *)get_zeroed_page(GFP_KERNEL);
+-	if (!buf) {
+-		err = -ENOMEM;
+-		goto requeue;
+-	}
+-
+ 	/* Read received data */
+ 	for (i = 0; i < data_len; i += bytes_read) {
+ 		unsigned int bytes_left = data_len - i;
+@@ -139,21 +130,20 @@
+
+ 		err = ice_aq_read_i2c(hw, link_topo, ICE_GNSS_UBX_I2C_BUS_ADDR,
+ 				      cpu_to_le16(ICE_GNSS_UBX_EMPTY_DATA),
+-				      bytes_read, &buf[i], NULL);
++				      bytes_read, buf, NULL);
+ 		if (err)
+-			goto free_buf;
++			goto requeue;
++
++		count = gnss_insert_raw(pf->gnss_dev, buf, bytes_read);
++		if (count != bytes_read)
++			dev_dbg(ice_pf_to_dev(pf),
++				"gnss_insert_raw ret=%d size=%d\n",
++				count, bytes_read);
+ 	}
+
+-	count = gnss_insert_raw(pf->gnss_dev, buf, i);
+-	if (count != i)
+-		dev_warn(ice_pf_to_dev(pf),
+-			 "gnss_insert_raw ret=%d size=%d\n",
+-			 count, i);
+-	delay = ICE_GNSS_TIMER_DELAY_TIME;
+-free_buf:
+-	free_page((unsigned long)buf);
+ requeue:
+-	kthread_queue_delayed_work(gnss->kworker, &gnss->read_work, delay);
++	kthread_queue_delayed_work(gnss->kworker, &gnss->read_work,
++				   ICE_GNSS_POLL_DATA_DELAY_TIME);
+ 	if (err)
+ 		dev_dbg(ice_pf_to_dev(pf), "GNSS failed to read err=%d\n", err);
+ }
+--- a/ice_gnss.h
++++ b/ice_gnss.h
+@@ -8,8 +8,8 @@
+ #define ICE_GNSS_POLL_DATA_DELAY_TIME	(HZ / 50) /* poll every 20 ms */
+-#define ICE_GNSS_TIMER_DELAY_TIME	(HZ / 10) /* 0.1 second per message */
++
+ #define ICE_GNSS_TTY_WRITE_BUF		250
+-#define ICE_MAX_I2C_DATA_SIZE		FIELD_MAX(ICE_AQC_I2C_DATA_SIZE_M)
++#define ICE_MAX_I2C_DATA_SIZE		15
+ #define ICE_MAX_I2C_WRITE_BYTES		4

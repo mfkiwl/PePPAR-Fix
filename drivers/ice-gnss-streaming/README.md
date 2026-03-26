@@ -60,42 +60,36 @@ into mainline Linux or the Intel out-of-tree release** as of March
 - Intel out-of-tree ice driver v2.4.5 (Dec 2025)
 - All Linux kernels up to at least 6.17 (patches not merged upstream)
 
-## Build and install
+## Build and install (recommended: in-tree)
 
 ```bash
 cd drivers/ice-gnss-streaming
-./build-and-install.sh          # clone, patch, build, install
+./build-and-install.sh          # extract, patch, build, install
 ./build-and-install.sh --load   # also load the module immediately
 ```
 
 Prerequisites (installed automatically by the script):
 - `build-essential` (gcc, make)
 - `linux-headers-$(uname -r)`
-- Internet access (clones Intel's ice driver from GitHub)
+- `linux-source-$(uname -r | cut -d- -f1)` (Ubuntu kernel source package)
 
-The script:
-1. Clones Intel's out-of-tree ice driver
-2. Applies the streaming delivery patch
-3. Builds the `ice.ko` module
-4. Decompresses the DDP firmware package if needed
-5. Installs to `/lib/modules/$(uname -r)/updates/` (takes priority
-   over the stock module on next boot)
+The script extracts the ice driver source from the Ubuntu kernel source
+package, applies the in-tree patch (`0002-ice-gnss-streaming-intree.patch`),
+builds against the running kernel's headers, and installs to
+`/lib/modules/$(uname -r)/updates/` (takes priority over the stock
+module on next boot).
 
-## Known limitation: PTP EXTTS incompatibility
+This preserves all in-kernel features: EXTTS, DPLL, irdma, PTP, SyncE.
 
-The Intel out-of-tree ice driver does not support `PTP_EXTTS_REQUEST`
-or `PTP_PIN_SETFUNC` ioctls on the E810's SDP pins.  These are needed
-by PePPAR Fix's PHC servo to capture PPS timestamps.  The out-of-tree
-driver manages SDP pins through the DPLL subsystem instead.
+## Patch files
 
-**Impact**: With this patched module loaded, GNSS data delivery is fast
-but the PHC servo cannot capture PPS edges.  You cannot run both the
-GNSS streaming fix and the PHC servo simultaneously.
+| Patch | Source base | EXTTS | Use case |
+|-------|-----------|-------|----------|
+| `0002-...-intree.patch` | Ubuntu linux-source (recommended) | Works | PHC servo + GNSS streaming |
+| `0001-...-delivery.patch` | Intel out-of-tree v2.4.5 | **Broken** | GNSS-only workloads |
 
-**Workaround**: Revert to the in-kernel driver for servo operation
-(see below).  The GNSS streaming fix is most useful for non-servo
-workloads (position bootstrap, observation logging) or once upstream
-merges both the GNSS fix and EXTTS support into the same driver.
+**Always use the in-tree patch (0002) for PePPAR Fix.** The out-of-tree
+patch (0001) breaks PTP EXTTS ioctls needed for PPS capture.
 
 ## Reverting
 

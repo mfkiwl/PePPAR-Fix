@@ -843,12 +843,20 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             # EKF predict
             if prev_t is not None:
                 dt = (gps_time - prev_t).total_seconds()
-                if dt <= 0 or dt > 30:
+                if dt <= 0:
                     skip_stats["dt_suspicious"] += 1
                     log.warning(f"Suspicious dt={dt:.1f}s, skipping")
                     prev_t = gps_time
                     continue
-                filt.predict(dt)
+                if dt > 30:
+                    # Gap recovery: reset filter time but don't skip the epoch.
+                    # Clamp predict to 1s so the filter doesn't diverge, then
+                    # let the update re-anchor from pseudoranges.
+                    skip_stats["dt_suspicious"] += 1
+                    log.warning(f"Gap dt={dt:.1f}s, resetting filter time (not skipping)")
+                    filt.predict(1.0)
+                else:
+                    filt.predict(dt)
             prev_t = gps_time
 
             # EKF update

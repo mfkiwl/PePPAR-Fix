@@ -68,12 +68,12 @@ class StrictCorrelationGate:
                 self.stats.consumed_correlated += 1
                 return obs_event, (pps_event, delta_s, recv_dt_s, combined_confidence)
             if pps_event is not None:
-                if latest_pps_mono is not None and latest_pps_mono - obs_event.recv_mono > max_window_s:
-                    obs_history.popleft()
-                    self.stats.dropped_low_confidence += 1
-                    continue
-                self.stats.deferred_waiting += 1
-                return None, None
+                # A PPS match exists but confidence is below threshold.
+                # A more confident PPS for this second will never arrive —
+                # drop the observation and move on.
+                obs_history.popleft()
+                self.stats.dropped_low_confidence += 1
+                continue
             if latest_pps_mono is None:
                 self.stats.deferred_waiting += 1
                 return None, None
