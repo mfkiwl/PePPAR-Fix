@@ -36,16 +36,29 @@ Working:
   - BeiDou `B1I + B2I`
 - E810 PPS timestamps are available from the PHC EXTS path
 
-Not yet working well enough:
+Known issue — GNSS I2C delivery latency (stock ice driver):
 
-- sustained PHC servo discipline through `/dev/gnss0`
+- `/dev/gnss0` is a kernel GNSS char device backed by the `ice` driver's
+  I2C polling thread.  The stock driver (in-kernel through at least 6.17,
+  and Intel out-of-tree v2.4.5) accumulates I2C reads into a `PAGE_SIZE`
+  (4 KB) buffer via `get_zeroed_page()` before delivering to userspace.
+- With ~800 bytes per epoch at 15 bytes per I2C read, the driver needs
+  ~54 reads × 20 ms = ~1080 ms, plus a 100 ms post-delivery delay.
+  Two epochs fill the page, giving **~2100 ms delivery latency**.
+- `read()` system calls block for ~2 seconds and return exactly 4096 bytes.
+- This makes real-time servo discipline impossible: observations arrive
+  seconds after the GNSS epoch they describe, causing pipeline stalls.
 
-Root problem:
+Fix:
 
-- `/dev/gnss0` is a kernel GNSS char device that delivers UBX in bursts, not as a smooth 1 Hz observation stream
-- direct probing showed multi-packet bursts roughly every `2.1s` to `2.4s`
-- RAWX epochs commonly arrive `5s` to `11s` after the GNSS time they describe
-- this introduces whole-second ambiguity pressure in the servo even when PPS capture itself is correct
+- A patch in `drivers/ice-gnss-streaming/` changes the driver to stream
+  each 15-byte I2C chunk to userspace immediately and removes the 100 ms
+  delay.  See `drivers/ice-gnss-streaming/README.md` for build/install
+  instructions.
+- With the patch: `read()` returns 15 bytes every ~20 ms, max gap ~400 ms
+  (natural inter-epoch silence), 14000+ reads per 120 seconds vs 62.
+- The patch is adapted from upstream work by Michal Schmidt (Red Hat),
+  reviewed but not merged as of March 2026.
 
 ### `timehat` / i226
 

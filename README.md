@@ -208,6 +208,22 @@ pip install -r requirements.txt
 System packages (not in pip):
 - `linuxptp` — provides `phc_ctl` for PHC clock stepping (`sudo apt install linuxptp`)
 
+### E810 GNSS driver fix (required for E810-XXVDA4T)
+
+The stock `ice` kernel driver for E810 NICs has a GNSS I2C buffering bug
+that delays observation delivery by ~2 seconds, making real-time PHC
+discipline impossible.  This affects all Linux kernels through at least
+6.17 and Intel's out-of-tree driver v2.4.5.  A patched driver is included:
+
+```bash
+cd drivers/ice-gnss-streaming
+./build-and-install.sh --load
+```
+
+See `drivers/ice-gnss-streaming/README.md` for details, symptoms, and
+how to verify the fix.  This is not needed for USB-connected GNSS
+receivers (e.g. TimeHat with F9T EVK on `/dev/ttyACM0`).
+
 ## Quick start — Milestone 1: Raw observations
 
 ```bash

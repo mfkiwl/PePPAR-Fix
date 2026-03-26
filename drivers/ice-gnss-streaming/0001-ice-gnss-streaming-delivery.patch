@@ -1,0 +1,123 @@
+From: Michal Schmidt <mschmidt@redhat.com> (adapted for Intel out-of-tree ice driver)
+Subject: ice: GNSS streaming delivery and reduced polling delay
+
+Combines three upstream patches submitted to iwl-next (Dec 2024) by
+Michal Schmidt, adapted for Intel's out-of-tree ice driver (v2.4.5+):
+
+  1. ice: lower the latency of GNSS reads
+  2. ice: remove special delay after processing a GNSS read batch
+  3. ice: downgrade warning about gnss_insert_raw to debug level
+
+The stock ice driver accumulates GNSS I2C data into a PAGE_SIZE (4096 byte)
+buffer via get_zeroed_page() and only delivers it to userspace after the
+entire read batch completes.  With ~800 bytes per epoch at 15 bytes per
+I2C read, this creates ~2-second delivery latency.
+
+This patch:
+  - Delivers each 15-byte I2C chunk to userspace immediately via
+    gnss_insert_raw() inside the read loop (streaming model)
+  - Removes the 100 ms post-delivery delay (ICE_GNSS_TIMER_DELAY_TIME),
+    using the 20 ms polling interval (ICE_GNSS_POLL_DATA_DELAY_TIME)
+    uniformly
+  - Uses a stack-allocated 15-byte buffer instead of a dynamically
+    allocated page
+  - Downgrades gnss_insert_raw warnings to debug level
+
+Tested on E810-XXVDA4T with ZED-F9T, Ubuntu 24.04 kernel 6.8.0-106.
+Reduces max read() latency from ~2100 ms to ~400 ms (the natural
+inter-epoch gap when the receiver has no data to send).
+
+Upstream status: Reviewed-by Karol Kolacinski and Simon Horman, but not
+yet merged into mainline Linux or the Intel out-of-tree release as of
+March 2026.
+
+References:
+  https://www.mail-archive.com/intel-wired-lan@osuosl.org/msg08349.html
+  https://www.mail-archive.com/intel-wired-lan@osuosl.org/msg08350.html
+  https://www.mail-archive.com/intel-wired-lan@osuosl.org/msg08351.html
+
+--- a/src/ice_gnss.h
++++ b/src/ice_gnss.h
+@@ -5,9 +5,9 @@
+ #define _ICE_GNSS_H_
+
+ #define ICE_E810T_GNSS_I2C_BUS		0x2
+-#define ICE_GNSS_TIMER_DELAY_TIME	(HZ / 10) /* 0.1 second per message */
++#define ICE_GNSS_POLL_DATA_DELAY_TIME	(HZ / 50) /* poll every 20 ms */
+ #define ICE_GNSS_TTY_WRITE_BUF		250
+-#define ICE_MAX_I2C_DATA_SIZE		FIELD_MAX(ICE_AQC_I2C_DATA_SIZE_M)
++#define ICE_MAX_I2C_DATA_SIZE		15
+ #define ICE_MAX_I2C_WRITE_BYTES		4
+
+ /* u-blox ZED-F9T specific definitions */
+--- a/src/ice_gnss.c
++++ b/src/ice_gnss.c
+@@ -94,7 +94,7 @@
+ 	struct ice_pf *pf;
+ 	struct ice_hw *hw;
+ 	__be16 data_len_b;
+-	char *buf = NULL;
++	char buf[ICE_MAX_I2C_DATA_SIZE];
+ 	u8 i2c_params;
+ 	int err = 0;
+
+@@ -119,7 +119,7 @@
+ 				      cpu_to_le16(ICE_GNSS_UBX_DATA_LEN_H),
+ 				      i2c_params, (u8 *)&data_len_b, NULL);
+ 		if (err)
+-			goto free_buf;
++			goto requeue;
+
+ 		data_len = be16_to_cpu(data_len_b);
+ 		if (data_len != 0 && data_len != U16_MAX)
+@@ -128,18 +128,6 @@
+ 		msleep(20);
+ 	}
+
+-	data_len = min_t(typeof(data_len), data_len, PAGE_SIZE);
+-	if (!data_len) {
+-		err = -ENOMEM;
+-		goto free_buf;
+-	}
+-
+-	buf = (char *)get_zeroed_page(GFP_KERNEL);
+-	if (!buf) {
+-		err = -ENOMEM;
+-		goto exit;
+-	}
+-
+ 	/* Read received data */
+ 	for (i = 0; i < data_len; i += bytes_read) {
+ 		unsigned int bytes_left = data_len - i;
+@@ -149,21 +137,20 @@
+
+ 		err = ice_aq_read_i2c(hw, link_topo, ICE_GNSS_UBX_I2C_BUS_ADDR,
+ 				      cpu_to_le16(ICE_GNSS_UBX_EMPTY_DATA),
+-				      bytes_read, &buf[i], NULL);
++				      bytes_read, buf, NULL);
+ 		if (err)
+-			goto free_buf;
++			goto requeue;
++
++		count = gnss_insert_raw(pf->gnss_dev, buf, bytes_read);
++		if (count != bytes_read)
++			dev_dbg(ice_pf_to_dev(pf),
++				"gnss_insert_raw ret=%d size=%d\n",
++				count, bytes_read);
+ 	}
+
+-	count = gnss_insert_raw(pf->gnss_dev, buf, i);
+-	if (count != i)
+-		dev_warn(ice_pf_to_dev(pf),
+-			 "gnss_insert_raw ret=%d size=%d\n",
+-			 count, i);
+-free_buf:
+-	free_page((unsigned long)buf);
++requeue:
+ 	kthread_queue_delayed_work(gnss->kworker, &gnss->read_work,
+-				   ICE_GNSS_TIMER_DELAY_TIME);
+-exit:
++				   ICE_GNSS_POLL_DATA_DELAY_TIME);
+ 	if (err)
+ 		dev_dbg(ice_pf_to_dev(pf), "GNSS failed to read err=%d\n", err);
+ }
