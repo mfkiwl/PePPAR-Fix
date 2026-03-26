@@ -17,7 +17,7 @@ from pathlib import Path
 from pyrtcm import RTCMReader
 
 # Add scripts/ to path for local imports
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
 from ssr_corrections import SSRState
 
 

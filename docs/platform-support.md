@@ -28,7 +28,7 @@ Working:
 
 - Host reachable at `10.168.60.37`
 - PHC path identified and usable on `/dev/ptp1`
-- E810 profile support added in [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py) and [`config/receivers.toml`](/home/bob/git/PePPAR-Fix/config/receivers.toml)
+- E810 profile support added in [`scripts/peppar_fix_engine.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_engine.py) and [`config/receivers.toml`](/home/bob/git/PePPAR-Fix/config/receivers.toml)
 - Explicit PHC timescale support added, with `e810` defaulting to `tai`
 - F9T dual-frequency processing works with the `f9t` profile:
   - GPS `L1CA + L2CL`
@@ -340,7 +340,7 @@ Current practical behavior:
   - exposed by [`scripts/peppar_fix/ptp_device.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/ptp_device.py)
   - fields: `sec`, `nsec`, `index`
 - local monotonic receive timestamp when userspace reads that EXTS event
-  - captured in [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py) as `PpsEvent.recv_mono`
+  - captured in [`scripts/peppar_fix_engine.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_engine.py) as `PpsEvent.recv_mono`
 - local monotonic receive timestamp for each GNSS observation event
   - captured in [`scripts/realtime_ppp.py`](/home/bob/git/PePPAR-Fix/scripts/realtime_ppp.py) as `ObservationEvent.recv_mono`
 

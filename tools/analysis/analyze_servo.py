@@ -41,7 +41,7 @@ import numpy as np
 import pandas as pd
 
 # Import the shared TICC reader (preserves ps precision)
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'scripts'))
 from ticc import Ticc
 
 

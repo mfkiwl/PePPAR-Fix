@@ -198,7 +198,7 @@ on ocxo).
 
 ## Files
 
-- Experiment script: `scripts/rcvtow_dt_rx_probe.py`
+- Experiment script: `tools/rcvtow_dt_rx_probe.py`
 - Experiment data: `/tmp/rcvtow_probe.csv` on ocxo (2026-03-26)
 - Servo test data: `/tmp/servo_ppp_test.csv` on ocxo (2026-03-26)
 - Error source selection: `scripts/peppar_fix/error_sources.py`

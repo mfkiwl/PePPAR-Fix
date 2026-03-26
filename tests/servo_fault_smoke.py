@@ -170,7 +170,7 @@ def main():
         "sudo",
         f"--preserve-env={','.join(preserve)}" if preserve else "--preserve-env",
         sys.executable,
-        "scripts/peppar_fix_cmd.py",
+        "scripts/peppar_fix_engine.py",
         "--serial", args.serial,
         "--baud", str(args.baud),
         "--ntrip-conf", args.ntrip_conf,

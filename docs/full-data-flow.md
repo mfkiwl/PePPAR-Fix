@@ -421,7 +421,7 @@ What the timestamp marks:
 
 Current host-side timing attached:
 
-- in [`analyze_servo.py`](/home/bob/git/PePPAR-Fix/scripts/analyze_servo.py), capture mode logs host UTC wall time as `host_timestamp`
+- in [`analyze_servo.py`](/home/bob/git/PePPAR-Fix/tools/analysis/analyze_servo.py), capture mode logs host UTC wall time as `host_timestamp`
 - no host monotonic timestamp is attached today
 
 Desired host-side timing attached:
@@ -448,7 +448,7 @@ This is still part of the data-flow graph because it is an output-facing sink of
 
 Examples:
 
-- [`log_observations.py`](/home/bob/git/PePPAR-Fix/scripts/log_observations.py)
+- [`log_observations.py`](/home/bob/git/PePPAR-Fix/tools/log_observations.py)
 - `*_rawx.csv`
 - `*_pvt.csv`
 - `*_timtp.csv`
@@ -548,9 +548,9 @@ Code:
 
 - [`PPPFilter`](/home/bob/git/PePPAR-Fix/scripts/solve_ppp.py)
 - driven by:
-  - [`peppar_find_position.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_find_position.py)
-  - [`peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
-  - [`peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_main.py)
+  - [`peppar_find_position.py`](/home/bob/git/PePPAR-Fix/old/peppar_find_position.py)
+  - [`peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
+  - [`peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_main.py)
 
 Sources consumed:
 
@@ -588,10 +588,10 @@ Code:
 - [`FixedPosFilter`](/home/bob/git/PePPAR-Fix/scripts/solve_ppp.py)
 - used by:
   - [`realtime_ppp.py`](/home/bob/git/PePPAR-Fix/scripts/realtime_ppp.py)
-  - [`peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+  - [`peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
   - [`phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/phc_servo.py)
-  - [`peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_phc_servo.py)
-  - [`peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_main.py)
+  - [`peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/old/peppar_phc_servo.py)
+  - [`peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_main.py)
 
 Sources consumed:
 
@@ -624,11 +624,11 @@ Decimation:
 
 Code:
 
-- [`peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+- [`peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
 - legacy:
   - [`phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/phc_servo.py)
-  - [`peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_phc_servo.py)
-  - [`peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_main.py)
+  - [`peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/old/peppar_phc_servo.py)
+  - [`peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_main.py)
 
 Sources consumed:
 
@@ -668,9 +668,9 @@ Notes:
 Code:
 
 - servo logs in:
-  - [`peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+  - [`peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
   - [`phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/phc_servo.py)
-  - [`peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_phc_servo.py)
+  - [`peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/old/peppar_phc_servo.py)
 
 Sources consumed:
 
@@ -725,7 +725,7 @@ Decimation:
 
 Examples:
 
-- [`qerr_test.py`](/home/bob/git/PePPAR-Fix/scripts/qerr_test.py)
+- [`qerr_test.py`](/home/bob/git/PePPAR-Fix/tools/qerr_test.py)
 - future PPS deviation metrics
 
 Sources consumed:
@@ -754,7 +754,7 @@ Decimation:
 
 Code:
 
-- [`analyze_servo.py`](/home/bob/git/PePPAR-Fix/scripts/analyze_servo.py)
+- [`analyze_servo.py`](/home/bob/git/PePPAR-Fix/tools/analysis/analyze_servo.py)
 
 Sources consumed:
 
@@ -1129,7 +1129,7 @@ Impact:
 Where it should be fixed first:
 
 - [`scripts/ticc.py`](/home/bob/git/PePPAR-Fix/scripts/ticc.py)
-- [`scripts/analyze_servo.py`](/home/bob/git/PePPAR-Fix/scripts/analyze_servo.py)
+- [`tools/analysis/analyze_servo.py`](/home/bob/git/PePPAR-Fix/tools/analysis/analyze_servo.py)
 
 Highest-risk sinks:
 
@@ -1141,8 +1141,8 @@ Highest-risk sinks:
 Files:
 
 - [`phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/phc_servo.py)
-- [`peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_phc_servo.py)
-- [`peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_main.py)
+- [`peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/old/peppar_phc_servo.py)
+- [`peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_main.py)
 
 Impact:
 
@@ -1152,7 +1152,7 @@ Impact:
 
 Where it should be fixed first:
 
-- compare each path against the unified history-based logic in [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+- compare each path against the unified history-based logic in [`old/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
 - either converge the paths or demote the legacy ones
 
 Highest-risk sinks:
@@ -1206,7 +1206,7 @@ Current state:
   [`scripts/realtime_ppp.py`](/home/bob/git/PePPAR-Fix/scripts/realtime_ppp.py)
   now blends queue/age heuristics with estimator confidence
 - PPS ingest in
-  [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+  [`old/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
   now does the same for EXTS events before they reach the strict gate
 - estimator updates are weighted by sample trust, not by recency
 - visible backlog now causes an estimator sample to move the offset estimate
@@ -1227,7 +1227,7 @@ Where it should be fixed first:
 - correction stores in [`scripts/broadcast_eph.py`](/home/bob/git/PePPAR-Fix/scripts/broadcast_eph.py)
   and [`scripts/ssr_corrections.py`](/home/bob/git/PePPAR-Fix/scripts/ssr_corrections.py)
 - TICC ingest in [`scripts/ticc.py`](/home/bob/git/PePPAR-Fix/scripts/ticc.py)
-- sink logging in [`scripts/servo_fault_smoke.py`](/home/bob/git/PePPAR-Fix/scripts/servo_fault_smoke.py)
+- sink logging in [`tests/servo_fault_smoke.py`](/home/bob/git/PePPAR-Fix/tests/servo_fault_smoke.py)
 
 Highest-risk sinks:
 
@@ -1258,10 +1258,10 @@ sink, not by ad hoc checks scattered through the sink body.
 
 Where it should be fixed first:
 
-- [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+- [`old/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
 - [`scripts/phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/phc_servo.py)
-- [`scripts/peppar_find_position.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_find_position.py)
-- [`scripts/analyze_servo.py`](/home/bob/git/PePPAR-Fix/scripts/analyze_servo.py)
+- [`old/peppar_find_position.py`](/home/bob/git/PePPAR-Fix/old/peppar_find_position.py)
+- [`tools/analysis/analyze_servo.py`](/home/bob/git/PePPAR-Fix/tools/analysis/analyze_servo.py)
 
 Highest-risk sinks:
 
@@ -1346,7 +1346,7 @@ Impact:
 
 Where it should be fixed first:
 
-- [`scripts/gnss_lag_probe.py`](/home/bob/git/PePPAR-Fix/scripts/gnss_lag_probe.py)
+- [`tools/gnss_lag_probe.py`](/home/bob/git/PePPAR-Fix/tools/gnss_lag_probe.py)
 - [`scripts/peppar_fix/gnss_stream.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/gnss_stream.py)
 - sink comments at the consumption points in K5 and K6
 
@@ -1422,10 +1422,10 @@ Required work:
 Examples in current code:
 
 - [`scripts/peppar_fix/gnss_stream.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/gnss_stream.py) `discard_input()`
-- [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py) `_drain_queue()`
-- [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py) phase-transition PPS flush
+- [`old/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py) `_drain_queue()`
+- [`old/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py) phase-transition PPS flush
 - [`scripts/phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/phc_servo.py) `get_latest_pps_event()`
-- legacy queue-dropping patterns in [`scripts/peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_main.py) and [`scripts/peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_phc_servo.py)
+- legacy queue-dropping patterns in [`old/peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_main.py) and [`old/peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/old/peppar_phc_servo.py)
 
 This milestone addresses:
 
@@ -1569,8 +1569,8 @@ Progress so far:
   downstream proxy symptoms
 - the legacy steady-state servo paths now use the same gate pattern:
   - [`scripts/phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/phc_servo.py)
-  - [`scripts/peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_phc_servo.py)
-  - [`scripts/peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_main.py)
+  - [`old/peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/old/peppar_phc_servo.py)
+  - [`old/peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_main.py)
 - `oxco` validation now includes two live checks:
   - baseline: gate consumed correlated epochs without defers or drops
   - injected system-delay run: gate produced explicit defer and unmatched-drop

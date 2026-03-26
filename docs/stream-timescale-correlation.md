@@ -102,7 +102,7 @@ What `RXM-RAWX` gives us:
   - constellation ID
   - signal ID
 
-Example outputs are logged by [`scripts/log_observations.py`](/home/bob/git/PePPAR-Fix/scripts/log_observations.py), which writes:
+Example outputs are logged by [`tools/log_observations.py`](/home/bob/git/PePPAR-Fix/tools/log_observations.py), which writes:
 
 - `*_rawx.csv`
 - `*_pvt.csv`
@@ -126,11 +126,11 @@ Relevant code:
 - PTP device IO:
   - [`scripts/peppar_fix/ptp_device.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/ptp_device.py)
 - unified servo path:
-  - [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+  - [`old/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
 - legacy servo paths:
   - [`scripts/phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/phc_servo.py)
   - [`scripts/peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_phc_servo.py)
-  - [`scripts/peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_main.py)
+  - [`old/peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_main.py)
 
 What the kernel event contains:
 
@@ -160,7 +160,7 @@ Relevant code:
 - storage:
   - [`scripts/realtime_ppp.py`](/home/bob/git/PePPAR-Fix/scripts/realtime_ppp.py)
 - tests:
-  - [`scripts/qerr_test.py`](/home/bob/git/PePPAR-Fix/scripts/qerr_test.py)
+  - [`tools/qerr_test.py`](/home/bob/git/PePPAR-Fix/tools/qerr_test.py)
 
 What it contains:
 
@@ -215,7 +215,7 @@ The TICC is not fully correlated in the unified path today, but this stream shou
 ### TimeHat landing log
 
 - Run `timehat-wrapper-horizon6-300s` (289 epochs, 300 s) with `--ticc-landing-horizon-s 6.0`, `--ticc-settled-threshold-ns 150`, `--ticc-settled-count 5` and the host `phase_step_bias_ns 2283.0`. The servo remained in `landing`, moved from about −1.26 µs at the beginning of steady state to −145 ns at the end, and logged no holdover events (`data/timehat-wrapper-horizon6-300s.csv` / `.log`).
-- Slicing the final 120 s tail and running `scripts/analyze_servo.py` yields TDEV(1 s)=61.6 ns for PPS OUT versus 0.59 ns for raw F9T PPS, confirming the short-τ crossover after pull-in (`data/timehat-wrapper-horizon6-300s_tail120_analysis_report.txt`).
+- Slicing the final 120 s tail and running `tools/analysis/analyze_servo.py` yields TDEV(1 s)=61.6 ns for PPS OUT versus 0.59 ns for raw F9T PPS, confirming the short-τ crossover after pull-in (`data/timehat-wrapper-horizon6-300s_tail120_analysis_report.txt`).
 
 The tuned parameters are kept host-specific (TimeHat profile) and injected through the wrapper `--engine-arg` chain. Promote them into shared defaults only after verifying the same landing behavior on additional platforms, otherwise treat them as TimeHat-specific overrides.
 
@@ -522,7 +522,7 @@ On `oxco`, `/dev/gnss0` behaves badly for correlation purposes:
 Important detail:
 
 - after adding packet-level receive timestamps in [`scripts/peppar_fix/gnss_stream.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/gnss_stream.py), we verified that this lag is real at the device/kernel boundary, not just inside `pyubx2`
-- the reusable probe for this is [`scripts/gnss_lag_probe.py`](/home/bob/git/PePPAR-Fix/scripts/gnss_lag_probe.py)
+- the reusable probe for this is [`tools/gnss_lag_probe.py`](/home/bob/git/PePPAR-Fix/tools/gnss_lag_probe.py)
 
 This means the correlator must assume that:
 
@@ -569,7 +569,7 @@ Why it matters:
 
 Current code:
 
-- [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+- [`old/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
 
 What happens:
 
@@ -588,7 +588,7 @@ Why it matters:
 
 Current code:
 
-- [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+- [`old/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
 
 What happens:
 
@@ -608,7 +608,7 @@ Current code:
 - `_match_pps_event_from_history()`
 - `_find_pps_event_for_obs()`
 in [`scripts/peppar_fix/correlation_gate.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/correlation_gate.py)
-and [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+and [`old/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
 
 What happens:
 
@@ -665,7 +665,7 @@ Current code:
 - `_target_timescale_sec()`
 - `_pps_fractional_error()`
 - `_servo_epoch()`
-in [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+in [`old/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
 
 What happens:
 
@@ -708,7 +708,7 @@ Current code:
 
 - [`scripts/phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/phc_servo.py)
 - [`scripts/peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_phc_servo.py)
-- [`scripts/peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_main.py)
+- [`old/peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_main.py)
 
 These paths still contain older queue-order assumptions. They should be reviewed against the newer history-and-window design in the unified path.
 
@@ -884,7 +884,7 @@ This path is implemented in:
 - [`fault_injection.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix/fault_injection.py)
 - [`realtime_ppp.py`](/home/bob/git/PePPAR-Fix/scripts/realtime_ppp.py)
 - [`peppar_fix_engine.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_engine.py)
-- [`servo_fault_smoke.py`](/home/bob/git/PePPAR-Fix/scripts/servo_fault_smoke.py)
+- [`servo_fault_smoke.py`](/home/bob/git/PePPAR-Fix/tests/servo_fault_smoke.py)
 
 Observed deterministic `timehat` result:
 

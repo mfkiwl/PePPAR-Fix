@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Diagnostic: check why filter gets 0 measurements in live mode."""
 
+import os
 import sys
 import time
 import threading
@@ -10,7 +11,7 @@ import logging
 import math
 
 logging.basicConfig(level=logging.WARNING, format='%(message)s')
-sys.path.insert(0, 'scripts')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'scripts'))
 
 from ntrip_client import NtripStream
 from broadcast_eph import BroadcastEphemeris

@@ -26,8 +26,10 @@ Usage:
 import argparse
 import csv
 import math
+import os
 import re
 import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'scripts'))
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 

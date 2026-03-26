@@ -23,7 +23,7 @@ from datetime import datetime, timezone, timedelta
 import numpy as np
 
 # Add scripts dir to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scripts'))
 
 from solve_pseudorange import C, ecef_to_lla, lla_to_ecef
 from solve_ppp import FixedPosFilter

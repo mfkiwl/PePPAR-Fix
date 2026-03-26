@@ -233,7 +233,7 @@ source venv/bin/activate
 python scripts/configure_f9t.py /dev/gnss-top --port-type USB
 
 # Log observations (Ctrl-C or --duration to stop)
-python scripts/log_observations.py /dev/gnss-top --baud 9600 --duration 3600
+python tools/log_observations.py /dev/gnss-top --baud 9600 --duration 3600
 ```
 
 ### configure_f9t.py
@@ -344,7 +344,7 @@ python scripts/phc_servo.py \
     --log data/servo_log.csv
 
 # 3. Analyze results (TDEV/ADEV plots, requires TICC data):
-python scripts/analyze_servo.py data/servo_log.csv
+python tools/analysis/analyze_servo.py data/servo_log.csv
 ```
 
 The servo selects the best error source at each epoch:

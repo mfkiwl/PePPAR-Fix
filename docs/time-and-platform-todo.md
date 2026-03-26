@@ -104,12 +104,12 @@ These files still contain older queue-order assumptions or duplicate timing logi
 
 - [`scripts/phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/phc_servo.py)
 - [`scripts/peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_phc_servo.py)
-- [`scripts/peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_main.py)
+- [`old/peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_main.py)
 
 Tasks:
 
 - [x] Put the strict observation/PPS correlation gate pattern into the legacy steady-state servo paths
-- [ ] Compare each legacy path against the unified event-history logic in [`scripts/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/scripts/peppar_fix_cmd.py)
+- [ ] Compare each legacy path against the unified event-history logic in [`old/peppar_fix_cmd.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_cmd.py)
 - [ ] Decide whether each path should be migrated, reduced, or removed
 - [ ] Avoid maintaining multiple subtly different correlation models
 

@@ -5,6 +5,7 @@ Connects to NTRIP SSR + broadcast ephemeris streams, waits for both to populate,
 then prints the actual orbit/clock correction values being applied per satellite.
 """
 
+import os
 import sys
 import time
 import threading
@@ -12,7 +13,7 @@ import queue
 import numpy as np
 from datetime import datetime, timezone
 
-sys.path.insert(0, '.')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'scripts'))
 from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections, C
 from ntrip_client import NtripStream
