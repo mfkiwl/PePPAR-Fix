@@ -191,6 +191,7 @@ here before changing anything in the areas they cover.
 | [nic-survey.md](docs/nic-survey.md) | Survey of NICs with PTP hardware timestamping support. |
 | [e810-cm5-research.md](docs/e810-cm5-research.md) | E810 on Raspberry Pi CM5: showstopper (ice driver x86-only). |
 | [phc-initialization.md](docs/phc-initialization.md) | PHC bootstrap design: cold/warm start, frequency/phase initialization, characterization method, drift file, how the servo starts with bounded error. |
+| [pps-ppp-error-source.md](docs/pps-ppp-error-source.md) | PPS+PPP servo error source: using carrier-phase dt_rx to replace TIM-TP qErr via 125 MHz tick model. Experiment results, calibration procedure, formula. |
 | [correction-sources.md](docs/correction-sources.md) | How to get SSR corrections: registration, caster options, which streams for float PPP vs PPP-AR, why AR requires a single analysis center. |
 | [galileo-has-research.md](docs/galileo-has-research.md) | Galileo HAS: free PPP-AR corrections via E6-B signal. |
 | [peer-bootstrap-sketch.md](docs/peer-bootstrap-sketch.md) | NTRIP caster mode for peer-to-peer bootstrap. |

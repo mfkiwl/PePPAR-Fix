@@ -60,6 +60,7 @@ from peppar_fix import (
     PositionWatchdog,
     StrictCorrelationGate,
     TimebaseRelationEstimator,
+    PPPCalibration,
     estimator_sample_weight,
     estimate_correlation_confidence,
     match_pps_event_from_history,
@@ -1148,6 +1149,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'position_saved': False,
         'compute_error_sources': compute_error_sources,
         'ticc_only_error_source': ticc_only_error_source,
+        'ppp_cal': PPPCalibration(tick_ns=8.0, min_samples=10),
         'tracking_large_error_count': 0,
         'tracking_mode': 'pull_in',
         'ticc_prev_error_ns': None,
@@ -1498,19 +1500,22 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             return "no_ticc"
         sources = ticc_only_error_source(ticc_diff_ns, args.ticc_confidence_ns)
     else:
-        # Gate PPS+PPP on |dt_rx| < 100µs.  The filter's dt_rx tracks
-        # the receiver clock offset (ms), not the PHC correction.  Only
-        # use it once time-differenced carrier phase has converged.
-        use_dt_rx = dt_rx_ns if abs(dt_rx_ns) < 100_000 else None
-        use_sigma = dt_rx_sigma if use_dt_rx is not None else None
+        # Feed PPP calibration: compare PPP-derived qerr against TIM-TP
+        # qErr for the first ~10 epochs to determine the constant offset.
+        ppp_cal = ctx['ppp_cal']
+        if (not ppp_cal.calibrated and qerr_ns is not None
+                and dt_rx_sigma is not None and dt_rx_sigma < args.carrier_max_sigma_ns):
+            done = ppp_cal.add_sample(dt_rx_ns, qerr_ns)
+            if done:
+                log.info(f"  PPP calibration done: offset={ppp_cal.offset_ns:+.3f}ns "
+                         f"({ppp_cal._n} samples)")
         sources = compute_error_sources(
             pps_error_ns,
             qerr_ns,
-            use_dt_rx,
-            use_sigma,
+            dt_rx_ns,
+            dt_rx_sigma,
             carrier_max_sigma=args.carrier_max_sigma_ns,
-            ticc_error_ns=None,
-            ticc_confidence=None,
+            ppp_cal=ppp_cal,
         )
     best = sources[0]
 
