@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""phc_bootstrap.py — Warm-start PHC initialization.
+"""phc_bootstrap.py — PHC bootstrap.
 
-Requires a stored position file. Runs a PPP clock solution for a few
-epochs, sanity-checks the PHC frequency and phase, and intervenes only
-if they disagree with the GNSS-derived estimates.
+Requires a stored position file.  Measures PHC frequency from PPS,
+runs a short PPP clock solution, then evaluates PHC phase and
+frequency.  Intervenes only if they disagree with GNSS-derived
+estimates: optimal stopping for the best achievable phase step,
+then a glide slope for smooth servo handoff.
 
 Exit codes:
     0 — PHC is ready for servo (blessed or stepped)
@@ -97,15 +99,26 @@ def _realtime_to_phc_offset_s(phc_timescale, leap, tai_minus_gps):
 
 
 def measure_pps_frequency(ptp, channel, n_samples=5, timeout_s=8):
-    """Measure PHC frequency error from PPS-to-PPS intervals.
+    """Measure PHC frequency error from first-to-last PPS fractional second.
 
-    Returns (median_ppb, sigma_ppb, n_intervals) or (None, None, 0)
-    if not enough samples.  The median is the frequency error estimate;
-    sigma is the standard deviation of individual interval measurements.
+    Captures n_samples+1 PPS events and computes the total fractional-second
+    drift over the full baseline.  With N PPS intervals (N seconds), the
+    frequency error is:
+
+        ppb = (last_nsec - first_nsec ± wrap_correction) / N
+
+    This uses the full N-second baseline for maximum precision, rather than
+    averaging individual 1-second interval measurements.
+
+    Returns (freq_ppb, sigma_ppb, n_intervals) or (None, None, 0)
+    if not enough samples.  sigma is estimated from the per-interval
+    residuals after removing the measured frequency trend.
     """
     ptp.enable_extts(channel, rising_edge=True)
-    intervals = []
-    prev_ns = None
+    # Store (elapsed_sec, nsec) relative to first PPS.  Keeps all values
+    # small enough for float64 without losing nanosecond precision.
+    samples = []  # (elapsed_sec, nsec)
+    first_sec = None
     deadline = time.monotonic() + timeout_s
 
     for _ in range(n_samples + 1):
@@ -115,22 +128,52 @@ def measure_pps_frequency(ptp, channel, n_samples=5, timeout_s=8):
         if event is None:
             continue
         sec, nsec, _idx, _mono, _qr, _pa = event
-        phc_ns = sec * 1_000_000_000 + nsec
-        if prev_ns is not None:
-            interval_ns = phc_ns - prev_ns
-            # Expect ~1e9 ns per PPS interval
-            freq_error_ppb = (interval_ns - 1_000_000_000) / 1.0
-            intervals.append(freq_error_ppb)
-        prev_ns = phc_ns
+        if first_sec is None:
+            first_sec = sec
+        samples.append((sec - first_sec, nsec))
 
     ptp.disable_extts(channel)
 
-    if len(intervals) < 2:
+    if len(samples) < 2:
         return None, None, 0
-    import statistics
-    return (statistics.median(intervals),
-            statistics.stdev(intervals),
-            len(intervals))
+
+    # Full-baseline frequency: fractional-second drift over N PPS intervals.
+    n_intervals = samples[-1][0]  # elapsed integer seconds
+    if n_intervals <= 0:
+        return None, None, 0
+
+    # Fractional-second drift, handling wrap through zero.
+    nsec_drift = samples[-1][1] - samples[0][1]
+    if nsec_drift > 500_000_000:
+        nsec_drift -= 1_000_000_000
+        n_intervals += 1
+    elif nsec_drift < -500_000_000:
+        nsec_drift += 1_000_000_000
+        n_intervals -= 1
+
+    freq_ppb = nsec_drift / n_intervals
+
+    # Estimate per-interval jitter from detrended residuals.
+    if len(samples) >= 3:
+        residuals = []
+        for elapsed_s, nsec in samples[1:]:
+            if elapsed_s <= 0:
+                continue
+            predicted_nsec = samples[0][1] + freq_ppb * elapsed_s
+            actual_nsec = nsec
+            # Handle fractional-second wrap in the comparison
+            diff = actual_nsec - predicted_nsec
+            if diff > 500_000_000:
+                diff -= 1_000_000_000
+            elif diff < -500_000_000:
+                diff += 1_000_000_000
+            residuals.append(diff)
+        import statistics
+        sigma_ppb = statistics.stdev(residuals) if len(residuals) >= 2 else 0.0
+    else:
+        sigma_ppb = 0.0
+
+    return (freq_ppb, sigma_ppb, len(samples) - 1)
 
 
 # ── Main ─────────────────────────────────────────────────────────── #
@@ -186,12 +229,27 @@ def _apply_bootstrap_profile(args):
     if args.phc_timescale == "tai":
         args.phc_timescale = profile.get("timescale", args.phc_timescale)
 
+    # Servo gains for glide frequency computation
+    if args.track_kp == 0.01:
+        args.track_kp = profile.get("track_kp", args.track_kp)
+    if args.track_ki == 0.001:
+        args.track_ki = profile.get("track_ki", args.track_ki)
+    if args.glide_zeta == 0.7:
+        args.glide_zeta = profile.get("glide_zeta", args.glide_zeta)
+    if args.track_max_ppb == 0:
+        args.track_max_ppb = profile.get("track_max_ppb", 100000.0)
+    if args.search_time_s == 1.0:
+        args.search_time_s = profile.get("search_time_s", args.search_time_s)
+
     log.info("  settime_lag_ns=%d step_error_ns=%d step_budget_ms=%d",
              args.settime_lag_ns, args.step_error_ns, args.step_budget_ms)
+    log.info("  track_kp=%.4f track_ki=%.4f glide_zeta=%.2f track_max=%.0f ppb",
+             args.track_kp, args.track_ki, args.glide_zeta, args.track_max_ppb)
+    log.info("  search_time=%.1fs", args.search_time_s)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Warm-start PHC initialization")
+    ap = argparse.ArgumentParser(description="PHC bootstrap")
     ap.add_argument("--position-file", required=True)
     ap.add_argument("--serial", required=True)
     ap.add_argument("--baud", type=int, default=9600)
@@ -229,6 +287,16 @@ def main():
                     help="Max PPS feedback iterations for step convergence (default: 8)")
     ap.add_argument("--position-check-m", type=float, default=100.0,
                     help="Max acceptable LS-vs-stored position delta in meters")
+    ap.add_argument("--search-time-s", type=float, default=1.0,
+                    help="Phase step search budget in seconds (default: 1s)")
+    ap.add_argument("--glide-zeta", type=float, default=0.7,
+                    help="Target damping ratio for servo glide (0.5-1.0)")
+    ap.add_argument("--track-kp", type=float, default=0.01,
+                    help="Servo Kp for glide computation (overridden by profile)")
+    ap.add_argument("--track-ki", type=float, default=0.001,
+                    help="Servo Ki for glide computation (overridden by profile)")
+    ap.add_argument("--track-max-ppb", type=float, default=0,
+                    help="Servo max adjfine — glide is clamped to this (from profile)")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -490,108 +558,115 @@ def main():
         ptp.close()
         return 0
 
-    # ── Intervene on whichever is wrong, leave the other alone ───── #
+    # ── Intervene ─────────────────────────────────────────────────── #
+    #
+    # Three steps:
+    #
+    # 1. Phase step — use optimal stopping to get the best achievable
+    #    PHC phase within a fixed search budget.  The step error has a
+    #    log-normal distribution (fixed minimum kernel path + multiplicative
+    #    scheduling jitter).  Optimal stopping learns the distribution
+    #    during the first 37% of the budget, then accepts the first
+    #    result at or below the 5th percentile.
+    #
+    # 2. PPS measurement — capture one PPS event to measure the true
+    #    residual φ₀ (the readback used by optimal stopping has a
+    #    systematic bias from PTP_SYS_OFFSET asymmetry; PPS is truth).
+    #
+    # 3. Glide slope — set a PHC frequency that drives φ₀ toward zero
+    #    at the rate the servo expects for a near-critically-damped
+    #    handoff:  dφ/dt₀ = -ζ·ωₙ·φ₀  where ωₙ = √Ki.
+
+    # Compute base frequency (the on-rate adjfine, excluding transient glide)
+    current_adj = ptp.read_adjfine()
+    if not freq_sane:
+        if pps_freq_ppb is not None and pps_freq_unc is not None:
+            if drift and pps_freq_unc > args.freq_tolerance_ppb:
+                base_freq = drift["adjfine_ppb"]
+                freq_source = ("drift file (PPS sigma/sqrt(n)=%.1f ppb too high)"
+                               % pps_freq_unc)
+            else:
+                base_freq = current_adj - pps_freq_ppb
+                freq_source = ("PPS correction: %.1f - %.1f"
+                               % (current_adj, pps_freq_ppb))
+        elif drift:
+            base_freq = drift["adjfine_ppb"]
+            freq_source = "drift file"
+        else:
+            base_freq = 0.0
+            freq_source = "default (no data)"
+        log.info("Base frequency: %.1f ppb (%s)", base_freq, freq_source)
+    else:
+        base_freq = current_adj
+        log.info("Frequency sane: base_freq = %.1f ppb", base_freq)
+
+    phi_0 = phase_error_ns
 
     if not phase_sane:
-        # PPS-anchored step: the PHC should read target_sec.000000000
-        # at the PPS edge.  CLOCK_REALTIME is used only as a transfer
-        # standard — its phase error cancels in the subtraction of two
-        # reads.  See docs/stream-timescale-correlation.md Rule 6.
+        # Step 1: Phase step with optimal stopping.
         pps_anchor_ns = target_sec * 1_000_000_000
-        log.info("Stepping PHC phase (PPS-anchored, target_sec=%d, "
-                 "target_error=%d ns, budget=%d ms)",
-                 target_sec, args.step_error_ns, args.step_budget_ms)
+        log.info("Stepping PHC (optimal_stop, search=%.1fs, target_sec=%d, lag=%d ns)",
+                 args.search_time_s, target_sec, args.settime_lag_ns)
         residual, attempts, met = ptp.step_to(
             pps_anchor_ns=pps_anchor_ns,
             pps_realtime_ns=pps_realtime_ns,
             target_error_ns=args.step_error_ns,
-            max_time_ms=args.step_budget_ms,
+            max_time_ms=int(args.search_time_s * 1000),
             settime_lag_ns=args.settime_lag_ns,
+            optimal_stop=True,
         )
-        log.info("Step result: residual=%+.0f ns, attempts=%d, %s",
-                 residual, attempts, "HIT" if met else "TIMEOUT")
+        log.info("Step: residual=%+.0f ns, attempts=%d, %s (search=%.1fs)",
+                 residual, attempts, "ACCEPTED" if met else "DEADLINE",
+                 args.search_time_s)
 
-        # PPS feedback loop: the PPS edge is ground truth.  Readback
-        # (PTP_SYS_OFFSET) has ~100µs asymmetry, so we can't rely on it
-        # for absolute accuracy.  Instead, capture PPS, measure the real
-        # error, and correct iteratively.  Converges in 2-3 PPS cycles.
+        # Step 2: Measure true residual φ₀ via PPS.
         ptp.enable_extts(args.extts_channel, rising_edge=True)
-        last_verify_error = None
-        current_lag = args.settime_lag_ns
-        max_pps_iterations = args.max_pps_iterations
-        for iteration in range(max_pps_iterations):
-            # Capture one PPS event to measure actual phase error
-            evt = ptp.read_extts(timeout_ms=2000)
-            if evt is None:
-                log.warning("  PPS verify [%d]: no event", iteration + 1)
-                continue
+        evt = ptp.read_extts(timeout_ms=2000)
+        if evt is not None:
             v_realtime_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
             v_sec, v_nsec = evt[0], evt[1]
             v_rounded = v_sec if v_nsec < 500_000_000 else v_sec + 1
             v_target = round(v_realtime_ns / 1_000_000_000) + offset_s
             v_epoch_off = v_rounded - v_target
             v_sub_ns = v_nsec if v_nsec < 500_000_000 else v_nsec - 1_000_000_000
-            last_verify_error = v_epoch_off * 1_000_000_000 + v_sub_ns
-            log.info("  PPS verify [%d]: %+.0f ns (epoch_offset=%d)",
-                     iteration + 1, last_verify_error, v_epoch_off)
-
-            if abs(last_verify_error) <= args.step_error_ns:
-                break  # within tolerance
-
-            # Accumulate correction: adjust lag from CURRENT value by
-            # the measured PPS error.  If PHC is behind (error < 0),
-            # increase lag; if ahead (error > 0), decrease lag.
-            pps_anchor_ns = v_target * 1_000_000_000
-            pps_realtime_ns = v_realtime_ns
-            current_lag = current_lag - last_verify_error
-            log.info("  Correcting: lag → %d ns (PPS error %+.0f ns)",
-                     current_lag, last_verify_error)
-            ptp.step_to(
-                pps_anchor_ns=pps_anchor_ns,
-                pps_realtime_ns=pps_realtime_ns,
-                target_error_ns=args.step_error_ns,
-                max_time_ms=args.step_budget_ms,
-                settime_lag_ns=current_lag,
-            )
-        ptp.disable_extts(args.extts_channel)
-
-        if last_verify_error is not None and abs(last_verify_error) <= args.step_error_ns:
-            log.info("Post-step PPS verified: %+.0f ns", last_verify_error)
-    else:
-        log.info("Phase OK (%+.0f ns) — leaving PHC time alone", phase_error_ns)
-
-    if not freq_sane:
-        # Read current hardware adjfine to compute correction.
-        # new_adjfine = current_adjfine - pps_freq_ppb  (cancel the error)
-        current_adj = ptp.read_adjfine()
-        log.info("Current PHC adjfine: %.1f ppb", current_adj)
-
-        if pps_freq_ppb is not None and pps_freq_unc is not None:
-            # Decide: trust PPS measurement or drift file?
-            # Low sigma/sqrt(n) → PPS is reliable, use it.
-            # High sigma → PPS is noisy, prefer drift file if available.
-            if drift and pps_freq_unc > args.freq_tolerance_ppb:
-                new_freq = drift["adjfine_ppb"]
-                source = ("drift file (PPS σ/√n=%.1f ppb too high)" %
-                          pps_freq_unc)
-            else:
-                new_freq = current_adj - pps_freq_ppb
-                source = ("PPS correction: %.1f - %.1f" %
-                          (current_adj, pps_freq_ppb))
-        elif drift:
-            new_freq = drift["adjfine_ppb"]
-            source = "drift file"
+            phi_0 = v_epoch_off * 1_000_000_000 + v_sub_ns
+            log.info("PPS truth: phi_0 = %+.0f ns (epoch_offset=%d)",
+                     phi_0, v_epoch_off)
         else:
-            new_freq = 0.0
-            source = "default (no data)"
-        log.info("Setting PHC frequency to %.1f ppb (from %s)",
-                 new_freq, source)
-        ptp.adjfine(new_freq)
-        # Only update drift file when we changed frequency
-        save_drift(args.drift_file, new_freq, args.ptp_dev)
-        log.info("Drift file updated: %s", args.drift_file)
+            log.warning("No PPS event — using readback residual as phi_0")
+            phi_0 = residual
+        ptp.disable_extts(args.extts_channel)
     else:
-        log.info("Frequency OK — leaving adjfine and drift file alone")
+        log.info("Phase OK (%+.0f ns) — frequency-only correction", phase_error_ns)
+
+    # Step 3: Glide slope — set frequency to drive φ₀ toward zero.
+    glide_offset = 0.0
+    if not phase_sane and args.track_ki > 0:
+        omega_n = math.sqrt(args.track_ki)
+        zeta = args.glide_zeta
+        glide_offset = -zeta * omega_n * phi_0
+        # Clamp so |base + glide| stays within servo's track_max_ppb.
+        # If the glide exceeds control authority, the servo saturates and
+        # the integral winds up, destroying the smooth handoff.
+        max_glide = args.track_max_ppb - abs(base_freq)
+        if abs(glide_offset) > max_glide:
+            clamped = math.copysign(max_glide, glide_offset)
+            log.warning("Glide clamped: %.0f → %.0f ppb (track_max=%.0f)",
+                        glide_offset, clamped, args.track_max_ppb)
+            glide_offset = clamped
+        t_cross = abs(phi_0 / glide_offset) if glide_offset != 0 else float('inf')
+        log.info("Glide: zeta=%.2f, omega_n=%.4f rad/s, phi_0=%+.0f ns, "
+                 "offset=%+.1f ppb, zero-crossing ~%.0fs",
+                 zeta, omega_n, phi_0, glide_offset, t_cross)
+
+    target_freq = base_freq + glide_offset
+    log.info("Setting adjfine: %.1f ppb (base=%.1f + glide=%.1f)",
+             target_freq, base_freq, glide_offset)
+    ptp.adjfine(target_freq)
+
+    # Save base frequency to drift file (not the transient glide offset)
+    save_drift(args.drift_file, base_freq, args.ptp_dev)
+    log.info("Drift file updated: %s (base=%.1f ppb)", args.drift_file, base_freq)
 
     ptp.close()
     log.info("PHC bootstrap complete — servo may start")

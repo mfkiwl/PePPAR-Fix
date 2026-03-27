@@ -136,7 +136,7 @@ def gm_settings_locked() -> bytes:
 
 
 def gm_settings_initialized() -> bytes:
-    """clockClass 52: PHC initialized (phase/freq set), servo not yet settled."""
+    """clockClass 52: PHC bootstrapped (phase/freq set), servo not yet settled."""
     return _build_grandmaster_settings(
         clock_class=52,
         clock_accuracy=ACCURACY_1US,

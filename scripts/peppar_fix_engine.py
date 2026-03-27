@@ -1626,7 +1626,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         )
     best = sources[0]
 
-    # No warmup or step phases — bootstrap handles PHC initialization.
+    # No warmup or step phases — PHC bootstrap handles phase and frequency.
     # PI tracking from epoch 1.
 
     # Tracking phase
@@ -1656,7 +1656,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         return "outlier"
 
     scheduler.accumulate(best.error_ns, best.confidence_ns, best.name)
-    # Three-stage clockClass promotion: 248 (boot) → 52 (PHC initialized,
+    # Three-stage clockClass promotion: 248 (boot) → 52 (PHC bootstrapped,
     # set by wrapper after bootstrap) → 6 (servo settled).  Demote back
     # to 52 if the scheduler leaves settled state.
     if not scheduler._converging:

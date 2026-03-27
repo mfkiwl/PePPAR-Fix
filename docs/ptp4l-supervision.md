@@ -44,7 +44,7 @@ clock through three stages as confidence increases, and demotes it
 when confidence is lost:
 
 ```
-248 (freerun) ──bootstrap──▶ 52 (initialized) ──settled──▶ 6 (locked)
+248 (freerun) ──bootstrap──▶ 52 (bootstrapped) ──settled──▶ 6 (locked)
                                   ▲                            │
                                   └──unsettled──◀──────────────┘
                                         │
@@ -56,7 +56,7 @@ when confidence is lost:
 | peppar-fix state | clockClass | clockAccuracy | timeSource | Meaning |
 |---|---|---|---|---|
 | Boot / freerun | 248 | 0xFE (unknown) | 0xA0 (internal osc.) | No idea what time it is |
-| PHC initialized | 52 | 0x23 (1 µs) | 0x20 (GPS) | Phase/freq set, servo converging |
+| PHC bootstrapped | 52 | 0x23 (1 µs) | 0x20 (GPS) | Phase/freq set, servo converging |
 | Servo settled | 6 | 0x20 (25 ns) | 0x20 (GPS) | Primary GNSS reference |
 | Holdover | 7 | 0x23 (1 µs) | 0x20 (GPS) | Previously locked, coasting |
 

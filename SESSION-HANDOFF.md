@@ -25,7 +25,7 @@ on TimeHat and ocxo.
 
 ### ptp4l clockClass supervision
 - Three-layer failsafe: engine (Python UDS), wrapper (pmc command), systemd ExecStopPost
-- Three-stage promotion: 248 (boot) → 52 (PHC initialized) → 6 (servo settled)
+- Three-stage promotion: 248 (boot) → 52 (PHC bootstrapped) → 6 (servo settled)
 - Degradation: 6→52 (unsettled), 6→7 (holdover), any→248 (crash/diverge)
 - Python PMC client talks directly to ptp4l's Unix domain socket
 - Tested end-to-end on TimeHat with ptp4l domain 30
@@ -130,5 +130,5 @@ The TICC data at data/ticc-1hr.csv provides sub-ns timestamps.
 | config/receivers.toml | Step characterization params, servo gain tuning for both platforms |
 | docs/ptp4l-supervision.md | NEW: Three-layer clockClass supervision design |
 | docs/extts-lifecycle.md | NEW: EXTTS initialization lifecycle design |
-| docs/phc-initialization.md | E810 characterization data, platform comparison |
+| docs/phc-bootstrap.md | E810 characterization data, platform comparison |
 | deploy/peppar-fix.service | NEW: Example systemd unit with ExecStopPost failsafe |
