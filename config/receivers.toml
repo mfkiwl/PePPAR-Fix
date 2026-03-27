@@ -28,18 +28,20 @@ timescale = "tai"
 settime_lag_ns = 200000       # PPS-calibrated clock_settime lag
 step_error_ns = 10000         # achievable step accuracy (±10 µs)
 max_step_time_ms = 500        # retry budget (~80k attempts at 6 µs each)
-# Servo tuning
-track_kp = 0.005
-track_ki = 0.0005
+# Servo tuning — doubled from original for faster convergence.
+# With bootstrap providing adjfine within ~1 ppb, these gains should
+# settle in ~2 minutes rather than 15+.
+track_kp = 0.01
+track_ki = 0.001
 track_max_ppb = 100000.0
 track_outlier_ns = 10000.0
 track_restep_ns = 100000.0
-discipline_interval = 2
+discipline_interval = 1
 adaptive_interval = true
 min_interval = 1
 max_interval = 10
 gain_ref_sigma = 4.0
-gain_min_scale = 0.05
+gain_min_scale = 0.1
 gain_max_scale = 0.5
 converge_error_ns = 5000.0
 converge_min_scale = 1.0
@@ -68,11 +70,24 @@ timescale = "tai"
 settime_lag_ns = 16000000     # PPS-calibrated clock_settime lag
 step_error_ns = 2000000       # achievable step accuracy (±2 ms)
 max_step_time_ms = 5000       # retry budget (~300 attempts at ~7 ms avg each)
-# Servo tuning
-track_kp = 0.05
-track_ki = 0.01
-track_max_ppb = 1000000.0
-track_restep_ns = 5000000.0   # 5 ms — must exceed step_error_ns to avoid immediate exit
+# Servo tuning — OCXO needs gentle corrections.  The crystal is
+# inherently stable (0.0 ppb measured); large adjfine swings are
+# counterproductive.  Lower gains prevent divergence from the ±2 ms
+# bootstrap phase error.
+track_kp = 0.005
+track_ki = 0.001
+track_max_ppb = 100000.0
+track_outlier_ns = 50000.0
+track_restep_ns = 50000000.0  # 50 ms — generous during initial convergence from ±2 ms step
+discipline_interval = 1
+gain_ref_sigma = 4.0
+gain_min_scale = 0.1
+gain_max_scale = 0.5
+converge_error_ns = 50000.0   # larger than i226 — E810 step is ±2 ms
+converge_min_scale = 1.0
+scheduler_converge_threshold_ns = 5000.0  # 5 µs — looser than i226
+scheduler_settle_window = 20
+scheduler_unconverge_factor = 10.0
 obs_idle_timeout_s = 15.0
 max_broadcast_age_s = 30.0
 require_ssr = false
