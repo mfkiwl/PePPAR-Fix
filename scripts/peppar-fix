@@ -253,6 +253,48 @@ else
     echo "  Position file exists: $POSITION_FILE"
 fi
 
+# ── pmc helpers for clockClass management ──────────────────────────── #
+
+promote_clock_class_initialized() {
+    if [[ -z "$PMC_UDS" ]]; then
+        return
+    fi
+    echo "  Promoting clockClass to 52 (initialized) via pmc"
+    pmc -u -i "/tmp/peppar-pmc.$$" -s "$PMC_UDS" -d "$PMC_DOMAIN" -b 0 \
+        "SET GRANDMASTER_SETTINGS_NP \
+            clockClass 52 \
+            clockAccuracy 0x23 \
+            offsetScaledLogVariance 0xffff \
+            currentUtcOffset 37 \
+            leap61 0 \
+            leap59 0 \
+            currentUtcOffsetValid 1 \
+            ptpTimescale 1 \
+            timeTraceable 1 \
+            frequencyTraceable 0 \
+            timeSource 0x20" 2>/dev/null || true
+}
+
+degrade_clock_class() {
+    if [[ -z "$PMC_UDS" ]]; then
+        return
+    fi
+    echo "  Degrading clockClass to 248 (freerun) via pmc"
+    pmc -u -i "/tmp/peppar-pmc.$$" -s "$PMC_UDS" -d "$PMC_DOMAIN" -b 0 \
+        "SET GRANDMASTER_SETTINGS_NP \
+            clockClass 248 \
+            clockAccuracy 0xfe \
+            offsetScaledLogVariance 0xffff \
+            currentUtcOffset 37 \
+            leap61 0 \
+            leap59 0 \
+            currentUtcOffsetValid 0 \
+            ptpTimescale 1 \
+            timeTraceable 0 \
+            frequencyTraceable 0 \
+            timeSource 0xa0" 2>/dev/null || true
+}
+
 # ── Step 2b: PHC bootstrap (if PTP device configured) ──────────────────── #
 # Sets PHC phase within ±10µs and frequency within ±10ppb so the engine's
 # servo can start PI tracking from epoch 1 with no warmup or step logic.
@@ -354,48 +396,6 @@ build_servo_args() {
         args+=("${ENGINE_EXTRA_ARGS[@]}")
     fi
     echo "${args[@]}"
-}
-
-# ── pmc helpers for clockClass management ──────────────────────────── #
-
-promote_clock_class_initialized() {
-    if [[ -z "$PMC_UDS" ]]; then
-        return
-    fi
-    echo "  Promoting clockClass to 52 (initialized) via pmc"
-    pmc -u -i "/tmp/peppar-pmc.$$" -s "$PMC_UDS" -d "$PMC_DOMAIN" -b 0 \
-        "SET GRANDMASTER_SETTINGS_NP \
-            clockClass 52 \
-            clockAccuracy 0x23 \
-            offsetScaledLogVariance 0xffff \
-            currentUtcOffset 37 \
-            leap61 0 \
-            leap59 0 \
-            currentUtcOffsetValid 1 \
-            ptpTimescale 1 \
-            timeTraceable 1 \
-            frequencyTraceable 0 \
-            timeSource 0x20" 2>/dev/null || true
-}
-
-degrade_clock_class() {
-    if [[ -z "$PMC_UDS" ]]; then
-        return
-    fi
-    echo "  Degrading clockClass to 248 (freerun) via pmc"
-    pmc -u -i "/tmp/peppar-pmc.$$" -s "$PMC_UDS" -d "$PMC_DOMAIN" -b 0 \
-        "SET GRANDMASTER_SETTINGS_NP \
-            clockClass 248 \
-            clockAccuracy 0xfe \
-            offsetScaledLogVariance 0xffff \
-            currentUtcOffset 37 \
-            leap61 0 \
-            leap59 0 \
-            currentUtcOffsetValid 0 \
-            ptpTimescale 1 \
-            timeTraceable 0 \
-            frequencyTraceable 0 \
-            timeSource 0xa0" 2>/dev/null || true
 }
 
 while true; do
