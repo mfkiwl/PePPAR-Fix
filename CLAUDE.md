@@ -195,6 +195,7 @@ here before changing anything in the areas they cover.
 | [correction-sources.md](docs/correction-sources.md) | How to get SSR corrections: registration, caster options, which streams for float PPP vs PPP-AR, why AR requires a single analysis center. |
 | [galileo-has-research.md](docs/galileo-has-research.md) | Galileo HAS: free PPP-AR corrections via E6-B signal. |
 | [peer-bootstrap-sketch.md](docs/peer-bootstrap-sketch.md) | NTRIP caster mode for peer-to-peer bootstrap. |
+| [ntrip-mdns-discovery.md](docs/ntrip-mdns-discovery.md) | Spec: mDNS service advertisement for NTRIP peer discovery. Caster announces `_ntrip._tcp`, client discovers and selects by accuracy/proximity. |
 | [ticc-calibration-2026-03-19.md](docs/ticc-calibration-2026-03-19.md) | TICC calibration procedure and results. |
 | [hw-labels.md](docs/hw-labels.md) | Hardware labeling conventions for beads. |
 | [draft-dupage-inquiry.md](docs/draft-dupage-inquiry.md) | Draft inquiry to DuPage County about GNSS antenna siting. |

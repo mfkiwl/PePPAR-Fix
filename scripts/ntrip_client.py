@@ -162,6 +162,8 @@ class NtripStream:
         self._sock = None
         self._connected = False
 
+    close = disconnect
+
     def _recv(self, n=4096):
         """Receive data and append to buffer."""
         data = self._sock.recv(n)
