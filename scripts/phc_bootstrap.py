@@ -95,6 +95,30 @@ def _realtime_to_phc_offset_s(phc_timescale, leap, tai_minus_gps):
     raise ValueError(f"Unsupported timescale: {phc_timescale}")
 
 
+# ── PPS OUT (PEROUT) ─────────────────────────────────────────────── #
+
+
+def _enable_pps_out(ptp, args):
+    """Program PPS OUT pin and enable PEROUT if configured.
+
+    Must be called after any PHC phase step — stepping the PHC
+    invalidates the PEROUT alignment, stopping the output pulse.
+    """
+    if args.pps_out_pin < 0:
+        return
+    from peppar_fix.ptp_device import PTP_PF_PEROUT
+    try:
+        ptp.set_pin_function(args.pps_out_pin, PTP_PF_PEROUT,
+                             args.pps_out_channel)
+        # Cancel any stale PEROUT, then re-enable
+        ptp.disable_perout(args.pps_out_channel)
+        ptp.enable_perout(args.pps_out_channel)
+        log.info("PPS OUT enabled: pin %d, PEROUT channel %d",
+                 args.pps_out_pin, args.pps_out_channel)
+    except OSError as e:
+        log.warning("Failed to enable PPS OUT: %s", e)
+
+
 # ── PPS frequency measurement ────────────────────────────────────── #
 
 
@@ -228,6 +252,10 @@ def _apply_bootstrap_profile(args):
         args.program_pin = bool(profile.get("program_pin", False))
     if args.phc_timescale == "tai":
         args.phc_timescale = profile.get("timescale", args.phc_timescale)
+    if args.pps_out_pin == -1:
+        args.pps_out_pin = profile.get("pps_out_pin", args.pps_out_pin)
+    if args.pps_out_channel == 0:
+        args.pps_out_channel = profile.get("pps_out_channel", args.pps_out_channel)
 
     # Servo gains for glide frequency computation
     if args.track_kp == 0.01:
@@ -267,6 +295,10 @@ def main():
                     help="Path to receivers.toml (default: auto-detect)")
     ap.add_argument("--extts-channel", type=int, default=0)
     ap.add_argument("--pps-pin", type=int, default=None)
+    ap.add_argument("--pps-out-pin", type=int, default=-1,
+                    help="SDP pin for PPS OUT (PEROUT), -1 = none")
+    ap.add_argument("--pps-out-channel", type=int, default=0,
+                    help="PEROUT channel for PPS OUT")
     ap.add_argument("--program-pin", action="store_true")
     ap.add_argument("--phc-timescale", default="tai",
                     choices=["gps", "utc", "tai"])
@@ -555,6 +587,7 @@ def main():
         log.info("PHC state is sane — blessing without intervention")
         log.info("  Phase error: %+.0f ns (within %d ns)",
                  phase_error_ns, args.step_error_ns)
+        _enable_pps_out(ptp, args)
         ptp.close()
         return 0
 
@@ -668,6 +701,7 @@ def main():
     save_drift(args.drift_file, base_freq, args.ptp_dev)
     log.info("Drift file updated: %s (base=%.1f ppb)", args.drift_file, base_freq)
 
+    _enable_pps_out(ptp, args)
     ptp.close()
     log.info("PHC bootstrap complete — servo may start")
     return 0

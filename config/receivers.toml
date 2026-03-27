@@ -58,6 +58,8 @@ min_correlation_confidence = 0.5
 min_broadcast_confidence = 0.0
 min_ssr_confidence = 0.0
 program_pin = true
+pps_out_pin = 0               # SDP0 outputs disciplined PPS to TICC chA
+pps_out_channel = 0           # PEROUT channel 0
 note = "Intel i226 / igc timing core with explicit SDP pin mapping"
 
 [ptp.e810]

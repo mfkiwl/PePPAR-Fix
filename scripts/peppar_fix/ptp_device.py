@@ -33,6 +33,8 @@ def _IOW(typ, nr, size):
 
 PTP_EXTTS_REQUEST = _IOW(PTP_CLK_MAGIC, 2, 16)
 PTP_EXTTS_REQUEST2 = _IOW(PTP_CLK_MAGIC, 11, 16)
+PTP_PEROUT_REQUEST = _IOW(PTP_CLK_MAGIC, 3, 56)
+PTP_PEROUT_REQUEST2 = _IOW(PTP_CLK_MAGIC, 12, 76)
 PTP_EXTTS_EVENT_SIZE = 32
 PTP_CLOCK_GETCAPS = _IOR(PTP_CLK_MAGIC, 1, 80)
 PTP_PIN_SETFUNC = _IOW(PTP_CLK_MAGIC, 7, 96)
@@ -118,6 +120,40 @@ class PtpDevice:
             fcntl.ioctl(self.fd, PTP_EXTTS_REQUEST2, buf)
         except OSError:
             fcntl.ioctl(self.fd, PTP_EXTTS_REQUEST, buf)
+
+    def enable_perout(self, channel, period_ns=1_000_000_000):
+        """Enable periodic output (1PPS) on a channel.
+
+        Kernel struct ptp_perout_request (v1, 56 bytes):
+          ptp_clock_time start;   // {s64 sec, u32 nsec, u32 reserved} = 16 bytes
+          ptp_clock_time period;  // 16 bytes
+          u32 index;              // 4 bytes
+          u32 flags;              // 4 bytes
+          ptp_clock_time on;      // 16 bytes (v2 only, zero for v1)
+        """
+        period_s = period_ns // 1_000_000_000
+        period_sub = period_ns % 1_000_000_000
+        buf = struct.pack('<qII qII II qII',
+                          0, 0, 0,                   # start: {sec=0, nsec=0, rsv=0}
+                          period_s, period_sub, 0,   # period: {sec, nsec, rsv}
+                          channel, 0,                # index, flags
+                          0, 0, 0)                   # on: {0, 0, 0}
+        try:
+            fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST2, buf)
+        except OSError:
+            fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST, buf)
+
+    def disable_perout(self, channel):
+        """Disable periodic output on a channel."""
+        buf = struct.pack('<qII qII II qII',
+                          0, 0, 0,
+                          0, 0, 0,      # period=0 disables
+                          channel, 0,
+                          0, 0, 0)
+        try:
+            fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST2, buf)
+        except OSError:
+            fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST, buf)
 
     def read_extts(self, timeout_ms=1500):
         """Read one external timestamp event.
