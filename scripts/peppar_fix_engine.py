@@ -698,11 +698,12 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
     # Optional servo setup (PTP imports only loaded when needed)
     servo_ctx = None
     if args.servo:
-        servo_ctx = _setup_servo(args, known_ecef, qerr_store)
-        if servo_ctx is None:
-            log.error("Failed to set up PHC servo, continuing without it")
-        else:
-            servo_ctx["correlation_gate"] = StrictCorrelationGate()
+        servo_result = _setup_servo(args, known_ecef, qerr_store)
+        if isinstance(servo_result, int):
+            log.error("Failed to set up PHC servo (exit code %d)", servo_result)
+            return servo_result
+        servo_ctx = servo_result
+        servo_ctx["correlation_gate"] = StrictCorrelationGate()
 
     prev_t = None
     n_epochs = 0
@@ -1028,20 +1029,24 @@ def _set_clock_class(ctx, state):
 
 
 def _setup_servo(args, known_ecef, qerr_store):
-    """Set up PHC servo. Returns context dict or None on failure."""
+    """Set up PHC servo.
+
+    Returns context dict on success, or an int exit code on failure:
+    1 = fatal (device or library error), 3 = no PPS (retryable).
+    """
     gate_stats = None
     try:
         from peppar_fix import PtpDevice, PIServo, DisciplineScheduler
         from peppar_fix import compute_error_sources, ticc_only_error_source
     except ImportError:
         log.error("peppar_fix library not available for servo")
-        return None
+        return 1
 
     try:
         ptp = PtpDevice(args.servo)
     except OSError as e:
         log.error(f"Cannot open PTP device {args.servo}: {e}")
-        return None
+        return 1
 
     caps = ptp.get_caps()
     log.info(f"PHC: {args.servo}, max_adj={caps['max_adj']} ppb, "
@@ -1064,6 +1069,19 @@ def _setup_servo(args, known_ecef, qerr_store):
         log.info("Skipping pin programming; using implicit EXTS mapping")
     ptp.enable_extts(extts_channel, rising_edge=True)
     log.info(f"EXTTS enabled: pin={args.pps_pin}, channel={extts_channel}")
+
+    # Verify PPS is actually arriving before committing to the servo loop.
+    # Catches: broken wiring, driver state corruption, bootstrap failure.
+    test_pps = ptp.read_extts(timeout_ms=3000)
+    if test_pps is None:
+        log.error("No PPS event within 3s after enabling EXTTS — "
+                  "check PPS wiring, pin config, and PTP device")
+        ptp.disable_extts(extts_channel)
+        ptp.close()
+        return 3  # no PPS — wrapper should retry
+    phc_sec, phc_nsec = test_pps[0], test_pps[1]
+    pps_err = phc_nsec if phc_nsec < 500_000_000 else phc_nsec - 1_000_000_000
+    log.info("PPS verified: phc_sec=%d error=%+d ns", phc_sec, pps_err)
 
     servo = PIServo(args.track_kp, args.track_ki, max_ppb=caps['max_adj'],
                     initial_freq=current_adj)
