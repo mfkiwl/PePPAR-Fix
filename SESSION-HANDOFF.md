@@ -1,165 +1,134 @@
-# Session Handoff — 2026-03-26
+# Session Handoff — 2026-03-27
 
-This document captures the state of work at the end of a long session.
-Read it to understand what was done, what's working, what's broken, and
-what to do next.  Delete or archive it once the next session has picked
-up the threads.
+Long session covering queue diagnostics, ptp4l supervision, PHC
+characterization, and servo tuning.  Two hour-long runs in progress
+on TimeHat and ocxo.
 
 ## What was accomplished
 
-### PPS+PPP error source (complete, merged)
+### Queue depth monitoring and diagnostics
+- High-water mark tracking for obs_queue, obs_history, pps_history
+- Configurable depth threshold with diagnostic dump (--queue-depth-threshold, --queue-depth-dump)
+- HWMs logged every 20 minutes and included in --gate-stats JSON
 
-The PPP filter's `dt_rx` can replace TIM-TP `qErr` as the PPS
-correction, yielding 0.1 ns confidence vs qErr's 3 ns.
+### Correlation gate fixes
+- queue_remains=True drain limited to initialization only (was discarding
+  ~50% of E810 epochs in steady state)
+- Permanently unmatchable observations dropped immediately instead of
+  blocking the FIFO for 11 seconds (startup obs/PPS simultaneous arrival)
+- match_pps_event_from_history returns best_recv_dt_s for detection
 
-- **How it works**: The F9T's `rcvTow` fractional second is constant
-  (994 ms, confirmed by experiment).  `dt_rx mod 1e9` gives the
-  receiver clock position relative to the GNSS second.  Quantizing
-  to the 125 MHz tick grid (8 ns) gives the PPS timing error.
-- **Calibration**: A constant offset (~3 ns, from float ambiguity bias)
-  is determined at startup by comparing against TIM-TP for ~10 epochs.
-  `PPPCalibration` class handles this with a dt_rx stability gate.
-- **Validation**: Mean agreement with PPS+qErr = 0.2 ns on both TimeHat
-  and ocxo (48 and 40 steady-state epochs respectively).
-- **Code**: `scripts/peppar_fix/error_sources.py` (`ppp_qerr()`,
-  `PPPCalibration`, updated `compute_error_sources()`),
-  `scripts/peppar_fix_engine.py` (calibration feeding, removed old
-  `|dt_rx| < 100µs` gate).
-- **Doc**: `docs/pps-ppp-error-source.md`
+### PHC divergence handling
+- Engine exits code 5 when PPS error persists above track_restep_ns for 3 epochs
+- Wrapper handles code 5: degrades clockClass, re-runs PHC bootstrap, restarts
+- Bootstrap failure is now blocking with 3 retries (was silent "non-fatal")
 
-### Ice driver GNSS streaming patch (built, partially working)
+### ptp4l clockClass supervision
+- Three-layer failsafe: engine (Python UDS), wrapper (pmc command), systemd ExecStopPost
+- Three-stage promotion: 248 (boot) → 52 (PHC initialized) → 6 (servo settled)
+- Degradation: 6→52 (unsettled), 6→7 (holdover), any→248 (crash/diverge)
+- Python PMC client talks directly to ptp4l's Unix domain socket
+- Tested end-to-end on TimeHat with ptp4l domain 30
+- Docs: docs/ptp4l-supervision.md, deploy/peppar-fix.service
 
-The stock ice driver buffers GNSS I2C data into a 4 KB page before
-delivering to userspace (~2100 ms latency).  A patch streams each
-15-byte I2C chunk immediately (~20 ms latency).
+### Holdover preserves adjfine
+- No longer zeros adjfine on holdover entry — temperature-stable assumption
+- PI servo seeded from preserved adjfine for bumpless re-acquisition
+- Future: temperature/frequency curves for smarter holdover
 
-- **In-tree patch works**: Built from `linux-source-6.8.0`, preserves
-  EXTTS + DPLL + irdma.  Verified: 15-byte streaming AND PPS EXTTS
-  capture working simultaneously on ocxo.
-- **Out-of-tree patch breaks EXTTS**: The Intel out-of-tree driver
-  doesn't support `PTP_EXTTS_REQUEST`.  Don't use it for servo.
-- **Config ACK issue**: The streaming 15-byte delivery breaks UBX
-  config handshake (ACK wait times out on partial frames).
-  Observation flow works fine; only initial config is affected.
-- **Code**: `drivers/ice-gnss-streaming/` (patch, build script, README)
-- **Doc**: `drivers/ice-gnss-streaming/README.md`, `docs/platform-support.md`
+### EXTTS verification at servo startup
+- Engine verifies PPS events arrive within 3s before starting servo
+- Returns exit code 3 (retryable) on failure
+- Design doc: docs/extts-lifecycle.md
 
-### Pipeline stall fix (merged, partially validated)
+### Servo initialization from bootstrap
+- **Critical bug fix**: PI servo was initialized at freq=0, discarding
+  bootstrap's adjfine (~100 ppb on TimeHat).  Now passes bootstrap
+  adjfine as initial_freq.  Convergence went from 15+ minutes to ~6 min.
 
-The observation pipeline jammed when PPS correlation confidence dropped
-below `min_correlation_confidence` (0.5).  The gate deferred indefinitely
-hoping for better data that would never arrive.
+### E810 PHC characterization
+- Bimodal clock_settime: 1.6 ms typical, 16 ms ~30% of calls
+- PPS-calibrated lag: ~16 ms (vs 200 µs on i226)
+- Profile-driven step parameters: settime_lag_ns, step_error_ns, max_step_time_ms
+- E810 bootstrap now converges (4 iterations to ±7 µs, was bouncing ±21 ms)
+- Config path fix: profile resolution falls back to script-relative path
 
-- **Gate fix**: Drop observations with low-confidence PPS match instead
-  of waiting.  A more confident PPS for that second will never arrive.
-- **Gap recovery**: On dt > 30s gaps, clamp predict to 1s and process
-  the observation instead of skipping.  Prevents cascade.
-- **Validated on TimeHat**: 113s gap reduced to 33s.  Not yet tested
-  on ocxo (blocked by receiver state issue).
-- **Code**: `scripts/peppar_fix/correlation_gate.py`,
-  `scripts/peppar_fix_engine.py`
-
-### Repo reorganization (complete, merged)
-
-- `scripts/` reduced from 44 to 16 files (engine runtime only)
-- `tools/`, `tools/analysis/`, `tools/timebeat/`, `tests/`, `old/`
-  with READMEs
-- `pyproject.toml` stub with version 0.1.0
-- `docs/packaging-plan.md` — phased plan for pip-installability
+### Servo gain tuning
+- i226: doubled gains (kp=0.01, ki=0.001) — settles in ~6 min
+- E810: reduced gains (kp=0.005, ki=0.001) with 50 ms track_restep_ns
+- E810 servo still diverges after ~30 epochs — needs further work
 
 ## Current host state
 
-### TimeHat (healthy)
+### TimeHat (running)
+- 1-hour run in progress (started 00:16, ~30 min elapsed)
+- Settled at ~6 minutes, PPS+PPP active, zero stalls
+- Error oscillating ±2500 ns with slow convergence
+- TICC logging to data/ticc-1hr.csv
+- ptp4l clockClass management working (domain 30)
+- Log: /tmp/timehat-1hr.log
 
-- Repo up to date at `main`
-- PHC bootstrapped and close to GPS time
-- USB transport works normally (~900 ms natural inter-epoch gap)
-- Stall fix deployed and tested
-- Ready for further servo testing
-
-### ocxo (needs recovery)
-
-- **Receiver stuck in single-freq mode**.  Multiple driver swaps and
-  kill signals during this session left the F9T with no dual-freq
-  signals configured.  The config code can't get past ACK wait to
-  reconfigure.
-- **Fix**: Power-cycle the F9T (physically unplug USB or cycle the host)
-  or flash the config to EEPROM from a working session.  The receiver
-  will boot with factory defaults and `ensure_receiver_ready()` should
-  be able to reconfigure it.
-- **Stock ice driver is loaded** (the patched in-tree module was removed
-  from `/lib/modules/.../updates/` and `depmod -a` run).
-- The patched module can be rebuilt from source already extracted at
-  `/usr/src/linux-headers-.../drivers/net/ethernet/intel/ice/`.
+### ocxo (running, in bootstrap)
+- 1-hour run in progress (started 04:42)
+- Currently in Phase 1 position bootstrap (σ=0.32m at 2 min)
+- Position bootstrap is slow on I2C (~5s/epoch)
+- E810 profile now loads correctly (config path fixed)
+- Log: /tmp/ocxo-1hr.log
 
 ## What to do next (priority order)
 
-### 1. Recover ocxo receiver
+### 1. Check hour-long runs
+Both should complete by ~01:16 (TimeHat) and ~05:42 (ocxo).
+TimeHat should show long-term servo behavior with PPS+PPP.
+ocxo will test whether the E810 servo stabilizes over longer timescales.
 
-Power-cycle the F9T on ocxo (reboot the host, or if accessible, cycle
-the E810's GNSS I2C bus).  Verify dual-freq observations resume:
+### 2. Bootstrap frequency intercept design
+User's idea: when PHC has large phase error (e.g. ±2 ms on E810),
+bootstrap should intentionally set frequency to create a zero crossing
+at a predictable time (~60 seconds).  The servo knows to expect this
+and gently takes over at the intercept.  This avoids the servo having
+to close a large phase error with its own gains.
 
-```bash
-ssh ocxo "cd /home/bob/PePPAR-Fix/scripts && source ../venv/bin/activate && \
-  timeout 30 python3 -c '
-from peppar_fix.receiver import ensure_receiver_ready
-d = ensure_receiver_ready(\"/dev/gnss0\", 9600, port_type=\"I2C\", systems={\"gps\",\"gal\"})
-print(d.name if d else \"FAILED\")
-'"
-```
+Key insight: `true_freq = current_adjfine - pps_freq_ppb` gives sub-ppb
+accuracy from 10-second PPS measurement.  Phase error ÷ desired
+convergence time = intercept frequency offset.
 
-### 2. Harden I2C config path
+### 3. E810 servo divergence
+The E810 servo diverges because:
+- Large initial phase error (±2 ms from bootstrap step)
+- EKF dt_rx unstable during convergence (I2C epoch spacing varies)
+- Servo corrections overcorrect before EKF stabilizes
 
-The UBX config handshake (CFG-VALSET → ACK/NAK) fails on I2C because:
-- Stock driver: 2-second batched delivery mixes ACK with observation data
-- Patched driver: 15-byte fragments split ACK across multiple reads
+Possible fixes:
+- Bootstrap intercept (item 2) eliminates large phase error
+- Increase EKF predict clamping for large dt
+- Lower E810 gain_max_scale during initial convergence
+- Add a warmup period where servo observes but doesn't correct
 
-The config code in `scripts/peppar_fix/receiver.py` needs:
-- A read loop that reassembles partial UBX frames (pyubx2's `UBXReader`
-  does this on a stream, but the config code may be doing single reads)
-- A longer timeout for I2C (the current timeout may be tuned for USB)
-- Possibly: disable observation output temporarily during config, send
-  CFG-VALSET, wait for ACK, then re-enable
+### 4. Kernel driver investigation
+The stock Ubuntu 6.8 kernel has the old PAGE_SIZE buffering (not the
+Schmidt streaming patches — verified by extracting the pristine source
+tarball).  But empirical testing shows observations arrive at ~1s cadence.
+The driver polls every 20ms and delivers the full page via gnss_insert_raw
+after reading all available data.  The user's idle-timeout patch idea
+may still be worth implementing for consistency, but isn't the blocker.
 
-### 3. Lower min_correlation_confidence
+### 5. TDEV analysis
+Once the hour-long TimeHat run completes with good servo data,
+compare TDEV between PPS+qErr and PPS+PPP at tau = 1s, 10s, 100s.
+The TICC data at data/ticc-1hr.csv provides sub-ns timestamps.
 
-The remaining 33s gap on TimeHat is from confidence dipping just below
-0.5 during a servo transient.  The PPS correlation confidence reflects
-userspace receive timing, not PPS validity — a reading with 0.4
-confidence is still a real PPS edge, just with slightly uncertain
-host-receive timing.
+## Key files changed
 
-Consider lowering from 0.5 to 0.2 or 0.1, or eliminating the
-confidence gate entirely for PPS (keep it for observation correlation
-where freshness matters more).
-
-### 4. Sustained TDEV comparison
-
-Once stalls are eliminated, run a long (30+ minute) servo session and
-compare TDEV at tau = 1s, 10s, 100s between PPS+qErr and PPS+PPP.
-The expected result: PPS+PPP should show lower TDEV at short tau due
-to its 0.1 ns confidence vs qErr's 3 ns noise.
-
-To force PPS+qErr for comparison, temporarily set
-`carrier_max_sigma=0` in the engine args (disables PPS+PPP).
-
-### 5. Ice driver: fix config + streaming coexistence
-
-The streaming patch is the right fix for I2C delivery latency, but
-receiver config must work with it.  Options:
-- Fix the config code to handle 15-byte fragments (preferred)
-- Temporarily load stock driver for config, then swap to patched
-  (fragile, not recommended)
-- Send config before loading the streaming module (boot-order hack)
-
-## Key files to read
-
-| File | Why |
-|------|-----|
-| `docs/pps-ppp-error-source.md` | PPS+PPP formula, experiment, calibration |
-| `docs/platform-support.md` | E810 I2C delivery issue and fix status |
-| `docs/packaging-plan.md` | Future pip-installability plan |
-| `drivers/ice-gnss-streaming/README.md` | Driver patch, build, known issues |
-| `scripts/peppar_fix/error_sources.py` | `ppp_qerr()`, `PPPCalibration` |
-| `scripts/peppar_fix/correlation_gate.py` | Pipeline stall fix |
-| `scripts/peppar_fix_engine.py` | Gap recovery fix, calibration integration |
+| File | Changes |
+|------|---------|
+| scripts/peppar_fix_engine.py | Queue monitoring, EXTTS verify, servo init fix, pmc integration, exit code 5, config path fix |
+| scripts/peppar_fix/correlation_gate.py | queue_remains init-only drain, permanently unmatchable detection, best_recv_dt_s |
+| scripts/peppar_fix/pmc.py | NEW: Python PMC client for ptp4l clockClass management |
+| scripts/peppar-fix | --pmc/--pmc-domain, clockClass management, bootstrap retry, exit code 5 handler |
+| scripts/phc_bootstrap.py | Profile loading, fail-fast on missing PPS, pin programming logging |
+| config/receivers.toml | Step characterization params, servo gain tuning for both platforms |
+| docs/ptp4l-supervision.md | NEW: Three-layer clockClass supervision design |
+| docs/extts-lifecycle.md | NEW: EXTTS initialization lifecycle design |
+| docs/phc-initialization.md | E810 characterization data, platform comparison |
+| deploy/peppar-fix.service | NEW: Example systemd unit with ExecStopPost failsafe |
