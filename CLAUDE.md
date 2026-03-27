@@ -200,6 +200,7 @@ here before changing anything in the areas they cover.
 | [draft-dupage-inquiry.md](docs/draft-dupage-inquiry.md) | Draft inquiry to DuPage County about GNSS antenna siting. |
 | [packaging-plan.md](docs/packaging-plan.md) | Plan for making peppar-fix pip-installable from GitHub Releases. Phased: pyproject.toml stub (done), flatten imports, versioned releases. |
 | [ptp4l-supervision.md](docs/ptp4l-supervision.md) | Layered ptp4l clockClass supervision via systemd. Three layers: engine (Python UDS), wrapper (pmc command), systemd ExecStopPost. Covers clock-class mapping, ptp4l config, privilege model, and example unit file in `deploy/`. |
+| [extts-lifecycle.md](docs/extts-lifecycle.md) | EXTTS (PPS IN/OUT) initialization lifecycle. Bootstrap owns pin programming; engine inherits and verifies. Covers PTP profile extension for IN+OUT pins, PEROUT for TICC, fd persistence, platform matrix (i226/E810), and phased migration path. |
 
 ## Lab Documentation Pointers
 
