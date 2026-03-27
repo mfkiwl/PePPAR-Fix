@@ -1065,7 +1065,8 @@ def _setup_servo(args, known_ecef, qerr_store):
     ptp.enable_extts(extts_channel, rising_edge=True)
     log.info(f"EXTTS enabled: pin={args.pps_pin}, channel={extts_channel}")
 
-    servo = PIServo(args.track_kp, args.track_ki, max_ppb=caps['max_adj'])
+    servo = PIServo(args.track_kp, args.track_ki, max_ppb=caps['max_adj'],
+                    initial_freq=current_adj)
     scheduler = DisciplineScheduler(
         base_interval=args.discipline_interval,
         adaptive=args.adaptive_interval,
