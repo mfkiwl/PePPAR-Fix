@@ -208,14 +208,25 @@ def _open_serial_exclusive(device, baud):
 
     lock_fd, _lock_path = acquire_device_lock(device)
     try:
-        ser = serial.Serial(
-            device,
-            baud,
-            timeout=2.0,
-            dsrdtr=False,
-            rtscts=False,
-            exclusive=True,
-        )
+        try:
+            ser = serial.Serial(
+                device,
+                baud,
+                timeout=2.0,
+                dsrdtr=False,
+                rtscts=False,
+                exclusive=True,
+            )
+        except serial.SerialException:
+            # TIOCEXCL not supported on some cdc_acm drivers; fall back
+            ser = serial.Serial(
+                device,
+                baud,
+                timeout=2.0,
+                dsrdtr=False,
+                rtscts=False,
+                exclusive=False,
+            )
         ser.reset_input_buffer()
     except Exception:
         release_device_lock(lock_fd)

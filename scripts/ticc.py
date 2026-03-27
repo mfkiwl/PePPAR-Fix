@@ -91,12 +91,22 @@ class Ticc:
         )
 
     def _open_serial(self) -> serial.Serial:
-        return serial.Serial(
-            self.port,
-            self.baud,
-            timeout=2.0,
-            exclusive=True,
-        )
+        try:
+            return serial.Serial(
+                self.port,
+                self.baud,
+                timeout=2.0,
+                exclusive=True,
+            )
+        except serial.SerialException:
+            return serial.Serial(
+                self.port,
+                self.baud,
+                timeout=2.0,
+                dsrdtr=False,
+                rtscts=False,
+                exclusive=False,
+            )
 
     def __enter__(self) -> "Ticc":
         self._lock_fd, _lock_path = acquire_device_lock(self.port)

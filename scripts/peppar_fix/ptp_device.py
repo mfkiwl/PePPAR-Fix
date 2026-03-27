@@ -124,36 +124,44 @@ class PtpDevice:
     def enable_perout(self, channel, period_ns=1_000_000_000):
         """Enable periodic output (1PPS) on a channel.
 
-        Kernel struct ptp_perout_request (v1, 56 bytes):
-          ptp_clock_time start;   // {s64 sec, u32 nsec, u32 reserved} = 16 bytes
-          ptp_clock_time period;  // 16 bytes
-          u32 index;              // 4 bytes
-          u32 flags;              // 4 bytes
-          ptp_clock_time on;      // 16 bytes (v2 only, zero for v1)
+        Kernel struct ptp_perout_request (56 bytes):
+          ptp_clock_time start;   // {s64 sec, u32 nsec, u32 reserved}
+          ptp_clock_time period;  // {s64 sec, u32 nsec, u32 reserved}
+          u32 index;
+          u32 flags;
+          ptp_clock_time on;      // {s64 sec, u32 nsec, u32 reserved}
+
+        The igc driver offsets the first pulse by period/2 from
+        the start time.  Compensate by setting start to an upcoming
+        PHC second minus period/2, so the first pulse lands on the
+        second boundary.
         """
         period_s = period_ns // 1_000_000_000
         period_sub = period_ns % 1_000_000_000
+        # Compute start = (next PHC second) - period/2
+        phc_ns, _sys_ns = self.read_phc_ns()
+        next_sec = phc_ns // 1_000_000_000 + 2
+        half_period_ns = period_ns // 2
+        start_sec = next_sec - half_period_ns // 1_000_000_000
+        start_nsec = 1_000_000_000 - (half_period_ns % 1_000_000_000)
+        if start_nsec >= 1_000_000_000:
+            start_nsec -= 1_000_000_000
+            start_sec += 1
         buf = struct.pack('<qII qII II qII',
-                          0, 0, 0,                   # start: {sec=0, nsec=0, rsv=0}
-                          period_s, period_sub, 0,   # period: {sec, nsec, rsv}
-                          channel, 0,                # index, flags
-                          0, 0, 0)                   # on: {0, 0, 0}
-        try:
-            fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST2, buf)
-        except OSError:
-            fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST, buf)
+                          start_sec, start_nsec, 0,
+                          period_s, period_sub, 0,
+                          channel, 0,
+                          0, 0, 0)
+        fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST, buf)
 
     def disable_perout(self, channel):
         """Disable periodic output on a channel."""
         buf = struct.pack('<qII qII II qII',
                           0, 0, 0,
-                          0, 0, 0,      # period=0 disables
+                          0, 0, 0,
                           channel, 0,
                           0, 0, 0)
-        try:
-            fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST2, buf)
-        except OSError:
-            fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST, buf)
+        fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST, buf)
 
     def read_extts(self, timeout_ms=1500):
         """Read one external timestamp event.
