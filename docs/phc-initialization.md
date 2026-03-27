@@ -143,17 +143,42 @@ correct λ.  For the i226 on TimeHat: **λ ≈ 200 µs** (PPS verify
 lands at ±5 µs).  The readback residual at this lag is ~+65 µs, so
 `--step-error-ns` must be ≥ 200000 to avoid futile retries.
 
-**Measured step accuracy (2026-03-24):**
+**Measured step accuracy:**
 
 Neither NIC supports `PTP_SYS_OFFSET_PRECISE`; both use the
 `PTP_SYS_OFFSET` fallback.
 
-With PPS-calibrated lag (λ=200 µs on i226):
+| NIC | λ (PPS-calibrated) | Step PPS verify | Freq after correction | Notes |
+|-----|--------------------|-----------------|-----------------------|-------|
+| i226 (TimeHat) | 200 µs | ±5 µs | 0.0 ±1.5 ppb | Single-mode latency, reliable |
+| E810 (ocxo) | ~16 ms | ±2 ms (est.) | 0.0 ±0.0 ppb (OCXO) | Bimodal latency, see below |
 
-| NIC | Step PPS verify | Freq after correction | Bless on 2nd run? |
-|-----|----------------|----------------------|-------------------|
-| i226 (TimeHat) | ±5 µs | 0.0 ±1.5 ppb | Yes |
-| E810 (ocxo) | Not yet calibrated | — | — |
+**E810 bimodal clock_settime behavior (2026-03-27):**
+
+The E810's `clock_settime()` has two latency populations:
+- **Fast path (~70%):** 1.2–1.7 ms (readback-measured)
+- **Slow path (~30%):** 15–17 ms (readback-measured)
+
+The slow path likely corresponds to ice driver internal operations
+(DPLL status polling, I2C GNSS bus activity) blocking the PTP ioctl.
+
+The `PTP_SYS_OFFSET` readback has a ~14.5 ms asymmetry on the E810 —
+the readback measures 1.6 ms median residual, but PPS ground truth
+shows ~16 ms total lag.  The PPS sweep calibration method (varying λ
+over 0–250 µs) does not work on E810 because the step noise (~7 ms σ)
+swamps the µs-scale lag variation.  Instead, use the direct PPS phase
+measurement at lag=0 as the λ estimate.
+
+**Bootstrap step parameters must be platform-specific:**
+
+| Parameter | i226 | E810 |
+|-----------|------|------|
+| `settime_lag_ns` | 200,000 | 16,000,000 |
+| `step_error_ns` | 10,000 | 2,000,000 |
+| `max_step_time_ms` | 500 | 5,000 |
+
+The `step_to()` algorithm is the same on both platforms — retry within
+a time budget, accept the best result.  Only the parameters differ.
 
 ## PHC characterization
 

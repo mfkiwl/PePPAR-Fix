@@ -136,6 +136,60 @@ def measure_pps_frequency(ptp, channel, n_samples=5, timeout_s=8):
 # ── Main ─────────────────────────────────────────────────────────── #
 
 
+def _apply_bootstrap_profile(args):
+    """Apply step parameters from PTP profile in config/receivers.toml."""
+    import tomllib
+
+    # Find config file
+    config_path = args.device_config
+    if config_path is None:
+        for candidate in [
+            os.path.join(os.path.dirname(__file__), "..", "config", "receivers.toml"),
+            os.path.join(os.path.dirname(__file__), "config", "receivers.toml"),
+        ]:
+            if os.path.exists(candidate):
+                config_path = candidate
+                break
+    if config_path is None or not os.path.exists(config_path):
+        log.warning("PTP profile config not found (tried config/receivers.toml)")
+        return
+
+    try:
+        with open(config_path, "rb") as f:
+            cfg = tomllib.load(f)
+    except Exception as e:
+        log.warning("Failed to load PTP profile config: %s", e)
+        return
+
+    profile = cfg.get("ptp", {}).get(args.ptp_profile)
+    if not profile:
+        log.warning("PTP profile '%s' not found in %s", args.ptp_profile, config_path)
+        return
+
+    log.info("Applying PTP profile '%s' from %s", args.ptp_profile, config_path)
+
+    # Step parameters — only apply if the user didn't override on CLI
+    if args.settime_lag_ns == 0:
+        args.settime_lag_ns = profile.get("settime_lag_ns", args.settime_lag_ns)
+    if args.step_error_ns == 5000:
+        args.step_error_ns = profile.get("step_error_ns", args.step_error_ns)
+    if args.step_budget_ms == 500:
+        args.step_budget_ms = profile.get("max_step_time_ms", args.step_budget_ms)
+
+    # Pin/EXTTS parameters
+    if args.pps_pin is None:
+        args.pps_pin = profile.get("pps_pin", args.pps_pin)
+    if args.extts_channel == 0:
+        args.extts_channel = profile.get("extts_channel", args.extts_channel)
+    if not args.program_pin:
+        args.program_pin = bool(profile.get("program_pin", False))
+    if args.phc_timescale == "tai":
+        args.phc_timescale = profile.get("timescale", args.phc_timescale)
+
+    log.info("  settime_lag_ns=%d step_error_ns=%d step_budget_ms=%d",
+             args.settime_lag_ns, args.step_error_ns, args.step_budget_ms)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Warm-start PHC initialization")
     ap.add_argument("--position-file", required=True)
@@ -149,7 +203,10 @@ def main():
     ap.add_argument("--eph-mount", required=True)
     ap.add_argument("--ssr-mount", default=None)
     ap.add_argument("--ptp-dev", required=True)
-    ap.add_argument("--ptp-profile", default=None)
+    ap.add_argument("--ptp-profile", default=None,
+                    help="PTP profile name from config/receivers.toml (e.g. i226, e810)")
+    ap.add_argument("--device-config", default=None,
+                    help="Path to receivers.toml (default: auto-detect)")
     ap.add_argument("--extts-channel", type=int, default=0)
     ap.add_argument("--pps-pin", type=int, default=None)
     ap.add_argument("--program-pin", action="store_true")
@@ -176,6 +233,10 @@ def main():
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+
+    # Apply PTP profile defaults for step parameters
+    if args.ptp_profile:
+        _apply_bootstrap_profile(args)
 
     # Load position
     if not os.path.exists(args.position_file):

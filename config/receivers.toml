@@ -24,6 +24,11 @@ device = "/dev/ptp0"
 pps_pin = 1
 extts_channel = 0
 timescale = "tai"
+# PHC step characterization (2026-03-24, characterize_phc_step.py)
+settime_lag_ns = 200000       # PPS-calibrated clock_settime lag
+step_error_ns = 10000         # achievable step accuracy (±10 µs)
+max_step_time_ms = 500        # retry budget (~80k attempts at 6 µs each)
+# Servo tuning
 track_kp = 0.005
 track_ki = 0.0005
 track_max_ppb = 100000.0
@@ -56,10 +61,18 @@ device = "/dev/ptp1"
 pps_pin = 0
 extts_channel = 0
 timescale = "tai"
+# PHC step characterization (2026-03-27, characterize_phc_step.py on ocxo)
+# Bimodal clock_settime: 1.6 ms typical, 16 ms ~30% of calls.
+# PPS-calibrated lag measured at ~16 ms (direct PPS phase at lag=0).
+# PTP_SYS_OFFSET asymmetry ~14.5 ms masks the true lag in readback.
+settime_lag_ns = 16000000     # PPS-calibrated clock_settime lag
+step_error_ns = 2000000       # achievable step accuracy (±2 ms)
+max_step_time_ms = 5000       # retry budget (~300 attempts at ~7 ms avg each)
+# Servo tuning
 track_kp = 0.05
 track_ki = 0.01
 track_max_ppb = 1000000.0
-track_restep_ns = 100000.0
+track_restep_ns = 5000000.0   # 5 ms — must exceed step_error_ns to avoid immediate exit
 obs_idle_timeout_s = 15.0
 max_broadcast_age_s = 30.0
 require_ssr = false
@@ -68,4 +81,4 @@ min_correlation_confidence = 0.5
 min_broadcast_confidence = 0.0
 min_ssr_confidence = 0.0
 program_pin = false
-note = "Intel E810 timing PHC with EXTS channels exposed but no programmable pins via current driver"
+note = "Intel E810 timing PHC; bimodal clock_settime latency, no PTP_SYS_OFFSET_PRECISE, no programmable pins"

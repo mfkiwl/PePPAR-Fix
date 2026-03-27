@@ -307,8 +307,10 @@ if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
         --port-type "$UBX_PORT"
         --position-file "$POSITION_FILE"
         --ptp-dev "$PTP_DEV"
-        --step-error-ns 10000
     )
+    if [[ -n "$PTP_PROFILE" ]]; then
+        bootstrap_phc_args+=(--ptp-profile "$PTP_PROFILE")
+    fi
     # shellcheck disable=SC2046
     bootstrap_phc_args+=($(ntrip_args))
     phc_bootstrap_ok=false
@@ -447,8 +449,10 @@ while true; do
                     --port-type "$UBX_PORT"
                     --position-file "$POSITION_FILE"
                     --ptp-dev "$PTP_DEV"
-                    --step-error-ns 10000
                 )
+                if [[ -n "$PTP_PROFILE" ]]; then
+                    bootstrap_phc_args+=(--ptp-profile "$PTP_PROFILE")
+                fi
                 # shellcheck disable=SC2046
                 bootstrap_phc_args+=($(ntrip_args))
                 if "$PYTHON_BIN" "$SCRIPT_DIR/phc_bootstrap.py" "${bootstrap_phc_args[@]}"; then
