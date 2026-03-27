@@ -1261,20 +1261,22 @@ def _enter_obs_holdover(ctx, args, reason_code, detail):
     holdover['reason'] = reason_code
     holdover['entered'] += 1
     holdover['reasons'][reason_code] = holdover['reasons'].get(reason_code, 0) + 1
+    last_freq = ctx['adjfine_ppb']
     log.warning(
-        "Entering holdover: reason=%s detail=%s; resetting PHC steering to safe holdover",
+        "Entering holdover: reason=%s detail=%s; "
+        "holding PHC at last adjfine=%.1f ppb (temperature-stable assumption)",
         reason_code,
         detail,
+        last_freq,
     )
     _set_clock_class(ctx, "holdover")
-    try:
-        ctx['ptp'].adjfine(0.0)
-    except Exception as exc:
-        log.warning("Failed to zero PHC adjfine during holdover: %s", exc)
-    ctx['adjfine_ppb'] = 0.0
+    # Do NOT zero adjfine — the last known frequency is almost certainly
+    # better than zero.  TCXO/OCXO drift is dominated by temperature;
+    # if temperature hasn't changed, the old frequency is correct.
     _purge_pps_state(ctx)
     from peppar_fix import PIServo, DisciplineScheduler
-    ctx['servo'] = PIServo(args.track_kp, args.track_ki, max_ppb=ctx['caps']['max_adj'])
+    ctx['servo'] = PIServo(args.track_kp, args.track_ki, max_ppb=ctx['caps']['max_adj'],
+                           initial_freq=last_freq)
     ctx['scheduler'] = DisciplineScheduler(
         base_interval=args.discipline_interval,
         adaptive=args.adaptive_interval,

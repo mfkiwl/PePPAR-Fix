@@ -311,13 +311,24 @@ if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
     )
     # shellcheck disable=SC2046
     bootstrap_phc_args+=($(ntrip_args))
-    if "$PYTHON_BIN" "$SCRIPT_DIR/phc_bootstrap.py" "${bootstrap_phc_args[@]}"; then
-        echo "  PHC bootstrap complete"
-        # Promote clockClass 248 → 52: PHC is initialized (phase/freq set)
-        # but servo has not yet locked.
-        promote_clock_class_initialized
-    else
-        echo "  PHC bootstrap failed (non-fatal, engine will start without it)"
+    phc_bootstrap_ok=false
+    for ((phc_try=1; phc_try<=3; phc_try++)); do
+        if "$PYTHON_BIN" "$SCRIPT_DIR/phc_bootstrap.py" "${bootstrap_phc_args[@]}"; then
+            echo "  PHC bootstrap complete"
+            promote_clock_class_initialized
+            phc_bootstrap_ok=true
+            break
+        fi
+        if [[ $phc_try -lt 3 ]]; then
+            echo "  PHC bootstrap failed (attempt $phc_try/3), retrying in 5s..." >&2
+            sleep 5
+        fi
+    done
+    if [[ "$phc_bootstrap_ok" != "true" ]]; then
+        echo "ERROR: PHC bootstrap failed after 3 attempts — cannot start servo" >&2
+        echo "  The servo requires a bootstrapped PHC (phase ±10µs, frequency ±5ppb)." >&2
+        echo "  Check PPS signal, EXTTS wiring, and PTP device." >&2
+        exit 1
     fi
 else
     echo "  No PTP device — skipping PHC bootstrap"

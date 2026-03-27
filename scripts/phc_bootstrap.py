@@ -203,8 +203,9 @@ def main():
         from peppar_fix.ptp_device import PTP_PF_EXTTS
         try:
             ptp.set_pin_function(args.pps_pin, PTP_PF_EXTTS, args.extts_channel)
-        except OSError:
-            pass
+            log.info("Pin %d programmed for EXTTS channel %d", args.pps_pin, args.extts_channel)
+        except OSError as e:
+            log.warning("Failed to program pin %d for EXTTS: %s", args.pps_pin, e)
 
     # Read current PHC time
     try:
@@ -225,7 +226,9 @@ def main():
                  pps_freq_ppb, pps_freq_unc, pps_freq_sigma, pps_freq_n)
     else:
         pps_freq_unc = None
-        log.warning("Could not measure PPS frequency (no PPS?)")
+        log.error("No PPS events received — check EXTTS wiring, pin config, and PTP device")
+        ptp.close()
+        return 1
 
     # Ensure receiver is producing dual-frequency observations.
     # Auto-detects active signals; reconfigures for L1+L5 if needed.
