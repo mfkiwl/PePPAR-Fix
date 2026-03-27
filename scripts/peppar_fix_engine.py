@@ -209,6 +209,12 @@ def apply_ptp_profile(args):
     """Apply PTP defaults from config/receivers.toml when requested."""
     if not args.ptp_profile:
         return
+    # Resolve config path relative to script directory if not found at CWD
+    if not os.path.exists(args.device_config):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate = os.path.join(script_dir, "..", "config", "receivers.toml")
+        if os.path.exists(candidate):
+            args.device_config = candidate
     try:
         with open(args.device_config, "rb") as f:
             cfg = tomllib.load(f)
