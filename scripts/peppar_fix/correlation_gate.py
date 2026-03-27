@@ -15,6 +15,7 @@ class GateStats:
     dropped_unmatched: int = 0
     dropped_outside_window: int = 0
     dropped_low_confidence: int = 0
+    dropped_queued_behind: int = 0
 
     def as_dict(self):
         return asdict(self)
@@ -54,15 +55,31 @@ class StrictCorrelationGate:
     ):
         if min_confidence is None:
             min_confidence = self.min_confidence
+        # Skip observations whose recv_mono is unreliable due to kernel/USB
+        # buffering.  When multiple observations arrive in a burst, only the
+        # last one (queue_remains=False) has a recv_mono that reflects actual
+        # delivery time.  The others' recv_mono is dominated by read-loop
+        # cadence, not host-receive time, so time-correlating them is
+        # error-prone.  Keep the freshest and drop the rest.
+        n_queued = 0
+        while (
+            len(obs_history) > 1
+            and getattr(obs_history[0], "queue_remains", False)
+        ):
+            obs_history.popleft()
+            n_queued += 1
+        self.stats.dropped_queued_behind += n_queued
         while obs_history:
             obs_event = obs_history[0]
             target_sec = target_sec_fn(obs_event)
-            pps_event, delta_s, recv_dt_s, latest_pps_mono, combined_confidence = match_fn(
+            result = match_fn(
                 obs_event,
                 target_sec,
                 min_window_s=min_window_s,
                 max_window_s=max_window_s,
             )
+            pps_event, delta_s, recv_dt_s, latest_pps_mono, combined_confidence = result[:5]
+            best_recv_dt_s = result[5] if len(result) > 5 else None
             if pps_event is not None and combined_confidence >= min_confidence:
                 obs_history.popleft()
                 self.stats.consumed_correlated += 1
@@ -81,6 +98,19 @@ class StrictCorrelationGate:
                 obs_history.popleft()
                 self.stats.dropped_unmatched += 1
                 self.stats.dropped_outside_window += 1
+                continue
+            # PPS events exist but no match passed the recv_dt_s window.
+            # If the best (largest) recv_dt_s is below min_window_s, all PPS
+            # events arrived too close to or after this observation.  Future
+            # PPS will only be newer, so the observation is permanently
+            # unmatchable.  Drop it instead of blocking the FIFO for 11s.
+            if (
+                best_recv_dt_s is not None
+                and best_recv_dt_s < min_window_s
+                and latest_pps_mono >= obs_event.recv_mono
+            ):
+                obs_history.popleft()
+                self.stats.dropped_unmatched += 1
                 continue
             self.stats.deferred_waiting += 1
             return None, None
@@ -148,17 +178,31 @@ def match_pps_event_from_history(
 ):
     """Match one observation event against PPS history by receive time and second.
 
-    Returns `(pps_event, second_delta, recv_dt_s, latest_pps_mono, combined_confidence)` where
-    `pps_event` is `None` if no acceptable match is currently available.
+    Returns ``(pps_event, second_delta, recv_dt_s, latest_pps_mono,
+    combined_confidence, best_recv_dt_s)`` where *pps_event* is ``None`` if
+    no acceptable match is currently available.
+
+    *best_recv_dt_s* is the largest ``obs.recv_mono - pps.recv_mono`` seen
+    across all PPS candidates (regardless of whether the candidate passed
+    the window filter).  The caller uses this to distinguish "no PPS old
+    enough yet" (best_recv_dt_s < min_window_s) from "PPS exists but
+    observation is outside the window" (best_recv_dt_s >= min_window_s).
+    When best_recv_dt_s < min_window_s, all PPS events arrived too close
+    to the observation for time-correlation; future PPS events will only
+    be newer, so the observation is permanently unmatchable and should be
+    dropped rather than deferred.
     """
     latest_pps_mono = pps_history[-1].recv_mono if pps_history else None
     best = None
+    best_recv_dt_s = None
 
     while len(pps_history) > 1 and obs_event.recv_mono - pps_history[0].recv_mono > max_window_s:
         pps_history.popleft()
 
     for idx, pps_event in enumerate(pps_history):
         recv_dt_s = obs_event.recv_mono - pps_event.recv_mono
+        if best_recv_dt_s is None or recv_dt_s > best_recv_dt_s:
+            best_recv_dt_s = recv_dt_s
         if recv_dt_s < min_window_s or recv_dt_s > max_window_s:
             continue
         delta_s = pps_event.rounded_sec() - target_sec
@@ -180,9 +224,9 @@ def match_pps_event_from_history(
             best = candidate
 
     if best is None:
-        return None, None, None, latest_pps_mono, None
+        return None, None, None, latest_pps_mono, None, best_recv_dt_s
 
     _, _, _, matched_idx, pps_event, delta_s, recv_dt_s, combined_confidence = best
     for _ in range(matched_idx + 1):
         pps_history.popleft()
-    return pps_event, delta_s, recv_dt_s, latest_pps_mono, combined_confidence
+    return pps_event, delta_s, recv_dt_s, latest_pps_mono, combined_confidence, best_recv_dt_s

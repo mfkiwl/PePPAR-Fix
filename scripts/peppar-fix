@@ -12,6 +12,7 @@
 #   2 = position moved (re-bootstrap position, then restart servo)
 #   3 = no PPS (retry with backoff)
 #   4 = divergence (fatal)
+#   5 = PHC diverged (re-bootstrap PHC, then restart servo)
 #
 # Configuration via environment variables or command-line overrides:
 #   PEPPAR_SERIAL       Serial port (e.g. /dev/gnss-top)
@@ -62,6 +63,8 @@ SYSTEMS="${PEPPAR_SYSTEMS:-}"
 DURATION="${PEPPAR_DURATION:-}"
 LOG_FILE="${PEPPAR_LOG:-}"
 PHASE_STEP_BIAS_NS="${PEPPAR_PHASE_STEP_BIAS_NS:-}"
+PMC_UDS="${PEPPAR_PMC_UDS:-}"
+PMC_DOMAIN="${PEPPAR_PMC_DOMAIN:-0}"
 ENGINE_EXTRA_ARGS=()
 
 is_kernel_gnss_device() {
@@ -97,6 +100,8 @@ Options:
   --duration SECS      Servo duration in seconds
   --log FILE           CSV log file
   --phase-step-bias-ns NS  Per-host PHC phase-step bias compensation in ns
+  --pmc UDS_PATH       ptp4l UDS path for clockClass supervision
+  --pmc-domain NUM     PTP domain (must match ptp4l, default: 0)
   --engine-arg ARG     Extra argument passed through to peppar-fix-engine
   -h, --help           Show this help
 
@@ -125,6 +130,8 @@ while [[ $# -gt 0 ]]; do
         --duration)     DURATION="$2"; shift 2 ;;
         --log)          LOG_FILE="$2"; shift 2 ;;
         --phase-step-bias-ns) PHASE_STEP_BIAS_NS="$2"; shift 2 ;;
+        --pmc)          PMC_UDS="$2"; shift 2 ;;
+        --pmc-domain)   PMC_DOMAIN="$2"; shift 2 ;;
         --engine-arg)   ENGINE_EXTRA_ARGS+=("$2"); shift 2 ;;
         -h|--help)      usage ;;
         *)              echo "Unknown option: $1" >&2; exit 1 ;;
@@ -154,6 +161,8 @@ SYSTEMS="${SYSTEMS:-${HOSTCFG_SYSTEMS:-gps,gal,bds}}"
 DURATION="${DURATION:-${HOSTCFG_DURATION:-}}"
 LOG_FILE="${LOG_FILE:-${HOSTCFG_LOG:-}}"
 PHASE_STEP_BIAS_NS="${PHASE_STEP_BIAS_NS:-${HOSTCFG_PHASE_STEP_BIAS_NS:-}}"
+PMC_UDS="${PMC_UDS:-${HOSTCFG_PMC_UDS:-}}"
+PMC_DOMAIN="${PMC_DOMAIN:-${HOSTCFG_PMC_DOMAIN:-0}}"
 
 # ── Validate required config ────────────────────────────────────────────── #
 
@@ -262,6 +271,9 @@ if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
     bootstrap_phc_args+=($(ntrip_args))
     if "$PYTHON_BIN" "$SCRIPT_DIR/phc_bootstrap.py" "${bootstrap_phc_args[@]}"; then
         echo "  PHC bootstrap complete"
+        # Promote clockClass 248 → 52: PHC is initialized (phase/freq set)
+        # but servo has not yet locked.
+        promote_clock_class_initialized
     else
         echo "  PHC bootstrap failed (non-fatal, engine will start without it)"
     fi
@@ -335,10 +347,55 @@ build_servo_args() {
     if [[ -n "$PHASE_STEP_BIAS_NS" ]]; then
         args+=(--phase-step-bias-ns "$PHASE_STEP_BIAS_NS")
     fi
+    if [[ -n "$PMC_UDS" ]]; then
+        args+=(--pmc "$PMC_UDS" --pmc-domain "$PMC_DOMAIN")
+    fi
     if [[ ${#ENGINE_EXTRA_ARGS[@]} -gt 0 ]]; then
         args+=("${ENGINE_EXTRA_ARGS[@]}")
     fi
     echo "${args[@]}"
+}
+
+# ── pmc helpers for clockClass management ──────────────────────────── #
+
+promote_clock_class_initialized() {
+    if [[ -z "$PMC_UDS" ]]; then
+        return
+    fi
+    echo "  Promoting clockClass to 52 (initialized) via pmc"
+    pmc -u -i "/tmp/peppar-pmc.$$" -s "$PMC_UDS" -d "$PMC_DOMAIN" -b 0 \
+        "SET GRANDMASTER_SETTINGS_NP \
+            clockClass 52 \
+            clockAccuracy 0x23 \
+            offsetScaledLogVariance 0xffff \
+            currentUtcOffset 37 \
+            leap61 0 \
+            leap59 0 \
+            currentUtcOffsetValid 1 \
+            ptpTimescale 1 \
+            timeTraceable 1 \
+            frequencyTraceable 0 \
+            timeSource 0x20" 2>/dev/null || true
+}
+
+degrade_clock_class() {
+    if [[ -z "$PMC_UDS" ]]; then
+        return
+    fi
+    echo "  Degrading clockClass to 248 (freerun) via pmc"
+    pmc -u -i "/tmp/peppar-pmc.$$" -s "$PMC_UDS" -d "$PMC_DOMAIN" -b 0 \
+        "SET GRANDMASTER_SETTINGS_NP \
+            clockClass 248 \
+            clockAccuracy 0xfe \
+            offsetScaledLogVariance 0xffff \
+            currentUtcOffset 37 \
+            leap61 0 \
+            leap59 0 \
+            currentUtcOffsetValid 0 \
+            ptpTimescale 1 \
+            timeTraceable 0 \
+            frequencyTraceable 0 \
+            timeSource 0xa0" 2>/dev/null || true
 }
 
 while true; do
@@ -347,6 +404,9 @@ while true; do
     "$PYTHON_BIN" "$SCRIPT_DIR/peppar_fix_engine.py" $(build_servo_args)
     rc=$?
     set -e
+
+    # Layer 2: degrade clockClass on any engine exit
+    degrade_clock_class
 
     case $rc in
         0)
@@ -365,6 +425,30 @@ while true; do
             sleep "$servo_backoff"
             servo_backoff=$((servo_backoff * 2))
             [[ $servo_backoff -gt 300 ]] && servo_backoff=300
+            continue
+            ;;
+        5)
+            echo "peppar-fix: PHC diverged — re-bootstrapping PHC"
+            if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
+                bootstrap_phc_args=(
+                    --serial "$SERIAL"
+                    --baud "$BAUD"
+                    --port-type "$UBX_PORT"
+                    --position-file "$POSITION_FILE"
+                    --ptp-dev "$PTP_DEV"
+                    --step-error-ns 10000
+                )
+                # shellcheck disable=SC2046
+                bootstrap_phc_args+=($(ntrip_args))
+                if "$PYTHON_BIN" "$SCRIPT_DIR/phc_bootstrap.py" "${bootstrap_phc_args[@]}"; then
+                    echo "  PHC re-bootstrap complete"
+                    promote_clock_class_initialized
+                else
+                    echo "  PHC re-bootstrap failed" >&2
+                    exit 5
+                fi
+            fi
+            servo_backoff=5
             continue
             ;;
         *)

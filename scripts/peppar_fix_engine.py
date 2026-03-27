@@ -718,6 +718,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
         "obs_input_timeouts": 0,
         "obs_deferred_stalls": 0,
         "obs_dropped_expired": 0,
+        "obs_dropped_queued": 0,
         "ticc_missing_pair": 0,
     }
     last_skip_log = start_time
@@ -726,6 +727,12 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
     last_usable_obs_wall = last_obs_wall
     obs_idle_alarm = False
     deferred_alarm = False
+    # Queue monitoring: high-water marks (session max) + depth threshold alerts
+    queue_hwm = {"obs_queue": 0, "obs_history": 0, "pps_history": 0}
+    queue_alert_armed = {"obs_queue": True, "obs_history": True, "pps_history": True}
+    queue_depth_threshold = getattr(args, "queue_depth_threshold", 5)
+    queue_dump = getattr(args, "queue_depth_dump", False)
+    last_hwm_log = start_time
     # Sink policy: steady-state + servo is a correlated-window consumer.
     # Preserve receive order here and let the correlator decide when an epoch
     # is too old to be useful, rather than draining the queue at phase entry.
@@ -756,6 +763,17 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             if added_obs:
                 last_obs_input_wall = time.monotonic()
 
+            # ── Queue depth monitoring ──
+            _check_queue_depths(
+                queue_hwm, queue_alert_armed, queue_depth_threshold, queue_dump,
+                obs_queue=obs_queue,
+                obs_history=obs_history,
+                pps_history=servo_ctx.get("pps_history") if servo_ctx else None,
+                pps_history_lock=servo_ctx.get("pps_history_lock") if servo_ctx else None,
+                skip_stats=skip_stats,
+                gate=servo_ctx.get("correlation_gate") if servo_ctx else None,
+            )
+
             if servo_ctx is not None:
                 gate = servo_ctx["correlation_gate"]
                 dropped_before = gate.stats.dropped_unmatched
@@ -773,6 +791,11 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                     min_confidence=args.min_correlation_confidence,
                 )
                 dropped_obs = gate.stats.dropped_unmatched - dropped_before
+                queued_dropped = gate.stats.dropped_queued_behind
+                if queued_dropped > skip_stats["obs_dropped_queued"]:
+                    n_new = queued_dropped - skip_stats["obs_dropped_queued"]
+                    log.info("  Skipped %d queued observations (unreliable recv_mono)", n_new)
+                    skip_stats["obs_dropped_queued"] = queued_dropped
                 if obs_event is None:
                     skip_stats["gate_wait_obs"] += 1
                     stall_s = time.monotonic() - last_usable_obs_wall
@@ -873,6 +896,8 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             resid_rms = float(np.sqrt(np.mean(resid ** 2))) if len(resid) > 0 else 0.0
             watchdog.update(resid_rms, n_used)
             if watchdog.alarmed:
+                if servo_ctx is not None:
+                    _set_clock_class(servo_ctx, "freerun")
                 log.error("POSITION WATCHDOG ALARM: antenna may have moved! "
                           "Servo disabled. Restart with correct position or "
                           "delete position file to re-bootstrap.")
@@ -919,6 +944,12 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 elif servo_result == "outlier":
                     skip_stats["servo_outlier"] += 1
 
+            # PHC divergence: exit for re-bootstrap
+            if servo_ctx is not None and servo_ctx.get('phc_diverged'):
+                _set_clock_class(servo_ctx, "freerun")
+                log.error("Shutting down — PHC needs re-bootstrap")
+                return 5
+
             # Console status every 10 epochs
             if n_epochs % 10 == 0:
                 elapsed = time.time() - start_time
@@ -932,6 +963,13 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             if now - last_skip_log >= 60.0:
                 log.info(f"  Skip stats: {skip_stats}")
                 last_skip_log = now
+            if now - last_hwm_log >= 1200.0:  # every 20 minutes
+                log.info(
+                    "  Queue HWM (session max): obs_q=%d obs_hist=%d pps_hist=%d",
+                    queue_hwm["obs_queue"], queue_hwm["obs_history"],
+                    queue_hwm["pps_history"],
+                )
+                last_hwm_log = now
 
     except KeyboardInterrupt:
         log.info("Interrupted")
@@ -943,11 +981,13 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 "correction_freshness": correction_gate.stats.as_dict(),
                 "steady_state_skips": skip_stats,
                 "holdover": dict(servo_ctx["holdover"]),
+                "queue_high_water_marks": dict(queue_hwm),
             }
         else:
             gate_stats = {
                 "correction_freshness": correction_gate.stats.as_dict(),
                 "steady_state_skips": skip_stats,
+                "queue_high_water_marks": dict(queue_hwm),
             }
         if servo_ctx is not None:
             _cleanup_servo(servo_ctx)
@@ -958,6 +998,34 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
 
 
 # ── Servo helpers (conditional PTP import) ────────────────────────────── #
+
+def _open_pmc(args):
+    """Open a PMC client if --pmc is configured.  Returns PmcClient or None."""
+    pmc_path = getattr(args, 'pmc', None)
+    if not pmc_path:
+        return None
+    domain = getattr(args, 'pmc_domain', 0)
+    try:
+        from peppar_fix.pmc import PmcClient
+        client = PmcClient(pmc_path, domain=domain)
+        client.open()
+        log.info("pmc: connected to %s (domain %d)", pmc_path, domain)
+        return client
+    except Exception as e:
+        log.warning("pmc: failed to open %s: %s (clockClass management disabled)", pmc_path, e)
+        return None
+
+
+def _set_clock_class(ctx, state):
+    """Set ptp4l clockClass if PMC is configured and state has changed."""
+    pmc = ctx.get('pmc')
+    if pmc is None:
+        return
+    if ctx.get('pmc_announced') == state:
+        return
+    if pmc.set_grandmaster_class(state):
+        ctx['pmc_announced'] = state
+
 
 def _setup_servo(args, known_ecef, qerr_store):
     """Set up PHC servo. Returns context dict or None on failure."""
@@ -1160,6 +1228,8 @@ def _setup_servo(args, known_ecef, qerr_store):
         'ppp_cal': PPPCalibration(tick_ns=8.0, min_samples=10),
         'tracking_large_error_count': 0,
         'tracking_mode': 'pull_in',
+        'pmc': _open_pmc(args),
+        'pmc_announced': None,
         'ticc_prev_error_ns': None,
         'ticc_prev_error_mono': None,
         'ticc_settled_count': 0,
@@ -1195,6 +1265,7 @@ def _enter_obs_holdover(ctx, args, reason_code, detail):
         reason_code,
         detail,
     )
+    _set_clock_class(ctx, "holdover")
     try:
         ctx['ptp'].adjfine(0.0)
     except Exception as exc:
@@ -1270,11 +1341,12 @@ def _find_pps_event_for_obs(ctx, obs_event, target_sec, timeout=0.5,
     deadline = time.monotonic() + timeout
 
     while True:
-        event, delta, recv_dt, _, _ = _match_pps_event_from_history(
+        result = _match_pps_event_from_history(
             ctx, obs_event, target_sec,
             min_window_s=min_window_s,
             max_window_s=max_window_s,
         )
+        event, delta, recv_dt = result[0], result[1], result[2]
         if event is not None:
             return event, delta, recv_dt
 
@@ -1557,6 +1629,13 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         return "outlier"
 
     scheduler.accumulate(best.error_ns, best.confidence_ns, best.name)
+    # Three-stage clockClass promotion: 248 (boot) → 52 (PHC initialized,
+    # set by wrapper after bootstrap) → 6 (servo settled).  Demote back
+    # to 52 if the scheduler leaves settled state.
+    if not scheduler._converging:
+        _set_clock_class(ctx, "locked")
+    else:
+        _set_clock_class(ctx, "initialized")
 
     if TRACK_RESTEP_NS is not None:
         # Use pps_error_ns (raw PHC fractional offset) for the restep
@@ -1568,13 +1647,13 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         else:
             ctx['tracking_large_error_count'] = 0
         if ctx['tracking_large_error_count'] >= 3:
-            log.warning(
-                "  PHC error persisted above %.0fns for %d epochs — "
-                "bootstrap may need to re-run (no in-engine step)",
+            log.error(
+                "PHC error above %.0fns for %d consecutive epochs — "
+                "exiting for PHC re-bootstrap (exit code 5)",
                 TRACK_RESTEP_NS,
                 ctx['tracking_large_error_count'],
             )
-            ctx['tracking_large_error_count'] = 0
+            ctx['phc_diverged'] = True
 
     # TODO(ta-e744, ta-7j06): Re-enable timescale restep once the step
     # source is GNSS-derived (not system clock).  The PI servo tracks
@@ -1749,6 +1828,9 @@ def _cleanup_servo(ctx):
         ctx['log_f'].close()
     if ctx.get('ticc_log_f'):
         ctx['ticc_log_f'].close()
+    pmc = ctx.get('pmc')
+    if pmc is not None:
+        pmc.close()
     log.info("PHC servo cleaned up")
 
 
@@ -1765,6 +1847,107 @@ def _purge_pps_state(ctx):
             ctx['pps_queue'].get_nowait()
         except queue.Empty:
             break
+
+
+def _locked_len(collection, lock):
+    """Return len(collection) while holding lock, or 0 if either is None."""
+    if collection is None or lock is None:
+        return 0
+    with lock:
+        return len(collection)
+
+
+def _check_queue_depths(queue_hwm, alert_armed, threshold, dump,
+                        obs_queue, obs_history,
+                        pps_history=None, pps_history_lock=None,
+                        skip_stats=None, gate=None):
+    """Update queue high-water marks and fire threshold alerts.
+
+    High-water marks track the session maximum depth for each queue.
+    When any queue's current depth reaches *threshold*, a warning is
+    logged (with optional diagnostic dump via *dump*).  The alert
+    re-arms once the queue drains below half the threshold.
+    """
+    now_mono = time.monotonic()
+    depths = {
+        "obs_queue": obs_queue.qsize(),
+        "obs_history": len(obs_history),
+        "pps_history": _locked_len(pps_history, pps_history_lock),
+    }
+    for name, depth in depths.items():
+        if depth > queue_hwm[name]:
+            queue_hwm[name] = depth
+        if depth >= threshold and alert_armed[name]:
+            alert_armed[name] = False
+            # Age of oldest item (seconds behind real-time)
+            oldest_age_s = None
+            if name == "obs_history" and obs_history:
+                oldest_age_s = now_mono - obs_history[0].recv_mono
+            elif name == "pps_history" and pps_history and pps_history_lock:
+                with pps_history_lock:
+                    if pps_history:
+                        oldest_age_s = now_mono - pps_history[0].recv_mono
+            age_str = f"{oldest_age_s:.1f}s" if oldest_age_s is not None else "N/A"
+            log.warning(
+                "Queue depth threshold: %s depth=%d (threshold=%d) "
+                "oldest_age=%s  all_depths: obs_q=%d obs_hist=%d pps_hist=%d",
+                name, depth, threshold, age_str,
+                depths["obs_queue"], depths["obs_history"], depths["pps_history"],
+            )
+            if dump:
+                _dump_queue_diagnostics(
+                    name, depths, queue_hwm, obs_history,
+                    pps_history, pps_history_lock,
+                    skip_stats, gate, now_mono,
+                )
+        # Re-arm alert when queue drains below half threshold
+        if depth < max(1, threshold // 2) and not alert_armed[name]:
+            alert_armed[name] = True
+
+
+def _dump_queue_diagnostics(trigger_queue, depths, queue_hwm, obs_history,
+                            pps_history, pps_history_lock,
+                            skip_stats, gate, now_mono):
+    """Dump detailed diagnostic state when a queue depth threshold is breached."""
+    lines = [f"--- Queue diagnostic dump (triggered by {trigger_queue}) ---"]
+    lines.append(f"  Current depths: {depths}")
+    lines.append(f"  Session HWMs:   {queue_hwm}")
+
+    # obs_history age spread
+    if obs_history:
+        oldest = now_mono - obs_history[0].recv_mono
+        newest = now_mono - obs_history[-1].recv_mono
+        lines.append(f"  obs_history age range: oldest={oldest:.2f}s newest={newest:.2f}s")
+        # Show first few items' GPS times and confidence
+        for i, ev in enumerate(obs_history):
+            if i >= 5:
+                lines.append(f"    ... ({len(obs_history) - 5} more)")
+                break
+            age = now_mono - ev.recv_mono
+            conf = getattr(ev, "correlation_confidence", None)
+            qr = getattr(ev, "queue_remains", None)
+            lines.append(
+                f"    [{i}] gps={ev.gps_time} age={age:.2f}s conf={conf} queue_remains={qr}"
+            )
+
+    # pps_history age spread
+    if pps_history and pps_history_lock:
+        with pps_history_lock:
+            pps_snap = list(pps_history)
+        if pps_snap:
+            oldest = now_mono - pps_snap[0].recv_mono
+            newest = now_mono - pps_snap[-1].recv_mono
+            lines.append(f"  pps_history age range: oldest={oldest:.2f}s newest={newest:.2f}s "
+                         f"(n={len(pps_snap)})")
+
+    if skip_stats:
+        lines.append(f"  skip_stats: {skip_stats}")
+
+    if gate:
+        lines.append(f"  gate_stats: {gate.stats.as_dict()}")
+
+    lines.append("--- end diagnostic dump ---")
+    log.warning("\n".join(lines))
 
 
 def _queue_put_drop_oldest(qobj, item):
@@ -1804,6 +1987,7 @@ def run(args):
     """Main entry point: bootstrap → steady state."""
     stop_event = threading.Event()
     gate_stats = None
+    exit_code = 0
     # Verify receiver config on open (defensive: re-applies if needed).
     # This opens/closes the serial port to check for dual-freq observations,
     # reconfigures if single-freq, then releases the port for serial_reader.
@@ -1965,7 +2149,7 @@ def run(args):
             return 0
 
         # Phase 2: Steady state
-        gate_stats = run_steady_state(
+        steady_result = run_steady_state(
             args,
             known_ecef,
             obs_queue,
@@ -1976,6 +2160,12 @@ def run(args):
             qerr_store=qerr_store,
             out_w=out_w,
         )
+        # run_steady_state returns an int exit code on error,
+        # or a gate_stats dict on normal completion.
+        if isinstance(steady_result, int):
+            exit_code = steady_result
+        else:
+            gate_stats = steady_result
 
     except KeyboardInterrupt:
         log.info("Interrupted")
@@ -1992,7 +2182,7 @@ def run(args):
             os.unlink(args.pid_file)
         except FileNotFoundError:
             pass
-    return 0
+    return exit_code
 
 
 # ── CLI ──────────────────────────────────────────────────────────────── #
@@ -2142,8 +2332,16 @@ Two-phase operation:
                        help="In landing mode, enforce enough frequency to clear the current TICC error over this horizon")
     servo.add_argument("--obs-idle-timeout-s", type=float, default=None,
                        help="Log and enter safe holdover if no observation epochs arrive for this long")
+    servo.add_argument("--queue-depth-threshold", type=int, default=5,
+                       help="Warn when any pipeline queue exceeds this depth (epochs, default: 5)")
+    servo.add_argument("--queue-depth-dump", action="store_true",
+                       help="Dump full diagnostic state when queue depth threshold is breached")
     servo.add_argument("--carrier-max-sigma-ns", type=float, default=None,
                        help="Maximum PPP sigma allowed to compete as a servo source")
+    servo.add_argument("--pmc", default=None, metavar="UDS_PATH",
+                       help="ptp4l UDS path for clockClass management (e.g. /var/run/ptp4l)")
+    servo.add_argument("--pmc-domain", type=int, default=0,
+                       help="PTP domain number for pmc messages (must match ptp4l config, default: 0)")
     servo.add_argument("--pid-file", default=None,
                        help="Write engine PID here for external test control")
 
