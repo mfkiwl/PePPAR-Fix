@@ -43,6 +43,7 @@ class StrictCorrelationGate:
     def __init__(self, min_confidence=0.5):
         self.stats = GateStats()
         self.min_confidence = min_confidence
+        self._recv_mono_anchored = False
 
     def pop_observation_match(
         self,
@@ -55,20 +56,21 @@ class StrictCorrelationGate:
     ):
         if min_confidence is None:
             min_confidence = self.min_confidence
-        # Skip observations whose recv_mono is unreliable due to kernel/USB
-        # buffering.  When multiple observations arrive in a burst, only the
-        # last one (queue_remains=False) has a recv_mono that reflects actual
-        # delivery time.  The others' recv_mono is dominated by read-loop
-        # cadence, not host-receive time, so time-correlating them is
-        # error-prone.  Keep the freshest and drop the rest.
-        n_queued = 0
-        while (
-            len(obs_history) > 1
-            and getattr(obs_history[0], "queue_remains", False)
-        ):
-            obs_history.popleft()
-            n_queued += 1
-        self.stats.dropped_queued_behind += n_queued
+        # During initialization, skip observations with queue_remains=True
+        # to establish a reliable recv_mono-to-stream-time anchor.  Once
+        # the first queue_remains=False observation has been successfully
+        # correlated, the timebase relationship is established and we stop
+        # draining — subsequent queued observations have valid GPS times
+        # and can be correlated by stream time rather than recv_mono.
+        if not self._recv_mono_anchored:
+            n_queued = 0
+            while (
+                len(obs_history) > 1
+                and getattr(obs_history[0], "queue_remains", False)
+            ):
+                obs_history.popleft()
+                n_queued += 1
+            self.stats.dropped_queued_behind += n_queued
         while obs_history:
             obs_event = obs_history[0]
             target_sec = target_sec_fn(obs_event)
@@ -83,6 +85,8 @@ class StrictCorrelationGate:
             if pps_event is not None and combined_confidence >= min_confidence:
                 obs_history.popleft()
                 self.stats.consumed_correlated += 1
+                if not self._recv_mono_anchored:
+                    self._recv_mono_anchored = True
                 return obs_event, (pps_event, delta_s, recv_dt_s, combined_confidence)
             if pps_event is not None:
                 # A PPS match exists but confidence is below threshold.
