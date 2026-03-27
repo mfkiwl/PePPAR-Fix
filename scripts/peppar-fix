@@ -247,6 +247,23 @@ bootstrap_position() {
 
 if [[ -n "$KNOWN_POS" ]]; then
     echo "  Known position provided: $KNOWN_POS (skipping bootstrap)"
+    # Create position file from known position if it doesn't exist.
+    # PHC bootstrap and the engine both need this file.
+    if [[ ! -f "$POSITION_FILE" ]]; then
+        IFS=',' read -r kp_lat kp_lon kp_alt <<< "$KNOWN_POS"
+        "$PYTHON_BIN" -c "
+import json, sys
+sys.path.insert(0, '$SCRIPT_DIR')
+from solve_pseudorange import lla_to_ecef
+lat, lon, alt = $kp_lat, $kp_lon, $kp_alt
+ecef = lla_to_ecef(lat, lon, alt)
+import os; os.makedirs(os.path.dirname('$POSITION_FILE') or '.', exist_ok=True)
+json.dump({'lat': lat, 'lon': lon, 'alt_m': alt,
+           'ecef_m': [round(x,3) for x in ecef],
+           'sigma_m': 0.0, 'source': 'known_pos'}, open('$POSITION_FILE','w'), indent=2)
+print(f'  Created {\"$POSITION_FILE\"} from known position')
+"
+    fi
 elif [[ ! -f "$POSITION_FILE" ]]; then
     bootstrap_position || exit 2
 else
