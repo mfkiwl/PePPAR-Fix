@@ -22,7 +22,7 @@
 #   PEPPAR_RECEIVER     Receiver profile (default: f9t)
 #   PEPPAR_PTP_PROFILE  PTP profile (optional)
 #   PEPPAR_HOST_CONFIG  Explicit host config TOML (optional)
-#   PEPPAR_PTP_DEV      PTP device (default: /dev/ptp0)
+#   PEPPAR_PTP_DEV      PTP device (no default — must be set explicitly or via host config)
 #   PEPPAR_NTRIP_CONF   NTRIP config file
 #   PEPPAR_EPH_MOUNT    Ephemeris mountpoint
 #   PEPPAR_SSR_MOUNT    SSR mountpoint (optional)
@@ -153,7 +153,7 @@ fi
 UBX_PORT="${UBX_PORT:-${HOSTCFG_UBX_PORT:-${HOSTCFG_PORT_TYPE:-USB}}}"
 RECEIVER="${RECEIVER:-${HOSTCFG_RECEIVER:-f9t}}"
 PTP_PROFILE="${PTP_PROFILE:-${HOSTCFG_PTP_PROFILE:-}}"
-PTP_DEV="${PTP_DEV:-${HOSTCFG_PTP_DEV:-/dev/ptp0}}"
+PTP_DEV="${PTP_DEV:-${HOSTCFG_PTP_DEV:-}}"
 NTRIP_CONF="${NTRIP_CONF:-${HOSTCFG_NTRIP_CONF:-}}"
 EPH_MOUNT="${EPH_MOUNT:-${HOSTCFG_EPH_MOUNT:-}}"
 SSR_MOUNT="${SSR_MOUNT:-${HOSTCFG_SSR_MOUNT:-}}"
