@@ -731,6 +731,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
         "obs_dropped_expired": 0,
         "obs_dropped_queued": 0,
         "ticc_missing_pair": 0,
+        "consumption_alarm": False,
     }
     last_skip_log = start_time
     last_obs_wall = time.monotonic()
@@ -744,6 +745,13 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
     queue_depth_threshold = getattr(args, "queue_depth_threshold", 5)
     queue_dump = getattr(args, "queue_depth_dump", False)
     last_hwm_log = start_time
+    # Consumption rate monitor: detect when observation delivery persistently
+    # falls behind PPS.  Growing recv_dt means the I2C/serial buffer is filling
+    # faster than we drain it — we'll eventually lose observations and the
+    # correlation window will fail.  This is a sanity check, not a retry:
+    # the correct fix is to reduce message bandwidth (disable SFRBX, etc).
+    recv_dt_history = deque(maxlen=30)
+    consumption_alarm = False
     # Sink policy: steady-state + servo is a correlated-window consumer.
     # Preserve receive order here and let the correlator decide when an epoch
     # is too old to be useful, rather than draining the queue at phase entry.
@@ -839,6 +847,32 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             last_usable_obs_wall = last_obs_wall
             if servo_ctx is not None:
                 _exit_holdover(servo_ctx, "fresh usable observation epoch received")
+
+            # ── Consumption rate sanity check ──
+            # Track recv_dt_s to detect persistent observation delivery lag.
+            if pps_match is not None:
+                _, _, match_recv_dt_s, _ = pps_match
+                recv_dt_history.append(match_recv_dt_s)
+                if len(recv_dt_history) >= 20 and not consumption_alarm:
+                    # Linear trend of recv_dt over last 20 correlated epochs.
+                    # Positive slope means observations arrive later each epoch.
+                    dt_first = recv_dt_history[0]
+                    dt_last = recv_dt_history[-1]
+                    growth = dt_last - dt_first
+                    if growth > 3.0:
+                        consumption_alarm = True
+                        skip_stats["consumption_alarm"] = True
+                        log.error(
+                            "CONSUMPTION RATE ALARM: observation delivery lag grew "
+                            "%.1fs over %d epochs (recv_dt: %.1f → %.1fs). "
+                            "The GNSS transport cannot sustain the configured "
+                            "message rate. Observations will be lost. "
+                            "Reduce I2C message bandwidth (disable SFRBX/PVT) "
+                            "or check for transport bottlenecks.",
+                            growth, len(recv_dt_history),
+                            dt_first, dt_last,
+                        )
+                        _set_clock_class(servo_ctx, "freerun")
 
             ok_corr, corr_reason, corr_snapshot = correction_gate.accept(
                 corrections,
