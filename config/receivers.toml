@@ -70,8 +70,8 @@ pps_pin = 0
 extts_channel = 0
 timescale = "tai"
 measurement_rate_ms = 2000    # 0.5 Hz — lossless on E810 AQ I2C (15 B/cmd, ~1.6 kB/s).
-                              # At 1 Hz RAWX alone (~1.5 kB/s) saturates the bus and
-                              # ~10% of epochs are lost.  0.5 Hz guarantees zero loss.
+                              # Every servo epoch has full PPS+qErr+PPP stack.
+                              # Intervening 1 Hz PPS events are pruned by the gate.
 sfrbx_rate = 0                # disabled — SFRBX consumes ~400 B/s on I2C, pushing total
                               # output well above bus capacity.  Ephemeris comes from NTRIP.
 # PHC step characterization (2026-03-27, characterize_phc_step.py on ocxo)
