@@ -314,8 +314,8 @@ class PtpDevice:
             errno = ctypes.get_errno()
             raise OSError(errno, f"clock_settime failed: {os.strerror(errno)}")
 
-    def step_to(self, target_ns=0, search_time_s=1.0,
-                settime_lag_ns=0,
+    def step_to(self, target_ns=0, phc_optimal_stop_limit_s=1.0,
+                phc_settime_lag_ns=0,
                 pps_anchor_ns=None, pps_realtime_ns=None):
         """Step the PHC to a target time using optimal stopping.
 
@@ -333,15 +333,15 @@ class PtpDevice:
         pps_realtime_ns.  Each iteration recomputes the target using
         CLOCK_REALTIME as a transfer standard.
 
-        settime_lag_ns: mean clock_settime-to-PHC landing delay.
+        phc_settime_lag_ns: mean clock_settime-to-PHC landing delay.
         The aim includes this lag so the PHC reads the correct time
         at the moment the write completes.
 
         Returns (residual_ns, attempts, accepted).
         """
         import math
-        deadline = time.monotonic() + search_time_s
-        observe_until = time.monotonic() + search_time_s / math.e
+        deadline = time.monotonic() + phc_optimal_stop_limit_s
+        observe_until = time.monotonic() + phc_optimal_stop_limit_s / math.e
         attempts = 0
         observe_samples = []
         observing = True
@@ -352,7 +352,7 @@ class PtpDevice:
             if pps_anchor_ns is not None:
                 rt_now = time.clock_gettime_ns(time.CLOCK_REALTIME)
                 target_ns = pps_anchor_ns + (rt_now - pps_realtime_ns)
-            aim_ns = target_ns + settime_lag_ns
+            aim_ns = target_ns + phc_settime_lag_ns
             self.set_phc_ns(aim_ns)
             phc_after, sys_at_read = self.read_phc_ns()
 

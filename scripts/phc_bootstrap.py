@@ -236,10 +236,10 @@ def _apply_bootstrap_profile(args):
     log.info("Applying PTP profile '%s' from %s", args.ptp_profile, config_path)
 
     # Step parameters — only apply if the user didn't override on CLI
-    if args.settime_lag_ns == 0:
-        args.settime_lag_ns = profile.get("settime_lag_ns", args.settime_lag_ns)
-    if args.step_accuracy_ns == 10000:
-        args.step_accuracy_ns = profile.get("step_accuracy_ns", args.step_accuracy_ns)
+    if args.phc_settime_lag_ns == 0:
+        args.phc_settime_lag_ns = profile.get("phc_settime_lag_ns", args.phc_settime_lag_ns)
+    if args.phc_step_threshold_ns == 10000:
+        args.phc_step_threshold_ns = profile.get("phc_step_threshold_ns", args.phc_step_threshold_ns)
 
     # Pin/EXTTS parameters
     if args.pps_pin is None:
@@ -264,14 +264,14 @@ def _apply_bootstrap_profile(args):
         args.glide_zeta = profile.get("glide_zeta", args.glide_zeta)
     if args.track_max_ppb == 0:
         args.track_max_ppb = profile.get("track_max_ppb", 100000.0)
-    if args.search_time_s == 1.0:
-        args.search_time_s = profile.get("search_time_s", args.search_time_s)
+    if args.phc_optimal_stop_limit_s == 1.0:
+        args.phc_optimal_stop_limit_s = profile.get("phc_optimal_stop_limit_s", args.phc_optimal_stop_limit_s)
 
-    log.info("  settime_lag_ns=%d step_accuracy_ns=%d search_time=%.1fs",
-             args.settime_lag_ns, args.step_accuracy_ns, args.search_time_s)
+    log.info("  phc_settime_lag_ns=%d phc_step_threshold_ns=%d phc_optimal_stop_limit=%.1fs",
+             args.phc_settime_lag_ns, args.phc_step_threshold_ns, args.phc_optimal_stop_limit_s)
     log.info("  track_kp=%.4f track_ki=%.4f glide_zeta=%.2f track_max=%.0f ppb",
              args.track_kp, args.track_ki, args.glide_zeta, args.track_max_ppb)
-    log.info("  search_time=%.1fs", args.search_time_s)
+    log.info("  phc_optimal_stop_limit=%.1fs", args.phc_optimal_stop_limit_s)
 
 
 def main():
@@ -307,16 +307,16 @@ def main():
                     help="Number of filter epochs before evaluating PHC")
     ap.add_argument("--freq-tolerance-ppb", type=float, default=10.0,
                     help="Frequency sanity threshold in ppb")
-    ap.add_argument("--step-accuracy-ns", type=int, default=10000,
+    ap.add_argument("--phc-step-threshold-ns", type=int, default=10000,
                     help="Expected step accuracy (ns) — skip bootstrap if phase error already within this")
-    ap.add_argument("--settime-lag-ns", type=int, default=0,
+    ap.add_argument("--phc-settime-lag-ns", type=int, default=0,
                     help="Mean clock_settime-to-PHC landing lag in ns (aim correction)")
     ap.add_argument("--max-pps-iterations", type=int, default=8,
                     help="Max PPS feedback iterations for step convergence (default: 8)")
     ap.add_argument("--position-check-m", type=float, default=100.0,
                     help="Max acceptable LS-vs-stored position delta in meters")
-    ap.add_argument("--search-time-s", type=float, default=1.0,
-                    help="Phase step search budget in seconds (default: 1s)")
+    ap.add_argument("--phc-optimal-stop-limit-s", type=float, default=1.0,
+                    help="Phase step optimal stopping search budget in seconds")
     ap.add_argument("--glide-zeta", type=float, default=0.7,
                     help="Target damping ratio for servo glide (0.5-1.0)")
     ap.add_argument("--track-kp", type=float, default=0.01,
@@ -577,12 +577,12 @@ def main():
                      pps_freq_ppb, pps_freq_unc, args.freq_tolerance_ppb)
 
     # Phase sanity check
-    phase_sane = abs(phase_error_ns) < args.step_accuracy_ns
+    phase_sane = abs(phase_error_ns) < args.phc_step_threshold_ns
 
     if phase_sane and freq_sane:
         log.info("PHC state is sane — blessing without intervention")
         log.info("  Phase error: %+.0f ns (within %d ns)",
-                 phase_error_ns, args.step_accuracy_ns)
+                 phase_error_ns, args.phc_step_threshold_ns)
         _enable_pps_out(ptp, args)
         ptp.close()
         return 0
@@ -634,17 +634,17 @@ def main():
     if not phase_sane:
         # Step 1: Phase step with optimal stopping.
         pps_anchor_ns = target_sec * 1_000_000_000
-        log.info("Stepping PHC (search=%.1fs, target_sec=%d, lag=%d ns)",
-                 args.search_time_s, target_sec, args.settime_lag_ns)
+        log.info("Stepping PHC (limit=%.1fs, target_sec=%d, lag=%d ns)",
+                 args.phc_optimal_stop_limit_s, target_sec, args.phc_settime_lag_ns)
         residual, attempts, met = ptp.step_to(
             pps_anchor_ns=pps_anchor_ns,
             pps_realtime_ns=pps_realtime_ns,
-            search_time_s=args.search_time_s,
-            settime_lag_ns=args.settime_lag_ns,
+            phc_optimal_stop_limit_s=args.phc_optimal_stop_limit_s,
+            phc_settime_lag_ns=args.phc_settime_lag_ns,
         )
-        log.info("Step: residual=%+.0f ns, attempts=%d, %s (search=%.1fs)",
+        log.info("Step: residual=%+.0f ns, attempts=%d, %s (limit=%.1fs)",
                  residual, attempts, "ACCEPTED" if met else "DEADLINE",
-                 args.search_time_s)
+                 args.phc_optimal_stop_limit_s)
 
         # Step 2: Measure true residual φ₀ via PPS.
         ptp.enable_extts(args.extts_channel, rising_edge=True)
