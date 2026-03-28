@@ -26,10 +26,9 @@ extts_channel = 0
 timescale = "tai"
 measurement_rate_ms = 1000    # 1 Hz — USB serial has ample bandwidth
 sfrbx_rate = 1                # every epoch — serial bandwidth is free
-# PHC step characterization (2026-03-24, characterize_phc_step.py)
-settime_lag_ns = 200000       # PPS-calibrated clock_settime lag
-step_error_ns = 10000         # achievable step accuracy (±10 µs)
-max_step_time_ms = 500        # retry budget (~80k attempts at 6 µs each)
+# PHC bootstrap (optimal stopping adapts to any PHC automatically)
+settime_lag_ns = 200000       # PPS-calibrated clock_settime lag (aim correction)
+search_time_s = 1.0           # optimal stop search budget
 # Servo tuning — Kp chosen for damping ratio zeta ≈ 0.5 with Ki=0.001.
 # zeta = Kp / (2 * sqrt(Ki)) = 0.03 / (2 * 0.0316) = 0.47
 # Combined with bootstrap glide (zeta_target=0.7), the servo should
@@ -74,14 +73,10 @@ measurement_rate_ms = 2000    # 0.5 Hz — lossless on E810 AQ I2C (15 B/cmd, ~1
                               # Intervening 1 Hz PPS events are pruned by the gate.
 sfrbx_rate = 0                # disabled — SFRBX consumes ~400 B/s on I2C, pushing total
                               # output well above bus capacity.  Ephemeris comes from NTRIP.
-# PHC step characterization (2026-03-27, characterize_phc_step.py on ocxo)
+# PHC bootstrap (optimal stopping adapts automatically)
 # Bimodal clock_settime: 1.6 ms typical, 16 ms ~30% of calls.
-# PPS-calibrated lag measured at ~16 ms (direct PPS phase at lag=0).
-# PTP_SYS_OFFSET asymmetry ~14.5 ms masks the true lag in readback.
-settime_lag_ns = 16000000     # PPS-calibrated clock_settime lag
-step_error_ns = 2000000       # achievable step accuracy (±2 ms)
-max_step_time_ms = 5000       # retry budget (~300 attempts at ~7 ms avg each)
-search_time_s = 5.0           # E810 ~26ms/attempt → ~190 candidates; bimodality makes ACCEPTED likely well before deadline
+settime_lag_ns = 16000000     # PPS-calibrated clock_settime lag (aim correction)
+search_time_s = 5.0           # longer budget for E810's slow bimodal settime
 # Servo tuning — OCXO with bootstrap glide.  The glide handles the
 # large initial phase error (±2 ms); the servo just needs enough Kp
 # to damp the resulting trajectory.

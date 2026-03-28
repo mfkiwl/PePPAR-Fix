@@ -240,8 +240,6 @@ def _apply_bootstrap_profile(args):
         args.settime_lag_ns = profile.get("settime_lag_ns", args.settime_lag_ns)
     if args.step_error_ns == 5000:
         args.step_error_ns = profile.get("step_error_ns", args.step_error_ns)
-    if args.step_budget_ms == 500:
-        args.step_budget_ms = profile.get("max_step_time_ms", args.step_budget_ms)
 
     # Pin/EXTTS parameters
     if args.pps_pin is None:
@@ -269,8 +267,8 @@ def _apply_bootstrap_profile(args):
     if args.search_time_s == 1.0:
         args.search_time_s = profile.get("search_time_s", args.search_time_s)
 
-    log.info("  settime_lag_ns=%d step_error_ns=%d step_budget_ms=%d",
-             args.settime_lag_ns, args.step_error_ns, args.step_budget_ms)
+    log.info("  settime_lag_ns=%d step_error_ns=%d search_time=%.1fs",
+             args.settime_lag_ns, args.step_error_ns, args.search_time_s)
     log.info("  track_kp=%.4f track_ki=%.4f glide_zeta=%.2f track_max=%.0f ppb",
              args.track_kp, args.track_ki, args.glide_zeta, args.track_max_ppb)
     log.info("  search_time=%.1fs", args.search_time_s)
@@ -310,11 +308,9 @@ def main():
     ap.add_argument("--freq-tolerance-ppb", type=float, default=10.0,
                     help="Frequency sanity threshold in ppb")
     ap.add_argument("--step-error-ns", type=int, default=5000,
-                    help="Target step accuracy in ns")
-    ap.add_argument("--step-budget-ms", type=int, default=500,
-                    help="Max time for step retry loop in ms")
+                    help="Phase error threshold for skipping bootstrap (ns)")
     ap.add_argument("--settime-lag-ns", type=int, default=0,
-                    help="Mean clock_settime-to-PHC landing lag in ns (from characterization)")
+                    help="Mean clock_settime-to-PHC landing lag in ns (aim correction)")
     ap.add_argument("--max-pps-iterations", type=int, default=8,
                     help="Max PPS feedback iterations for step convergence (default: 8)")
     ap.add_argument("--position-check-m", type=float, default=100.0,
@@ -638,15 +634,13 @@ def main():
     if not phase_sane:
         # Step 1: Phase step with optimal stopping.
         pps_anchor_ns = target_sec * 1_000_000_000
-        log.info("Stepping PHC (optimal_stop, search=%.1fs, target_sec=%d, lag=%d ns)",
+        log.info("Stepping PHC (search=%.1fs, target_sec=%d, lag=%d ns)",
                  args.search_time_s, target_sec, args.settime_lag_ns)
         residual, attempts, met = ptp.step_to(
             pps_anchor_ns=pps_anchor_ns,
             pps_realtime_ns=pps_realtime_ns,
-            target_error_ns=args.step_error_ns,
-            max_time_ms=int(args.search_time_s * 1000),
+            search_time_s=args.search_time_s,
             settime_lag_ns=args.settime_lag_ns,
-            optimal_stop=True,
         )
         log.info("Step: residual=%+.0f ns, attempts=%d, %s (search=%.1fs)",
                  residual, attempts, "ACCEPTED" if met else "DEADLINE",

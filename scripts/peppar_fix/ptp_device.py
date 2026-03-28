@@ -314,26 +314,19 @@ class PtpDevice:
             errno = ctypes.get_errno()
             raise OSError(errno, f"clock_settime failed: {os.strerror(errno)}")
 
-    def step_to(self, target_ns=0, target_error_ns=5000, max_time_ms=500,
+    def step_to(self, target_ns=0, search_time_s=1.0,
                 settime_lag_ns=0,
-                pps_anchor_ns=None, pps_realtime_ns=None,
-                optimal_stop=False):
-        """Step the PHC to a target time, retrying within a time budget.
+                pps_anchor_ns=None, pps_realtime_ns=None):
+        """Step the PHC to a target time using optimal stopping.
 
-        Three modes:
+        Parametric optimal stopping (secretary problem variant):
+        Observe first 1/e (~37%) of the search budget, tracking the
+        best |readback residual|.  Then accept the first attempt that
+        equals or beats the 5th percentile of observations.
 
-        1. Threshold (default): retry until |residual| < target_error_ns
-           or deadline.
-
-        2. Single-shot (settime_lag_ns != 0 and pps_anchor_ns set, no
-           optimal_stop): one attempt with lag compensation.
-
-        3. Optimal stopping (optimal_stop=True): secretary problem.
-           Observe first 1/e (~37%) of budget, tracking the best
-           |readback residual|.  Then accept the first attempt that
-           equals or beats it.  Self-adapts to any PHC — no prior
-           characterization needed.  Works with bimodal E810 latency
-           (observation phase learns both modes).
+        Self-adapts to any PHC — no prior characterization of step
+        error distribution needed.  Works with tight i226 latency
+        and bimodal E810 latency alike.
 
         PPS-anchored target (pps_anchor_ns + pps_realtime_ns): the PHC
         should read pps_anchor_ns at the moment CLOCK_REALTIME was
@@ -344,67 +337,17 @@ class PtpDevice:
         The aim includes this lag so the PHC reads the correct time
         at the moment the write completes.
 
-        Returns (residual_ns, attempts, met_target).
+        Returns (residual_ns, attempts, accepted).
         """
         import math
-        deadline = time.monotonic() + max_time_ms / 1000.0
+        deadline = time.monotonic() + search_time_s
+        observe_until = time.monotonic() + search_time_s / math.e
         attempts = 0
+        observe_samples = []
+        observing = True
+        residual_ns = 0
 
-        if optimal_stop:
-            observe_until = time.monotonic() + max_time_ms / (1000.0 * math.e)
-
-            # Parametric optimal stopping.  The step error distribution
-            # is log-normal (fixed minimum kernel path + multiplicative
-            # scheduling perturbations).  The readback residual has the
-            # same shape, shifted by a constant readback bias.
-            #
-            # Phase 1 (1/e of budget): collect |residual| samples to
-            #   learn the distribution.
-            # Phase 2: set threshold at observation p5 (5th percentile),
-            #   accept first sample that beats it.
-            #
-            # P(DEADLINE) ≈ 0.95^n_selection — negligible for any
-            # reasonable candidate count.  Adapts to any PHC: fast i226
-            # (tight distribution) and slow bimodal E810 alike.
-
-            observe_samples = []
-            observing = True
-
-            while time.monotonic() < deadline:
-                attempts += 1
-                if pps_anchor_ns is not None:
-                    rt_now = time.clock_gettime_ns(time.CLOCK_REALTIME)
-                    target_ns = pps_anchor_ns + (rt_now - pps_realtime_ns)
-                aim_ns = target_ns + settime_lag_ns
-                self.set_phc_ns(aim_ns)
-                phc_after, sys_at_read = self.read_phc_ns()
-
-                if pps_anchor_ns is not None:
-                    expected_ns = pps_anchor_ns + (sys_at_read - pps_realtime_ns)
-                    residual_ns = phc_after - expected_ns
-                else:
-                    residual_ns = phc_after - target_ns
-
-                if observing:
-                    observe_samples.append(abs(residual_ns))
-                    if time.monotonic() >= observe_until:
-                        observing = False
-                        # Set threshold at the 5th percentile of observed
-                        # |residuals|.  ~5% of future samples should beat
-                        # this, giving near-certain acceptance.
-                        observe_samples.sort()
-                        idx = max(0, len(observe_samples) * 5 // 100 - 1)
-                        threshold = observe_samples[idx]
-                else:
-                    if abs(residual_ns) <= threshold:
-                        return residual_ns, attempts, True
-
-            return residual_ns, attempts, False
-
-        # Legacy: single-shot or threshold
-        single_shot = (settime_lag_ns != 0 and pps_anchor_ns is not None)
-
-        while True:
+        while time.monotonic() < deadline:
             attempts += 1
             if pps_anchor_ns is not None:
                 rt_now = time.clock_gettime_ns(time.CLOCK_REALTIME)
@@ -419,11 +362,15 @@ class PtpDevice:
             else:
                 residual_ns = phc_after - target_ns
 
-            if single_shot:
-                return residual_ns, attempts, True
+            if observing:
+                observe_samples.append(abs(residual_ns))
+                if time.monotonic() >= observe_until:
+                    observing = False
+                    observe_samples.sort()
+                    idx = max(0, len(observe_samples) * 5 // 100 - 1)
+                    threshold = observe_samples[idx]
+            else:
+                if abs(residual_ns) <= threshold:
+                    return residual_ns, attempts, True
 
-            if abs(residual_ns) < target_error_ns:
-                return residual_ns, attempts, True
-
-            if time.monotonic() >= deadline:
-                return residual_ns, attempts, False
+        return residual_ns, attempts, False
