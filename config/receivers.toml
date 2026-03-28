@@ -83,7 +83,6 @@ phc_step_threshold_ns = 2000000 # expected step accuracy (±2 ms) — skip boots
                               # current phase error is already within this
 pps_out_pin = 1               # SMA1 (upper bracket connector) → TICC #3 chA
 pps_out_channel = 1           # PEROUT channel 1 (channel 0 is GNSS/EXTTS)
-program_pin = false            # E810 pins are not programmable via PTP_PIN_SETFUNC
 # Servo tuning — OCXO with bootstrap glide.  The glide handles the
 # large initial phase error (±2 ms); the servo just needs enough Kp
 # to damp the resulting trajectory.
