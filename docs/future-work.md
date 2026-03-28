@@ -1,8 +1,8 @@
-# Servo Improvement Candidates
+# Future Work
 
-Ideas for servo quality improvements, drawn from SatPulse comparison
-and operational experience.  These are independent of each other and
-can be adopted incrementally.
+Improvement candidates drawn from SatPulse comparison and operational
+experience.  These are independent of each other and can be adopted
+incrementally.
 
 ## MAD-based outlier rejection
 
@@ -107,3 +107,65 @@ simulator would allow:
 - CI integration
 
 **Reference**: SatPulse `time/internal/clocksim/` package.
+
+
+## TOML-based unified configuration
+
+**What**: Replace the current CLI-args-plus-INI mix with structured
+TOML configuration for all aspects of peppar-fix operation.
+
+**Why**: Configuration is currently spread across:
+- `config/receivers.toml` (PTP profiles, servo gains, platform params)
+- `config/ocxo.toml`, `config/timehat.toml` (host-specific peppar settings)
+- `ntrip.conf` (INI format, NTRIP credentials)
+- CLI arguments (everything else, dozens of `--flags`)
+- Environment variables (`PEPPAR_*`)
+
+This is fragile: CLI args have no schema validation, the INI/TOML
+split is arbitrary, and there's no single file that fully describes
+a deployment.  SatPulse uses a single TOML config with JSON schema
+validation covering all aspects (PHC, serial, GPS, servo, PTP, NTP,
+logging, HTTP).
+
+**How**: Migrate incrementally:
+1. Merge `ntrip.conf` into the host TOML (already has `[peppar]`)
+2. Move servo/bootstrap params from CLI-only to TOML with CLI override
+3. Add JSON schema for validation (catch typos at startup, not at
+   the servo loop)
+4. Support layered configs (`-f base.toml -f override.toml`) for
+   separating platform defaults from site-specific overrides
+
+The `receivers.toml` pattern already works well.  The host config
+files (`ocxo.toml`, `timehat.toml`) are the natural place to
+consolidate everything.
+
+**Trade-off**: CLI args remain useful for development and one-off
+experiments.  Keep them as overrides, not the primary config path.
+
+**Reference**: SatPulse `configs/satpulse.toml` + `config-schema.json`.
+
+
+## ADJ_SETOFFSET for PHC stepping
+
+**What**: Use `clock_adjtime(ADJ_SETOFFSET)` instead of
+`clock_settime` for the PHC phase step in bootstrap.
+
+**Why**: `ADJ_SETOFFSET` applies a relative offset rather than
+setting an absolute time.  Since it's relative, systematic read
+latency may cancel — the PHC ticks forward between the kernel's
+internal read and write, but the offset is applied correctly
+regardless of where the clock happens to be.
+
+The E810 shows bimodal `clock_settime` latency (1.6 ms typical,
+16 ms ~30% of calls).  This bimodality might come from the
+absolute-time computation path rather than the PHC register write.
+If so, `ADJ_SETOFFSET` could have a tighter, unimodal distribution,
+dramatically improving step accuracy (potentially ±10 µs instead
+of ±2 ms).
+
+**Experiment**: Run optimal stopping with `ADJ_SETOFFSET` on ocxo,
+collect the |residual| distribution, compare against `clock_settime`.
+Same search budget, same PHC, same host load.
+
+We already have an accurate PPS-measured phase error (`phi_0`),
+which is exactly the relative offset `ADJ_SETOFFSET` wants.
