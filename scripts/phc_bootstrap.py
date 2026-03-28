@@ -678,19 +678,33 @@ def main():
     phi_0 = phase_error_ns
 
     if not phase_sane:
-        # Step 1: Phase step with optimal stopping.
+        # Step 1: Phase step.
+        # Default: ADJ_SETOFFSET (relative, ±2 ns on both i226 and E810).
+        # Fallback: optimal stopping with clock_settime (if ADJ_SETOFFSET fails).
         pps_anchor_ns = target_sec * 1_000_000_000
-        log.info("Stepping PHC (limit=%.1fs, target_sec=%d, lag=%d ns)",
-                 args.phc_optimal_stop_limit_s, target_sec, args.phc_settime_lag_ns)
-        residual, attempts, met = ptp.step_to(
-            pps_anchor_ns=pps_anchor_ns,
-            pps_realtime_ns=pps_realtime_ns,
-            phc_optimal_stop_limit_s=args.phc_optimal_stop_limit_s,
-            phc_settime_lag_ns=args.phc_settime_lag_ns,
-        )
-        log.info("Step: residual=%+.0f ns, attempts=%d, %s (limit=%.1fs)",
-                 residual, attempts, "ACCEPTED" if met else "DEADLINE",
-                 args.phc_optimal_stop_limit_s)
+        try:
+            log.info("Stepping PHC (ADJ_SETOFFSET, target_sec=%d)", target_sec)
+            residual, attempts, met = ptp.step_relative(
+                target_ns=0,
+                pps_anchor_ns=pps_anchor_ns,
+                pps_realtime_ns=pps_realtime_ns,
+            )
+            log.info("Step: residual=%+.0f ns (ADJ_SETOFFSET, single-shot)",
+                     residual)
+        except OSError as e:
+            log.warning("ADJ_SETOFFSET failed (%s), falling back to optimal stopping",
+                        e)
+            log.info("Stepping PHC (optimal_stop, limit=%.1fs, lag=%d ns)",
+                     args.phc_optimal_stop_limit_s, args.phc_settime_lag_ns)
+            residual, attempts, met = ptp.step_to(
+                pps_anchor_ns=pps_anchor_ns,
+                pps_realtime_ns=pps_realtime_ns,
+                phc_optimal_stop_limit_s=args.phc_optimal_stop_limit_s,
+                phc_settime_lag_ns=args.phc_settime_lag_ns,
+            )
+            log.info("Step: residual=%+.0f ns, attempts=%d, %s (limit=%.1fs)",
+                     residual, attempts, "ACCEPTED" if met else "DEADLINE",
+                     args.phc_optimal_stop_limit_s)
 
         # Step 2: Measure true residual φ₀ via PPS.
         ptp.enable_extts(args.extts_channel, rising_edge=True)

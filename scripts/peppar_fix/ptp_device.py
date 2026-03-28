@@ -314,6 +314,100 @@ class PtpDevice:
             errno = ctypes.get_errno()
             raise OSError(errno, f"clock_settime failed: {os.strerror(errno)}")
 
+    def adj_setoffset(self, offset_ns):
+        """Apply a relative phase step via clock_adjtime(ADJ_SETOFFSET).
+
+        Much more precise than set_phc_ns (clock_settime) because the
+        offset is relative — systematic read latency cancels.  On E810,
+        this gives ±2 ns residual vs ±20 ms for clock_settime.
+        """
+        ADJ_SETOFFSET = 0x0100
+        ADJ_NANO = 0x2000
+
+        # Handle negative offsets: kernel expects tv_sec and tv_nsec
+        # with the same sign, or tv_sec=-1 for sub-second negative.
+        if offset_ns >= 0:
+            sec = int(offset_ns // 1_000_000_000)
+            nsec = int(offset_ns % 1_000_000_000)
+        else:
+            # For negative: sec is floor-toward-negative-infinity,
+            # nsec is the remainder (always 0..999999999).
+            abs_ns = -offset_ns
+            sec = -(int(abs_ns // 1_000_000_000))
+            nsec = -(int(abs_ns % 1_000_000_000))
+            if nsec < 0:
+                sec -= 1
+                nsec += 1_000_000_000
+
+        class Timeval(ctypes.Structure):
+            _fields_ = [("tv_sec", ctypes.c_long), ("tv_usec", ctypes.c_long)]
+
+        class Timex(ctypes.Structure):
+            _fields_ = [
+                ("modes", ctypes.c_uint),
+                ("offset", ctypes.c_long),
+                ("freq", ctypes.c_long),
+                ("maxerror", ctypes.c_long),
+                ("esterror", ctypes.c_long),
+                ("status", ctypes.c_int),
+                ("constant", ctypes.c_long),
+                ("precision", ctypes.c_long),
+                ("tolerance", ctypes.c_long),
+                ("time", Timeval),
+                ("tick", ctypes.c_long),
+                ("ppsfreq", ctypes.c_long),
+                ("jitter", ctypes.c_long),
+                ("shift", ctypes.c_int),
+                ("stabil", ctypes.c_long),
+                ("jitcnt", ctypes.c_long),
+                ("calcnt", ctypes.c_long),
+                ("errcnt", ctypes.c_long),
+                ("stbcnt", ctypes.c_long),
+                ("tai", ctypes.c_int),
+            ]
+
+        tx = Timex()
+        tx.modes = ADJ_SETOFFSET | ADJ_NANO
+        tx.time.tv_sec = sec
+        tx.time.tv_usec = nsec  # nsec field when ADJ_NANO set
+
+        ret = self._libc.clock_adjtime(
+            ctypes.c_int32(self.clock_id), ctypes.byref(tx))
+        if ret < 0:
+            errno = ctypes.get_errno()
+            raise OSError(errno, f"clock_adjtime(ADJ_SETOFFSET) failed: {os.strerror(errno)}")
+
+    def step_relative(self, target_ns, pps_anchor_ns=None, pps_realtime_ns=None):
+        """Step the PHC using ADJ_SETOFFSET (relative, single-shot).
+
+        Reads current PHC time, computes the error relative to target,
+        and applies the correction as a relative offset.  No lag
+        compensation needed — systematic read latency cancels.
+
+        Returns (residual_ns, attempts=1, accepted=True).
+        """
+        if pps_anchor_ns is not None:
+            rt_now = time.clock_gettime_ns(time.CLOCK_REALTIME)
+            target_ns = pps_anchor_ns + (rt_now - pps_realtime_ns)
+
+        phc_now, sys_now = self.read_phc_ns()
+        if pps_anchor_ns is not None:
+            expected = pps_anchor_ns + (sys_now - pps_realtime_ns)
+        else:
+            expected = target_ns
+        error = phc_now - expected
+
+        self.adj_setoffset(-error)
+
+        # Verify
+        phc_after, sys_after = self.read_phc_ns()
+        if pps_anchor_ns is not None:
+            expected_after = pps_anchor_ns + (sys_after - pps_realtime_ns)
+        else:
+            expected_after = target_ns
+        residual = phc_after - expected_after
+        return residual, 1, True
+
     def step_to(self, target_ns=0, phc_optimal_stop_limit_s=1.0,
                 phc_settime_lag_ns=0,
                 pps_anchor_ns=None, pps_realtime_ns=None):
