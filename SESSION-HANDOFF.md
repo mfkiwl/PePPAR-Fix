@@ -1,94 +1,90 @@
-# Session Handoff — 2026-03-28 (overnight)
+# Session Handoff — 2026-03-28 (afternoon)
 
-Driver write-yield fix, gnss_stream bug fix, 4-hour TDEV runs started.
+E810 I2C bandwidth investigation, SFRBX config, consumption sanity check.
 
 ## What was accomplished
 
-### Ice GNSS streaming patch: I2C write yield
-- Added `usleep_range(1000, 2000)` every 8 I2C read chunks in the read
-  work function to yield the admin queue to writes
-- Without this, the ~54 back-to-back reads per epoch starved
-  `ice_gnss_write()`, making UBX CFG-VALSET fail on E810
-- Tested: 10/10 writes succeed, streaming reads unaffected (~7ms added
-  latency per epoch)
-- Patch rebuilt, installed, initramfs updated on ocxo
+### E810 AQ I2C bandwidth limit — root cause found
+- The E810 Admin Queue limits I2C reads to **15 bytes per command**
+  (hardware: `ICE_AQC_I2C_DATA_SIZE_M = GENMASK(3,0)`, 4-bit field).
+- Each AQ command takes ~2.8ms, giving ~5.3 kB/s burst but ~1.6 kB/s
+  sustained throughput after polling gaps.
+- With all UBX messages enabled, F9T generates ~2.2 kB/s — 2x over-
+  subscribed.  The F9T's I2C buffer overflows, shedding ~35% of RAWX.
+- The overnight run's observation queue grew from `recv_dt=1.7` to 10+
+  seconds in 14 epochs, then hit the 11s correlation window limit.
 
-### KernelGnssStream spin loop + over-buffering fix
-- **Root cause found**: `_fill_ubx()` sync search had a spin loop when
-  the raw buffer contained a lone `0xB5` byte.  `_fill_raw(1)` was a
-  no-op (buffer already had 1 byte), so the loop never progressed.
-  Fix: `_fill_raw(2)` to force reading at least one more byte.
-- **Secondary bug**: `read(size)` called `_fill_ubx(size)`, forcing
-  accumulation of `size` bytes across multiple UBX frames.  For RAWX
-  payloads (~1500 bytes), this meant reading ~30 small frames on 15-byte
-  I2C delivery, stalling for seconds.  Fix: return buffered data or one
-  frame, matching socket `read()` semantics pyubx2 expects.
-- Tested: 11 RAWX/15s continuous on ocxo; 59 epochs/60s on TimeHat.
+### Resolution: stock driver + SFRBX disabled + 0.5 Hz
+- **No custom driver patch needed.** Stock ice driver is sufficient when
+  I2C bandwidth is managed.  The streaming patch is retained for reference.
+- `sfrbx_rate = 0` on E810 (disabled — ephemeris from NTRIP).  SFRBX
+  consumed ~400 B/s (25% of bus), was redundant with NTRIP.
+- `measurement_rate_ms = 2000` on E810 (0.5 Hz).  At 1 Hz, RAWX alone
+  (~1.5 kB/s) still saturates the bus (~10% loss).  0.5 Hz is lossless.
+- Every servo epoch gets the full PPS+qErr+PPP stack.  Intervening 1 Hz
+  PPS events are pruned by the correlation gate.
+- TimeHat unchanged: 1 Hz, sfrbx_rate=1, all messages.
 
-### peppar-fix wrapper: --baud '' fix
-- Wrapper passed `--baud ""` to phc_bootstrap.py on kernel GNSS devices
-  (where BAUD is intentionally empty).  Fixed both bootstrap invocations.
+### KernelGnssStream fixes (from overnight)
+- Spin loop: `_fill_raw(1)` was no-op when buffer had lone `0xB5`.
+  Fix: `_fill_raw(2)`.
+- Over-buffering: `read(size)` forced `_fill_ubx(size)`, accumulating
+  many frames.  Fix: return buffered data or one frame.
 
-## 4-hour TDEV runs in progress
+### Consumption rate sanity check
+- Tracks `recv_dt_s` over 30 correlated epochs.  If growth > 3s, fires
+  CONSUMPTION RATE ALARM and degrades clockClass to freerun.
+- Tested: fires on E810 at 1 Hz (0.87 Hz delivery), does NOT fire on
+  TimeHat or E810 at 0.5 Hz.
 
-Started ~04:55 UTC (23:55 CDT):
+### Documentation
+- `docs/platform-support.md` updated with AQ bandwidth findings, SFRBX
+  consequences, stock driver recommendation, TICC/PPS routing notes.
+
+## 4-hour stability runs in progress
+
+Started ~17:03 UTC (12:03 CDT):
 
 ### TimeHat
-- PID 5342, duration 14400s (~4h)
-- Servo log: `data/tdev-4h-20260328-0053.csv`
-- TICC log: `data/ticc-4h-20260328-0053.csv`
-- Engine log: `data/peppar-4h-20260328-0053.log`
-- At 360 epochs (~6 min): PPS+PPP error -5.3 µs, gain 0.50x
-- Expected completion: ~05:00 CDT
+- PID 6526, duration 14400s
+- 1 Hz, sfrbx_rate=1, TICC #1
+- Expected completion: ~21:03 UTC
 
 ### ocxo
-- PID 15493, duration 14400s (~4h)
-- Servo log: `data/tdev-4h-20260328-0455.csv`
-- TICC log: `data/ticc-4h-20260328-0455.csv`
-- Engine log: `data/peppar-4h-20260328-0455.log`
-- At 60 epochs (~4 min): TICC reader started, servo active
-- Expected completion: ~05:00 CDT
-- TICC #3 on /dev/ticc3, only chA wired
+- PID 23872, duration 14400s
+- 0.5 Hz, sfrbx_rate=0, stock ice driver, TICC #3 (chA only)
+- At epoch 70 (~2 min): PPS+PPP error +7.0 ns, adj +0.3 ppb (converged)
+- Expected completion: ~21:03 UTC
 
-## Commits (not yet pushed)
+## Commits (not pushed)
 
 ```
 c39838e Add I2C write-yield to ice GNSS streaming patch, fix --baud for kernel GNSS
 649e723 Fix KernelGnssStream spin loop and read over-buffering on E810
+edfb80e Update session handoff for 2026-03-28 overnight
+ebd94fa Make SFRBX optional on E810 I2C, document AQ bandwidth limit
+3e7c32f Add consumption rate sanity check with clockClass degradation
+18ccbda Add measurement_rate_ms to PTP profiles: 1 Hz i226, 0.5 Hz E810
+215dded Replace minimal_messages with sfrbx_rate config knob
+b7bb303 Set E810 measurement rate to 2000ms (0.5 Hz lossless)
 ```
-
-## Current host state
-
-### TimeHat
-- Running 4-hour TDEV collection
-- TICC #1 at /dev/ticc1, both channels
-- Serial F9T on /dev/gnss-top (USB)
-
-### ocxo
-- Running 4-hour TDEV collection
-- Patched ice driver with write-yield (initramfs updated)
-- TICC #3 at /dev/ticc3, only chA wired
-- Kernel GNSS on /dev/gnss0 (I2C, streaming patch)
 
 ## What to do next
 
 ### 1. Check 4-hour run results
-Pull servo and TICC CSV logs from both hosts.  Compute TDEV at
-tau=1s, 10s, 100s, 300s, 1000s.  Compare TimeHat (i226) vs ocxo (E810).
-The E810 is the first full servo run — expect worse TDEV at short tau
-due to the bimodal clock_settime latency (±2 ms step error vs ±10 µs
-on i226).
+Both runs should complete ~21:03 UTC.  Pull CSV/TICC logs, compute TDEV.
+Compare TimeHat (1 Hz) vs ocxo (0.5 Hz).  ocxo showed +7 ns error at
+epoch 70 with 0.3 ppb adj — should converge well.
 
 ### 2. Push commits
-Two commits on main, not yet pushed to origin.
+8 commits on main, not yet pushed to origin.
 
-### 3. E810 servo tuning
-The 2-minute test showed the servo converging slowly on E810
-(655 µs error at epoch 30).  May need more aggressive Kp during the
-initial convergence period, or the glide slope from PHC bootstrap
-isn't landing close enough.
+### 3. E810 PEROUT for TICC
+TICC #3 chA needs a PPS signal.  Configure E810 PEROUT on SMA so TICC
+can measure disciplined PHC PPS independently.
 
-### 4. ocxo TICC #3 signal routing
-Only chA is wired.  Need to route either PEROUT (E810 PHC PPS OUT)
-or F9T raw PPS to SMA for TICC chA, and the other to chB for
-a reference.  Currently no PEROUT configured on E810 (unlike TimeHat).
+### 4. PPS-driven servo loop (future)
+Currently the servo is observation-gated (runs only when RAWX arrives).
+A PPS-driven loop would allow 1 Hz PPS+qErr steering with 0.5 Hz PPP
+updates on E810.  Requires architecture change — the servo clock must
+move from observation-driven to PPS-driven.
