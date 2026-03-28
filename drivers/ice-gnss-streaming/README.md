@@ -79,6 +79,24 @@ builds against the running kernel's headers, and installs to
 `/lib/modules/$(uname -r)/updates/` (takes priority over the stock
 module on next boot).
 
+**Critical: update the initramfs after installing.** The kernel loads
+ice.ko from the initramfs early in boot, before the root filesystem
+(and the `updates/` directory) is available.  Without rebuilding the
+initramfs, the stock module wins every time.
+
+```bash
+sudo depmod -a
+sudo update-initramfs -u -k $(uname -r)
+sudo reboot
+```
+
+Verify the patched module is loaded:
+```bash
+# These should match:
+cat /sys/module/ice/srcversion
+modinfo /lib/modules/$(uname -r)/updates/drivers/net/ethernet/intel/ice/ice.ko | grep srcversion
+```
+
 This preserves all in-kernel features: EXTTS, DPLL, irdma, PTP, SyncE.
 
 ## Patch files

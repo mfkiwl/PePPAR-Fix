@@ -59,6 +59,17 @@ Fix:
   (natural inter-epoch silence), 14000+ reads per 120 seconds vs 62.
 - The patch is adapted from upstream work by Michal Schmidt (Red Hat),
   reviewed but not merged as of March 2026.
+- **After installing the patched module, you must update the initramfs:**
+  ```
+  sudo depmod -a
+  sudo update-initramfs -u -k $(uname -r)
+  sudo reboot
+  ```
+  Without the initramfs update, the kernel loads the stock ice.ko from
+  the initramfs before the `updates/` directory is available, and the
+  patched module is never used.  Verify with:
+  `cat /sys/module/ice/srcversion` vs
+  `modinfo /lib/modules/$(uname -r)/updates/.../ice.ko | grep srcversion`
 
 ### `timehat` / i226
 

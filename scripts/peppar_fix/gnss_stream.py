@@ -30,7 +30,7 @@ class KernelGnssStream:
     def __init__(self, path):
         self._lock_fd, self._lock_path = acquire_device_lock(path)
         try:
-            self._fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+            self._fd = os.open(path, os.O_RDWR)
         except Exception:
             release_device_lock(self._lock_fd)
             raise
@@ -45,22 +45,16 @@ class KernelGnssStream:
         self._last_fill_mono = None
 
     def _fill_raw(self, want=1):
-        """Read a larger kernel chunk and retain leftovers for packet parsing.
+        """Read from kernel GNSS device and buffer for packet parsing.
 
-        The kernel GNSS char device can return packetized data. pyubx2 often
-        reads in 1-2 byte increments while scanning headers, so reading
-        directly from the device for every tiny request can discard the rest
-        of the current kernel packet. Buffer chunks here and serve pyubx2 out
-        of the retained bytes instead.
+        The fd is opened in blocking mode, so os.read() blocks until the
+        driver delivers data.  With the patched ice driver, this is a
+        15-byte I2C chunk every ~20 ms.  With the stock driver, it's a
+        4 KB page every ~2 seconds.  Either way, os.read() does the
+        blocking — no select() or sleep needed.
         """
         while len(self._buf) < want:
-            r, _, _ = select.select([self._fd], [], [], 0.5)
-            if not r:
-                continue
-            try:
-                chunk = os.read(self._fd, max(self._read_chunk, want - len(self._buf)))
-            except BlockingIOError:
-                chunk = b""
+            chunk = os.read(self._fd, max(self._read_chunk, want - len(self._buf)))
             if chunk:
                 self._last_fill_mono = time.monotonic()
                 self._buf.extend(chunk)
@@ -110,6 +104,22 @@ class KernelGnssStream:
         data = bytes(self._out[:size])
         del self._out[:size]
         self._consume_packet_bytes(len(data))
+        return data
+
+    def read_raw(self, size):
+        """Read raw bytes without UBX frame reassembly.
+
+        Blocks until at least 1 byte is available, returns up to size bytes.
+        Used by wait_ack to scan for ACK patterns without the cost of full
+        UBX deserialization.
+        """
+        if not self._buf:
+            chunk = os.read(self._fd, size)
+            return bytes(chunk)
+        # Drain from existing buffer first
+        n = min(size, len(self._buf))
+        data = bytes(self._buf[:n])
+        del self._buf[:n]
         return data
 
     def _consume_packet_bytes(self, nbytes):

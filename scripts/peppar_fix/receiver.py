@@ -250,7 +250,47 @@ def open_receiver(port, baud=9600):
 
 
 def wait_ack(ubr, cls_name="CFG", msg_name="VALSET", timeout=3.0):
-    """Wait for UBX-ACK-ACK or UBX-ACK-NAK."""
+    """Wait for UBX-ACK-ACK or UBX-ACK-NAK.
+
+    Reads raw bytes from the underlying stream to avoid the cost of
+    full pyubx2 deserialization on every observation message while
+    waiting for a 10-byte ACK.  Falls back to pyubx2 parsing if the
+    stream doesn't expose a raw read interface.
+    """
+    stream = getattr(ubr, '_stream', None)
+    raw_read = getattr(stream, 'read_raw', None) if stream else None
+    if raw_read is None:
+        # Fallback: use pyubx2 (slower but always works)
+        return _wait_ack_parsed(ubr, cls_name, msg_name, timeout)
+
+    # Scan raw bytes for ACK-ACK (b5 62 05 01) or ACK-NAK (b5 62 05 00).
+    # This bypasses pyubx2 deserialization — just a byte pattern search.
+    # os.read() on the blocking fd does the waiting; no polling or sleeping.
+    ACK_ACK = b'\xb5\x62\x05\x01'
+    ACK_NAK = b'\xb5\x62\x05\x00'
+    buf = b''
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            chunk = raw_read(256)
+        except Exception:
+            continue
+        if not chunk:
+            continue
+        buf += chunk
+        # Keep buffer bounded — we only need to find a 10-byte ACK
+        if len(buf) > 4096:
+            buf = buf[-256:]
+        if ACK_ACK in buf:
+            return True
+        if ACK_NAK in buf:
+            log.warning("NAK received for %s-%s", cls_name, msg_name)
+            return False
+    return False
+
+
+def _wait_ack_parsed(ubr, cls_name, msg_name, timeout):
+    """Fallback ACK wait using full pyubx2 parsing."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -262,7 +302,7 @@ def wait_ack(ubr, cls_name="CFG", msg_name="VALSET", timeout=3.0):
         if parsed.identity == "ACK-ACK":
             return True
         if parsed.identity == "ACK-NAK":
-            log.warning(f"NAK received for {cls_name}-{msg_name}")
+            log.warning("NAK received for %s-%s", cls_name, msg_name)
             return False
     return False
 
