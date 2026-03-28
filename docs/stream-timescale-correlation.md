@@ -488,7 +488,7 @@ The runtime watchdog is a diagnostic signal:
 
 ### What the first meaningful gate-forcing run looked like
 
-After adding targeted delay injection, the most useful forcing case on `oxco`
+After adding targeted delay injection, the most useful forcing case on `ocxo`
 was:
 
 - keep NTRIP healthy
@@ -511,9 +511,9 @@ Interpretation:
 - this is the kind of test that exercises the sink contract we actually care
   about
 
-## What we learned on `oxco`
+## What we learned on `ocxo`
 
-On `oxco`, `/dev/gnss0` behaves badly for correlation purposes:
+On `ocxo`, `/dev/gnss0` behaves badly for correlation purposes:
 
 - the kernel GNSS char device delivers bursts roughly every `2.1s` to `2.4s`
 - each burst may contain many UBX packets
@@ -637,7 +637,7 @@ Why it matters:
   - `dropped_unmatched`
   - `dropped_outside_window`
 
-Recent `oxco` result:
+Recent `ocxo` result:
 
 - baseline run:
   - `consumed_correlated=15`

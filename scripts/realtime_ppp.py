@@ -350,7 +350,7 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
     source_name = f"gnss:{port}"
     last_qerr_invalid_log = 0.0
     # GNSS delivery can legitimately batch by seconds on some hosts
-    # (notably the kernel-GNSS path on oxco), so keep this estimator broad.
+    # (notably the kernel-GNSS path on ocxo), so keep this estimator broad.
     recv_estimator = TimebaseRelationEstimator(
         min_sigma_s=4.0,
         sigma_scale=4.0,

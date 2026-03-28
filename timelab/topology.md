@@ -1,0 +1,238 @@
+# Lab Topology
+
+## Current connections
+
+*Last updated: 2026-03-16*
+
+```
+  ┌────────────────────────────────┐  ┌──────────────────────────────┐
+  │       West Roof Slope          │  │       East Roof Slope        │
+  │       (vertical axis)          │  │       (tilted, 5:12 pitch)   │
+  │                                │  │                              │
+  │  [UFO]        [SPK6618H]      │  │  [Patch3]  [Patch2]  [Patch1]│
+  │    │          (ptBoat, 1ft)    │  │     │         │         │    │
+  └────┼──────────────┼───────────┘  └─────┼─────────┼─────────┼────┘
+       │ coax         │ coax (1 ft)        │ coax    │ coax    │ coax
+  ┌────┴─────────┐    │              ┌─────┴─────┐   │    ┌────┴─────────┐
+  │   GUS #1     │    │              │  GUS #2   │   │    │ SV1AFN L1    │
+  │  Splitter    │    │              │ Splitter  │   │    │ Splitter     │
+  ├───┬────┬─────┤    │              ├─────┬─────┤   │    ├────┬─────────┤
+  │o1 │ o2 │ o3  │    │              │out1 │out2 │   │    │out1│out2 (-)│
+  └┬──┘─┬──┘──┬──┘    │              └──┬──┘──┬──┘   │    └──┬─┘────────┘
+   │    │     │       │                 │     │      │       │
+   │    │     │       │                 │     │      │       │
+   ▼    ▼     ▼       ▼                 ▼     ▼      ▼       ▼
+  ┌────────────────────────┐  ┌──────────────────┐ ┌─────────────────────┐
+  │    otcBob1 (OTC SBC)   │  │  Onocoy (Pi 4)   │ │   TimeHat (Pi 5)    │
+  │                        │  │                  │ │                     │
+  │  F9T ← UFO (via GUS1) │  │  F10T ← Patch3   │ │ F9T-3RD ← UFO      │
+  │  /dev/ttyAMA0, 460800  │  │    (via GUS2)    │ │   (via GUS1)        │
+  │  PPS → SDP0            │  │  /dev/ttyACM0    │ │ /dev/gnss-top,115200│
+  │  i226, OCXO, Renesas   │  │  onocoy-stream   │ │ PPS → SDP1+TICC3chB │
+  │  Timebeat 2.3.5        │  │                  │ │ SDP0→PPS OUT→TICC3A │
+  │  PTP GM domain 40      │  │  PX1125T ← UFO   │ │ TICC3 /dev/ticc     │
+  │  eth0: 10.168.13.16    │  │    (via GUS1)    │ │ TimeHAT v5 (i226)   │
+  └────────────────────────┘  │  /dev/ttyUSB1    │ │ SatPulse daemon      │
+                              │  PPS → TICC2 chB │ │ eth1: PTP LAN       │
+                              │                  │ └─────────────────────┘
+                              │  TICC2 /ttyUSB0  │
+                              │  /dev/ttyUSB2 →  │
+                              │    FS switch     │
+  ┌────────────────────────┐  │  eth0:           │
+  │    ptBoat (OTC Mini PT)│  │  10.168.60.143   │ ┌─────────────────────┐
+  │    weatherproof, PoE   │  └──────────────────┘ │  bbb (BeagleBone)   │
+  │                        │                       │                     │
+  │  F9T ← SPK6618H       │                       │  Adafruit GPS       │
+  │  /dev/ttyAMA0, 115200  │                       │    ← Patch1 (L1     │
+  │  PPS → SDP0            │                       │      via SV1AFN)    │
+  │  i226                  │                       │  /dev/gps0, 9600    │
+  │  Timebeat 2.3.5        │                       │  PPS → /dev/pps0    │
+  │  PTP GM domain 10      │                       │  chrony stratum 1   │
+  │  eth0: 10.168.13.15    │                       │  ptp4l domain 20    │
+  └────────────────────────┘                       │  eth0: 10.168.13.14 │
+                                                   └─────────────────────┘
+  ┌──────────────────────────────────────────┐
+  │           PiPuss (Pi 5)                  │
+  │                                          │
+  │  F9T-BOT ← Patch3 (via GUS2)            │
+  │  /dev/gnss-bot, PPS → TICC chB          │
+  │                                          │
+  │  TICC chA: TimeHAT PHC PPS OUT (SDP0)   │
+  │  TICC chB: F9T-BOT PPS                  │
+  │  TICC ref: 10 MHz from Geppetto GPSDO   │
+  │                                          │
+  │  eth0: 10.168.60.242                     │
+  └──────────────────────────────────────────┘
+
+         10.168.13.0/24 (PTP LAN)
+        ┌────────────────────────────────────────────────┐
+        │  FS IES3110-8TFP-R (10.168.13.90)              │
+        │  PTP transparent clock, PoE                    │
+        │                                                │
+        │  Port: M600 (10.168.13.5) — PTP GM domain 0   │
+        │  Port: ptBoat eth0 (10.168.13.15) — GM dom 10 │
+        │  Port: bbb eth0 (10.168.13.14) — GM dom 20    │
+        │  Port: TimeHat eth1 (10.168.13.26) — GM dom 30│
+        │  Port: otcBob1 eth0 (10.168.13.16) — GM dom 40│
+        │  Port: ptpmon eth0 (10.168.13.13) — listener   │
+        └────────────────────────────────────────────────┘
+```
+
+### PTP domain assignments
+
+| Domain | GM host | PTP identity | Clock source | Discipline | NIC / PHC | Software |
+|--------|---------|-------------|--------------|-----------|-----------|----------|
+| 0 | M600 | ec4670.fffe.0024cb | GPS | Internal GPSDO | Meinberg internal | Meinberg firmware |
+| 10 | ptBoat | 8c1f00.fffe.10417f | F9T PPS → SDP0 | Timebeat PPS+qErr | i226 (igc) | Timebeat 2.3.5 |
+| 20 | bbb | 3403de.fffe.7f5514 | Adafruit GPS PPS | chrony → ptp4l | AM335x CPSW (100 Mbps) | linuxptp ptp4l |
+| 30 | TimeHat | 54494d.fffe.45006b | F9T-3RD PPS → SDP1 | SatPulse | i226 (igc) | ptp4l via SatPulse |
+| 40 | otcBob1 | 8c1f00.fffe.104149 | F9T PPS → SDP0 | Timebeat PPS+qErr | i226 (igc), OCXO | Timebeat 2.3.5 |
+
+All PTP GMs share one L2 broadcast domain via the FS IES3110-8TFP-R switch
+configured as a PTP transparent clock (p2ptransparent, onestep, ip4mixed).
+
+### NTP infrastructure
+
+| Hostname | IP | Role | Clock source |
+|----------|-----|------|-------------|
+| ntp1.VanValzah.Com | 10.168.60.5 | Stratum 1 NTP server | Meinberg M600 (GPS, Patch1 via SV1AFN L1 splitter) |
+| ntp[2-5].VanValzah.Com | 10.168.60.20/28/30/25 | Stratum 2+ NTP servers | ntp1 + Internet NTS servers (offset-corrected) |
+
+ntp1 is the M600 acting as a local stratum 1 NTP server.
+ntp[2-5] are Proxmox PVE/PBS bare-metal servers with TCXO-only clocks,
+syncing from ntp1 and a handful of Internet NTS servers. Offsets applied to
+Internet NTS sources to compensate for asymmetric Internet path latency.
+ntp[2-5] also peer with each other for local resilience.
+NTS is used on Internet sources for MITM protection.
+
+### Antenna assignments
+
+| Receiver | Host | Antenna | Splitter | Mount site |
+|----------|------|---------|----------|------------|
+| F9T-3RD (ZED-F9T-20B, TIM 2.25) | TimeHat | UFO (SPK6618H) | GUS #1 | West roof slope |
+| F9T-TOP (ZED-F9T, TIM 2.20) | PiPuss | Patch3 | GUS #2 | East roof slope |
+| F9T-BOT (ZED-F9T-20B, TIM 2.25) | PiPuss | Patch3 | GUS #2 | East roof slope |
+| F10T (ArduSimple, FTDI) | Onocoy | Patch3 | GUS #2 | East roof slope |
+| F9T (OTC SBC) | otcBob1 | UFO (SPK6618H) | GUS #1 | West roof slope |
+| PX1125T (SkyTraq) | Onocoy | UFO (SPK6618H) | GUS #1 | West roof slope |
+| Adafruit Ultimate GPS (MTK-3301) | bbb | Patch1 | SV1AFN L1 | East roof slope |
+| F9T (OTC Mini PT) | ptBoat | SPK6618H (dedicated, 1 ft) | — | West roof slope |
+
+### TICC wiring
+
+**TICC #1** (PiPuss, /dev/ticc)
+
+| Channel | Source | PPS from |
+|---------|--------|----------|
+| chA | TimeHAT PHC PPS OUT (SDP0, SMA1 J4) | PHC-disciplined |
+| chB | F9T-BOT PPS (PiPuss) | Patch3 |
+
+**TICC #2** (Onocoy, /dev/ttyUSB0)
+
+| Channel | Source | PPS from |
+|---------|--------|----------|
+| chA | F10T PPS (ArduSimple) | Patch3 via GUS #2 |
+| chB | PX1125T PPS (SkyTraq) | UFO via GUS #1 |
+
+**TICC #3** (TimeHat, /dev/ticc)
+
+| Channel | Source | PPS from |
+|---------|--------|----------|
+| chA | TimeHAT PHC PPS OUT (SDP0, SMA1 J4) | PHC-disciplined |
+| chB | F9T-3RD PPS (EVK SMA) | UFO via GUS #1 |
+
+### 10 MHz reference chain
+
+```
+[Geppetto GPSDO] ──10 MHz──→ [SV1AFN Dist Amp] ──10 MHz──→ [TICC #1 ref (PiPuss)]
+     (OCXO)                    (fan-out)       ──10 MHz──→ [TICC #2 ref (Onocoy)]
+                                               ──10 MHz──→ [TICC #3 ref (TimeHat)]
+```
+
+### Serial console
+
+| Host port | Target |
+|-----------|--------|
+| Onocoy /dev/ttyUSB2 | FS IES3110 console (115200 8N1) |
+
+---
+
+## Change log
+
+Record topology changes here so the history of what was connected when
+is preserved. Include date, what changed, and why.
+
+### 2026-03-20 — PiPuss zero-baseline: both F9Ts on Patch3 via GUS #2
+
+- F9T-TOP moved from Patch2 to Patch3 via GUS #2 (was TBD/Patch2)
+- Both F9T-TOP and F9T-BOT now share Patch3 antenna via GUS #2
+- Purpose: zero-baseline caster/client testing for NTRIP caster development
+- GUS #2 now feeds 3 receivers: F9T-TOP (PiPuss), F9T-BOT (PiPuss), F10T (Onocoy)
+- Verified both F9Ts responding: F9T-TOP uniqueId=136395244089, F9T-BOT uniqueId=262843023907
+
+### 2026-03-19 — TICC skeptical calibration rewire + USB audit
+
+- TICCs moved for skeptical calibration: #1→TimeHat, #2→Onocoy (unchanged), #3→PiPuss
+- SMA TEE tree distributes PPS OUT and PPS IN to all 3 TICCs for cross-validation
+- Universal udev rules deployed (99-timelab.rules): TICC serial numbers portable across hosts
+- Onocoy USB fully audited: TICC #2 (Arduino ACM), PX1125T (CP2102), FS console (Prolific), F10T (ArduSimple FTDI D30GD1PE)
+- F10T confirmed as FTDI FT230X, NOT u-blox CDC ACM
+- USB isolators tested on TimeHat: no measurable effect (dominant noise is F9T sawtooth character)
+- TICC calibration: all 3 agree within 30ps noise floor
+- Stale analyze_servo.py process (running since Mar 16) killed on PiPuss
+
+### 2026-03-16 — F9T-3RD on TimeHat, TICC #3, F9T-TOP back to PiPuss
+
+- F9T-3RD (EVK-F9T-20-00, ZED-F9T-20B, TIM 2.25) installed on TimeHat
+  - Replaces F9T-TOP which moves back to PiPuss for testAnt use
+  - PPS wired to TimeHAT SDP1 + TICC #3 chB
+  - Antenna: UFO (SPK6618H) via GUS #1, port: /dev/gnss-top (udev symlink)
+- F9T-TOP (EVK-F9T-10-00, ZED-F9T, TIM 2.20) returned to PiPuss
+  - Back on /dev/gnss-top (PiPuss udev rules already in place)
+- New TAPR TICC (#3) installed on TimeHat
+  - chA: TimeHAT PHC PPS OUT (SDP0, SMA1 J4, disciplined)
+  - chB: F9T-3RD PPS (EVK SMA, raw GPS reference)
+  - ref: 10 MHz from SV1AFN distribution amp (spare output)
+- udev rules deployed: /etc/udev/rules.d/99-timehat-devices.rules
+  - /dev/ticc: TICC #3 (matched by Arduino serial number 44236313835351B0A091)
+  - /dev/gnss-top: F9T-3RD (matched by USB ID_PATH)
+- Purpose: local TDEV measurement for PePPAR Fix M5 PHC discipline loop;
+  previously TICC #1 (PiPuss) measured TimeHAT PPS via cross-host cable
+
+### 2026-03-13 — PTP domain assignments, Timebeat 2.3.5, TICC rewire
+
+- PTP domains assigned: M600=0, ptBoat=10, bbb=20, TimeHat=30, otcBob1=40
+- ptBoat: Timebeat upgraded 2.2.20→2.3.5, PTP GM enabled on domain 10
+- otcBob1: Timebeat upgraded 2.3.2→2.3.5, PTP GM enabled on domain 40
+- Both Timebeat hosts now monitor all other PTP domains as secondaries
+- NTP secondaries changed from dns[1-5] to ntp[1-5].VanValzah.Com
+- ptpmon moved to static IP 10.168.13.13/24, swapped into PTP LAN switch
+- TimeHAT SDP0 configured as PHC PPS OUT (systemd phc-pps-out.service)
+- TICC rewired: chA = TimeHAT PHC PPS OUT, chB = F9T-BOT PPS
+
+### 2026-03-12 — SatPulse setup: F9T-TOP moved to TimeHat
+
+- F9T-TOP (EVK-F9T-10-00, ZED-F9T, TIM 2.20) moved from PiPuss to TimeHat
+- F9T-TOP wired directly to Patch2, PPS to TimeHAT SDP1
+- F9T-BOT (EVK-F9T-20-00, ZED-F9T-20B, TIM 2.25) stays on PiPuss as /dev/gnss-bot
+- Patch3 split 2-way via GUS: F9T-BOT (PiPuss) + F10T (Onocoy)
+- TICC chA now from F9T-BOT; chB disconnected
+- SatPulse config: pin=1 (SDP1), /dev/ttyACM0, 115200 baud
+
+### 2026-03-12 (earlier) — Patch3/Patch2 on PiPuss
+
+- Patch3 on BOT, Patch2 on TOP, both East roof slope
+- This is the config from the 25h run completed 2026-03-11
+- Previous config was Patch1-BOT / Patch2-TOP (2026-03-09 to 03-10)
+
+### 2026-03-09 — Patch1/Patch2 swap
+
+- Swapped from UFO/Choke to Patch1-BOT / Patch2-TOP
+- Both on East roof slope
+- Stopped the 84h UFO-top / Choke-desk run to free serial ports
+
+### 2026-03-06 — UFO/Choke ring long run
+
+- UFO on TOP (East roof slope), Choke ring on BOT (desk, indoors)
+- 84h+ multi-day capture (started 2026-03-06 05:06 UTC)
+- Choke ring was indoors on desk — not representative of outdoor performance

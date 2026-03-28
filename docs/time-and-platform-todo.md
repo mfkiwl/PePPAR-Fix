@@ -2,12 +2,12 @@
 
 This file turns the recent bring-up and correlation findings into a concrete work list.
 
-## 1. `oxco` / E810
+## 1. `ocxo` / E810
 
 ### Confirm the real platform limitation
 
 - [x] Preserve a repeatable diagnostic script for `/dev/gnss0` burst cadence and RAWX lag
-- [ ] Record one representative capture from `oxco` in the repo or docs
+- [ ] Record one representative capture from `ocxo` in the repo or docs
 - [ ] Confirm whether the burst behavior is specific to the current kernel/driver revision or intrinsic to this path
 
 ### Decide on the GNSS ingest strategy
@@ -68,7 +68,7 @@ This file turns the recent bring-up and correlation findings into a concrete wor
   host-wide or path-wide queuing event
 - [x] Add an injected-delay event log with start and stop times on host
   `CLOCK_MONOTONIC`
-- [x] Add low-probability injected-delay smoke tests on `oxco` to verify the
+- [x] Add low-probability injected-delay smoke tests on `ocxo` to verify the
   unified path still reaches steady state without crashing
 - [x] Put a strict correlation gate in front of the unified servo sink
 - [x] Put a correction-freshness gate in front of the live EKF update loops

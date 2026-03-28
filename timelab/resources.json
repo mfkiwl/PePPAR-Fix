@@ -125,10 +125,10 @@
       "ticcs": [],
       "notes": "chrony stratum 1, PTP GM domain 20. GPS on /dev/gps0."
     },
-    "oxco": {
+    "ocxo": {
       "description": "x86 host with Intel E810 OCXO NIC and onboard F9T",
-      "hw_label": "hw:oxco",
-      "hostname": "oxco",
+      "hw_label": "hw:ocxo",
+      "hostname": "ocxo",
       "platform": "x86_64",
       "os": "Linux",
       "interfaces": [
@@ -165,7 +165,7 @@
       "description": "Intel E810-XXVDA4T \u2014 OCXO, sub-ns timestamping, onboard F9T",
       "hw_label": "hw:E810",
       "model": "Intel E810-XXVDA4T",
-      "host": "oxco",
+      "host": "ocxo",
       "oscillator": "OCXO (4h holdover)",
       "phc_resolution": "sub-ns (7-bit)",
       "pps_io": [
@@ -285,7 +285,7 @@
       "description": "Onboard ZED-F9T on E810-XXVDA4T (via ice driver I2C)",
       "hw_label": "hw:E810",
       "model": "u-blox ZED-F9T",
-      "host": "oxco",
+      "host": "ocxo",
       "port": "/dev/gnss0",
       "notes": "Onboard receiver accessed via ice driver.",
       "status": "installed"

@@ -2,7 +2,7 @@
 
 This document summarizes what we learned while bringing `PePPAR-Fix` up on two different hardware platforms:
 
-- `oxco`: Intel E810-based host with onboard GNSS exposed as `/dev/gnss0`
+- `ocxo`: Intel E810-based host with onboard GNSS exposed as `/dev/gnss0`
 - `timehat`: TimeHAT board with an Intel i226 PHC and GNSS over USB serial
 
 The important conclusion is that these are not just two copies of the same platform. They differ in:
@@ -22,7 +22,7 @@ Reference:
 
 ## Current support status
 
-### `oxco` / E810
+### `ocxo` / E810
 
 Working:
 
@@ -162,38 +162,38 @@ Additional operational note:
 
 ## TICC move status
 
-As of `2026-03-22`, `TICC #3` has been moved to `oxco`.
+As of `2026-03-22`, `TICC #3` has been moved to `ocxo`.
 
-Current verified state on `oxco`:
+Current verified state on `ocxo`:
 
 - udev naming works:
   - `/dev/ticc3 -> /dev/ttyACM0`
   - `ID_SERIAL_SHORT=44236313835351B0A091`
-- `bob` has been added to the `dialout` group on `oxco`
+- `bob` has been added to the `dialout` group on `ocxo`
 - the lab-wide udev rule has been installed at:
   - `/etc/udev/rules.d/99-timelab.rules`
-- `TICC #3 chA` is wired to the E810 upper SMA on `oxco`
+- `TICC #3 chA` is wired to the E810 upper SMA on `ocxo`
 
 Current unverified state after the move:
 
 - live PPS timestamps on `TICC #3 chA/chB`
 - `TICC #3 chB` cabling after the move
 
-A boot-aware probe of `/dev/ticc3` on `oxco` completed with zero timestamp
+A boot-aware probe of `/dev/ticc3` on `ocxo` completed with zero timestamp
 events, so the device is present and named correctly but the post-move PPS
 wiring has not yet been confirmed by measurement.
 
 Current interpretation:
 
 - the lack of `TICC #3 chA` activity is consistent with the present software
-  path on `oxco`
+  path on `ocxo`
 - E810 PPS input / EXTS works with the in-tree `ice` driver
 - E810 PPS output appears to require Intel's out-of-tree timing driver path
   before the upper SMA will emit a disciplined 1 PPS signal
 
 ## GNSS transport differences
 
-### `oxco`
+### `ocxo`
 
 GNSS arrives through the Linux kernel GNSS device:
 
@@ -252,9 +252,9 @@ Important properties:
 
 One `F9TDriver` was not sufficient.
 
-### `oxco` profile
+### `ocxo` profile
 
-The `oxco` receiver behaves like an L1/L2/E5b/B2I timing profile:
+The `ocxo` receiver behaves like an L1/L2/E5b/B2I timing profile:
 
 - GPS `L1CA + L2CL`
 - Galileo `E1C + E5bQ`
@@ -274,7 +274,7 @@ This is represented by the `f9t-l5` path in [`scripts/peppar_fix/receiver.py`](/
 
 ## PHC differences
 
-### E810 on `oxco`
+### E810 on `ocxo`
 
 Observed and code-relevant properties:
 
@@ -381,7 +381,7 @@ The repo should treat these as platform configuration, not as incidental quirks.
 - keep `f9t` and `f9t-l5` as explicit receiver profiles
 - do not assume `/dev/gnss0` and `/dev/ttyACM0` have comparable buffering behavior
 - treat `timehat` PPS routing as a hardware bring-up task
-- treat `oxco` `/dev/gnss0` burst delivery as a platform limitation that may require a different ingest path or more explicit timestamping upstream
+- treat `ocxo` `/dev/gnss0` burst delivery as a platform limitation that may require a different ingest path or more explicit timestamping upstream
 
 ## Bring-up checklist for the next platform
 

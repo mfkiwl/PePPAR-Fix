@@ -40,7 +40,7 @@ def candidate_paths(repo_root: Path, explicit: str | None, hostname: str) -> lis
     short = hostname.split(".", 1)[0].lower()
     names = [short]
     if short == "oxco":
-        names.append("ocxo")
+        names.append("ocxo")  # legacy typo fallback
     paths = [repo_root / "config" / f"{name}.toml" for name in names]
     paths.append(Path("/etc/peppar-fix/config.toml"))
     return paths

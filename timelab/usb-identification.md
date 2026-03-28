@@ -1,0 +1,78 @@
+# USB Device Identification Notes
+
+## TICCs: Unique by serial number
+
+TAPR TICCs use an Arduino Mega 2560 (VID `2341`, PID `0042`) with a
+**unique serial number** per unit. udev rules should always match by
+`ID_SERIAL_SHORT` so the TICC keeps its `/dev/ticc` symlink regardless
+of which USB port it's plugged into.
+
+| TICC | Arduino Serial Number | Label suggestion |
+|---|---|---|
+| #1 | `95037323535351803130` | ticc-1 |
+| #2 | `44236313835351B02001` | ticc-2 |
+| #3 | `44236313835351B0A091` | ticc-3 |
+
+Note: TICCs also have an FTDI FT230X chip for the data serial port.
+The FTDI chip shows up as `/dev/ttyUSBx` separately from the Arduino
+(`/dev/ttyACMx`). The FTDI chip's serial number should also be checked
+and documented. The Arduino serial identifies the TICC unit; the FTDI
+serial identifies the data channel.
+
+## F9T EVKs: NOT unique via USB — but have UBX SEC-UNIQID
+
+All u-blox F9T EVKs (both ZED-F9T and ZED-F9T-20B) report:
+- VID: `1546`, PID: `01a9`
+- Model: `u-blox_GNSS_receiver`
+- USB Serial: **(none)**
+
+There is no way to distinguish two F9T EVKs by USB descriptor alone.
+
+However, each chip has a unique hardware ID queryable via `UBX-SEC-UNIQID`:
+
+| Receiver | SEC-UNIQID | Model | Label |
+|---|---|---|---|
+| F9T-3RD | `394029318459` | ZED-F9T-20B | TimeHat primary |
+| F9T-TOP | `136395244089` | ZED-F9T | PiPuss testAnt |
+| F9T-BOT | `262843023907` | ZED-F9T-20B | PiPuss secondary |
+
+The Deacon should periodically verify SEC-UNIQID matches expected
+receiver-to-host assignment (runs when host is idle, via a small
+UBX query script). This catches unrecorded cable swaps.
+Options for multi-F9T hosts:
+
+1. **USB path matching** (`ID_PATH`): Stable across reboots if cables
+   stay in the same physical USB ports. Breaks on replug to different
+   port. PiPuss uses this.
+
+2. **One F9T per host**: Simplest. Match by VID:PID only. TimeHat uses
+   this.
+
+3. **USB hub with known topology**: Dedicated hub per receiver,
+   identified by hub serial + port number.
+
+When cabling changes happen, USB path-based udev rules MUST be
+reverified. Run `udevadm info /dev/ttyACMx | grep ID_PATH` after
+any cable change.
+
+## Other devices
+
+| Device | Host | VID:PID | Serial | Identification |
+|---|---|---|---|---|
+| PX1125T (SkyTraq) | Onocoy | Silicon Labs CP2102, `10c4:ea60` | `0001` (generic) | No udev symlink — app must probe |
+| FS switch console | Onocoy | Prolific, `2478:2008` | (none) | No udev symlink — app must probe |
+| F10T (ArduSimple board) | Onocoy | FTDI FT230X, `0403:6015` | **`D30GD1PE`** | Unique serial → `/dev/f10t` via udev |
+
+Note: TICC #2 has NO separate FTDI data port. Data comes over the
+Arduino ACM connection. The FTDI `D30GD1PE` belongs to the F10T's
+ArduSimple carrier board, not to a TICC.
+
+## Lab udev policy
+
+- **Unique serial** → universal udev rule creates stable `/dev/` symlink
+  on any host. Rules in `timelab/99-timelab.rules`, deployed to all Pis.
+- **No unique serial** → no udev symlink. Application must identify
+  the device at runtime (probe protocol, check VID:PID, etc.).
+- **F9T EVKs** are a special case: no USB serial, but only one or two
+  per host. Host-specific path-based rules are acceptable with a
+  WARNING comment that re-cabling requires rule reverification.

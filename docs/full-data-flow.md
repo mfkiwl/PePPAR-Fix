@@ -1331,7 +1331,7 @@ Highest-risk sinks:
 
 Today:
 
-- we know `/dev/gnss0` on `oxco` batches
+- we know `/dev/gnss0` on `ocxo` batches
 - we have a probe script for it
 
 Missing:
@@ -1571,7 +1571,7 @@ Progress so far:
   - [`scripts/phc_servo.py`](/home/bob/git/PePPAR-Fix/scripts/phc_servo.py)
   - [`old/peppar_phc_servo.py`](/home/bob/git/PePPAR-Fix/old/peppar_phc_servo.py)
   - [`old/peppar_fix_main.py`](/home/bob/git/PePPAR-Fix/old/peppar_fix_main.py)
-- `oxco` validation now includes two live checks:
+- `ocxo` validation now includes two live checks:
   - baseline: gate consumed correlated epochs without defers or drops
   - injected system-delay run: gate produced explicit defer and unmatched-drop
     outcomes under synthetic GNSS/PTP queueing
