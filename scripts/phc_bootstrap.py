@@ -98,19 +98,64 @@ def _realtime_to_phc_offset_s(phc_timescale, leap, tai_minus_gps):
 # ── PPS OUT (PEROUT) ─────────────────────────────────────────────── #
 
 
+def _set_pin_function_sysfs(ptp_dev, pin_name, func, channel):
+    """Set PTP pin function via sysfs (fallback when ioctl not supported).
+
+    The E810 ice driver rejects PTP_PIN_SETFUNC ioctl but accepts writes
+    to /sys/class/ptp/ptpN/pins/<name> in "func channel" format.
+    """
+    import glob
+    ptp_base = os.path.basename(ptp_dev)
+    pin_paths = sorted(glob.glob(f"/sys/class/ptp/{ptp_base}/pins/*"))
+    if pin_name.isdigit():
+        idx = int(pin_name)
+        if idx < len(pin_paths):
+            pin_path = pin_paths[idx]
+        else:
+            return False
+    else:
+        pin_path = f"/sys/class/ptp/{ptp_base}/pins/{pin_name}"
+    try:
+        with open(pin_path, 'w') as f:
+            f.write(f"{func} {channel}\n")
+        log.info("Pin %s set to func=%d channel=%d via sysfs", pin_path, func, channel)
+        return True
+    except (OSError, IOError) as e:
+        log.warning("sysfs pin set failed for %s: %s", pin_path, e)
+        return False
+
+
+# Map pin index to E810 sysfs name
+_E810_PIN_NAMES = {0: "GNSS", 1: "SMA1", 2: "SMA2", 3: "U.FL1", 4: "U.FL2"}
+
+
 def _enable_pps_out(ptp, args):
     """Enable PEROUT (PPS OUT) if configured.
 
     Must be called after any PHC phase step — stepping the PHC
     invalidates the PEROUT alignment, stopping the output pulse.
+
+    Pin programming: tries PTP_PIN_SETFUNC ioctl first (i226), then
+    sysfs fallback (E810 ice driver rejects the ioctl but accepts sysfs).
     """
     if args.pps_out_pin < 0:
         return
+    from peppar_fix.ptp_device import PTP_PF_PEROUT
     try:
+        # Try ioctl first
+        pin_set = False
         if args.program_pin:
-            from peppar_fix.ptp_device import PTP_PF_PEROUT
-            ptp.set_pin_function(args.pps_out_pin, PTP_PF_PEROUT,
-                                 args.pps_out_channel)
+            try:
+                ptp.set_pin_function(args.pps_out_pin, PTP_PF_PEROUT,
+                                     args.pps_out_channel)
+                pin_set = True
+            except OSError:
+                pass
+        # Fallback: sysfs (needed for E810)
+        if not pin_set:
+            pin_name = _E810_PIN_NAMES.get(args.pps_out_pin, str(args.pps_out_pin))
+            _set_pin_function_sysfs(args.ptp_dev, pin_name,
+                                    PTP_PF_PEROUT, args.pps_out_channel)
         # Cancel any stale PEROUT, then re-enable
         ptp.disable_perout(args.pps_out_channel)
         ptp.enable_perout(args.pps_out_channel)
