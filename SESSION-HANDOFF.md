@@ -1,134 +1,130 @@
-# Session Handoff — 2026-03-27
+# Session Handoff — 2026-03-28
 
-Long session covering queue diagnostics, ptp4l supervision, PHC
-characterization, and servo tuning.  Two hour-long runs in progress
-on TimeHat and ocxo.
+Long session covering PHC bootstrap redesign, NTRIP caster testing,
+PEROUT integration, TICC lock fix, ice driver I2C write investigation.
 
 ## What was accomplished
 
-### Queue depth monitoring and diagnostics
-- High-water mark tracking for obs_queue, obs_history, pps_history
-- Configurable depth threshold with diagnostic dump (--queue-depth-threshold, --queue-depth-dump)
-- HWMs logged every 20 minutes and included in --gate-stats JSON
+### PHC bootstrap: optimal stopping + glide slope
+- Replaced 8-iteration PPS feedback loop with three-step approach:
+  1. Optimal stopping phase step (parametric, p5 threshold)
+  2. PPS ground truth measurement
+  3. Glide slope frequency for smooth servo handoff
+- Full-baseline PPS frequency measurement (first-to-last fractional
+  second drift, sqrt(N) better than per-interval)
+- Float64-safe arithmetic using elapsed seconds
+- Servo Kp increased for both platforms to match glide damping:
+  i226 0.01→0.03 (ζ=0.47), E810 0.005→0.015 (ζ=0.24)
 
-### Correlation gate fixes
-- queue_remains=True drain limited to initialization only (was discarding
-  ~50% of E810 epochs in steady state)
-- Permanently unmatchable observations dropped immediately instead of
-  blocking the FIFO for 11 seconds (startup obs/PPS simultaneous arrival)
-- match_pps_event_from_history returns best_recv_dt_s for detection
+### PEROUT integrated into PHC bootstrap
+- Discovered igc driver adds period/2 to PEROUT start time
+- Fixed by setting start = next_PHC_second - period/2
+- PEROUT now owned by phc_bootstrap.py, not systemd service
+- Verified chA-chB alignment within 54 ns on TICC
+- Disabled systemd phc-pps-out.service (no longer needed)
 
-### PHC divergence handling
-- Engine exits code 5 when PPS error persists above track_restep_ns for 3 epochs
-- Wrapper handles code 5: degrades clockClass, re-runs PHC bootstrap, restarts
-- Bootstrap failure is now blocking with 3 retries (was silent "non-fatal")
+### TICC lock leak fixed
+- Ticc.__enter__ leaked flock when wait_for_boot failed mid-boot
+- Wrapped entire __enter__ in try/except for guaranteed lock release
+- Added dsrdtr=False to primary serial open path
 
-### ptp4l clockClass supervision
-- Three-layer failsafe: engine (Python UDS), wrapper (pmc command), systemd ExecStopPost
-- Three-stage promotion: 248 (boot) → 52 (PHC bootstrapped) → 6 (servo settled)
-- Degradation: 6→52 (unsettled), 6→7 (holdover), any→248 (crash/diverge)
-- Python PMC client talks directly to ptp4l's Unix domain socket
-- Tested end-to-end on TimeHat with ptp4l domain 30
-- Docs: docs/ptp4l-supervision.md, deploy/peppar-fix.service
+### NTRIP caster tested on PiPuss
+- Standalone caster works: MSM4 + 1005, clients connect and parse
+- Architecture gap: caster sends observations, not ephemeris
+- Spec written for SFRBX-to-RTCM encoding (docs/caster-ephemeris.md)
+- mDNS discovery spec written (docs/ntrip-mdns-discovery.md)
+- NtripStream.close() bug fixed
 
-### Holdover preserves adjfine
-- No longer zeros adjfine on holdover entry — temperature-stable assumption
-- PI servo seeded from preserved adjfine for bumpless re-acquisition
-- Future: temperature/frequency curves for smarter holdover
+### Cold boot wrapper fix
+- peppar-fix wrapper now creates position.json from known_pos when
+  the file doesn't exist (was failing PHC bootstrap)
 
-### EXTTS verification at servo startup
-- Engine verifies PPS events arrive within 3s before starting servo
-- Returns exit code 3 (retryable) on failure
-- Design doc: docs/extts-lifecycle.md
+### E810 ice driver I2C write investigation
+- **Root cause found**: streaming patch polls I2C every 20ms, starving
+  the write path. Stock driver (100ms gap) has working writes.
+- Stock driver restored on ocxo to enable receiver configuration
+- Patch needs write-yield logic: skip a read cycle when write is pending
 
-### Servo initialization from bootstrap
-- **Critical bug fix**: PI servo was initialized at freq=0, discarding
-  bootstrap's adjfine (~100 ppb on TimeHat).  Now passes bootstrap
-  adjfine as initial_freq.  Convergence went from 15+ minutes to ~6 min.
+### Other fixes
+- Serial exclusive lock fallback (TIOCEXCL → non-exclusive)
+- 100% CPU spin fix: raw byte ACK scan instead of pyubx2 deserialization
+- KernelGnssStream: blocking I/O (removed O_NONBLOCK)
+- Hostname oxco → ocxo everywhere (including the actual host)
+- Renamed phc-initialization.md → phc-bootstrap.md
+- Private timelab repo created (github.com/bobvan/timelab)
+- First sync of timelab/ public slice to PePPAR-Fix
 
-### E810 PHC characterization
-- Bimodal clock_settime: 1.6 ms typical, 16 ms ~30% of calls
-- PPS-calibrated lag: ~16 ms (vs 200 µs on i226)
-- Profile-driven step parameters: settime_lag_ns, step_error_ns, max_step_time_ms
-- E810 bootstrap now converges (4 iterations to ±7 µs, was bouncing ±21 ms)
-- Config path fix: profile resolution falls back to script-relative path
+## TDEV results (TimeHat, 1-hour run)
 
-### Servo gain tuning
-- i226: doubled gains (kp=0.01, ki=0.001) — settles in ~6 min
-- E810: reduced gains (kp=0.005, ki=0.001) with 50 ms track_restep_ns
-- E810 servo still diverges after ~30 epochs — needs further work
+| tau | TICC TDEV | PHC TDEV |
+|-----|-----------|----------|
+| 1s  | 3.2 ns    | 3.9 ns   |
+| 10s | 215 ns    | 220 ns   |
+| 100s| 6.4 µs   | 8.6 µs   |
+| 300s| 3.0 µs   | 3.5 µs   |
+
+TICC converged state (last 1000 samples): mean=24 ns, stdev=54 ns.
+Disciplined PHC tracks F9T PPS within ±12.5 ns (1σ) as measured by TICC.
 
 ## Current host state
 
-### TimeHat (running)
-- 1-hour run in progress (started 00:16, ~30 min elapsed)
-- Settled at ~6 minutes, PPS+PPP active, zero stalls
-- Error oscillating ±2500 ns with slow convergence
-- TICC logging to data/ticc-1hr.csv
-- ptp4l clockClass management working (domain 30)
-- Log: /tmp/timehat-1hr.log
+### TimeHat
+- Last 1-hour run completed cleanly (3599 epochs, TICC data collected)
+- PEROUT working via bootstrap (igc period/2 compensation)
+- TICC #1 at /dev/ticc1, both chA and chB recording
+- ModemManager disabled (was locking serial port after reboot)
+- phc-pps-out.service disabled (PEROUT now in bootstrap)
 
-### ocxo (running, in bootstrap)
-- 1-hour run in progress (started 04:42)
-- Currently in Phase 1 position bootstrap (σ=0.32m at 2 min)
-- Position bootstrap is slow on I2C (~5s/epoch)
-- E810 profile now loads correctly (config path fixed)
-- Log: /tmp/ocxo-1hr.log
+### ocxo
+- Rebooting with stock ice driver (I2C writes restored)
+- Hostname changed from oxco to ocxo
+- TICC #3 at /dev/ticc3, only chA wired (no signal — needs PEROUT or PPS routing)
+- Patched driver backed up at /home/bob/ice-intree-patch/
+
+### PiPuss
+- Running latest code from git pull
+- NTRIP caster may still be running (port 2102)
+- No PHC (no discipline, caster-only role)
 
 ## What to do next (priority order)
 
-### 1. Check hour-long runs
-Both should complete by ~01:16 (TimeHat) and ~05:42 (ocxo).
-TimeHat should show long-term servo behavior with PPS+PPP.
-ocxo will test whether the E810 servo stabilizes over longer timescales.
+### 1. Fix ice-gnss streaming patch for I2C write coexistence
+The streaming patch needs to yield the I2C bus when a write is pending.
+Check in the read work function: if gnss_serial has pending write data,
+increase the delay or skip one read cycle.  This restores both streaming
+reads AND working writes.
 
-### 2. Bootstrap frequency intercept design
-User's idea: when PHC has large phase error (e.g. ±2 ms on E810),
-bootstrap should intentionally set frequency to create a zero crossing
-at a predictable time (~60 seconds).  The servo knows to expect this
-and gently takes over at the intercept.  This avoids the servo having
-to close a large phase error with its own gains.
+### 2. E810 2-minute test run
+Once writes work with the patched driver (or with stock driver after
+reboot), run the 2-minute test to verify I2C delivery rate and TICC
+on ocxo.  The TICC chA needs a PPS source — either configure E810
+PEROUT or verify the F9T PPS routing to the SMA connector.
 
-Key insight: `true_freq = current_adjfine - pps_freq_ppb` gives sub-ppb
-accuracy from 10-second PPS measurement.  Phase error ÷ desired
-convergence time = intercept frequency offset.
+### 3. Longer stability runs
+The 1-hour TimeHat TDEV data is good but the servo oscillation
+(tau=10-100s peak) could improve with further gain tuning.  A 4-hour
+run would give meaningful TDEV at tau=1000s+.
 
-### 3. E810 servo divergence
-The E810 servo diverges because:
-- Large initial phase error (±2 ms from bootstrap step)
-- EKF dt_rx unstable during convergence (I2C epoch spacing varies)
-- Servo corrections overcorrect before EKF stabilizes
-
-Possible fixes:
-- Bootstrap intercept (item 2) eliminates large phase error
-- Increase EKF predict clamping for large dt
-- Lower E810 gain_max_scale during initial convergence
-- Add a warmup period where servo observes but doesn't correct
-
-### 4. Kernel driver investigation
-The stock Ubuntu 6.8 kernel has the old PAGE_SIZE buffering (not the
-Schmidt streaming patches — verified by extracting the pristine source
-tarball).  But empirical testing shows observations arrive at ~1s cadence.
-The driver polls every 20ms and delivers the full page via gnss_insert_raw
-after reading all available data.  The user's idle-timeout patch idea
-may still be worth implementing for consistency, but isn't the blocker.
-
-### 5. TDEV analysis
-Once the hour-long TimeHat run completes with good servo data,
-compare TDEV between PPS+qErr and PPS+PPP at tau = 1s, 10s, 100s.
-The TICC data at data/ticc-1hr.csv provides sub-ns timestamps.
+### 4. SFRBX-to-RTCM ephemeris encoding
+Spec is written (docs/caster-ephemeris.md).  Phase 1 (GPS 1019,
+~200 lines) would make the PiPuss caster self-sufficient for peer
+bootstrap without the Australian NTRIP service.
 
 ## Key files changed
 
 | File | Changes |
 |------|---------|
-| scripts/peppar_fix_engine.py | Queue monitoring, EXTTS verify, servo init fix, pmc integration, exit code 5, config path fix |
-| scripts/peppar_fix/correlation_gate.py | queue_remains init-only drain, permanently unmatchable detection, best_recv_dt_s |
-| scripts/peppar_fix/pmc.py | NEW: Python PMC client for ptp4l clockClass management |
-| scripts/peppar-fix | --pmc/--pmc-domain, clockClass management, bootstrap retry, exit code 5 handler |
-| scripts/phc_bootstrap.py | Profile loading, fail-fast on missing PPS, pin programming logging |
-| config/receivers.toml | Step characterization params, servo gain tuning for both platforms |
-| docs/ptp4l-supervision.md | NEW: Three-layer clockClass supervision design |
-| docs/extts-lifecycle.md | NEW: EXTTS initialization lifecycle design |
-| docs/phc-bootstrap.md | E810 characterization data, platform comparison |
-| deploy/peppar-fix.service | NEW: Example systemd unit with ExecStopPost failsafe |
+| scripts/phc_bootstrap.py | Optimal stopping, glide slope, PPS freq measurement, PEROUT |
+| scripts/peppar_fix/ptp_device.py | enable_perout/disable_perout, optimal_stop mode, igc period/2 fix |
+| scripts/peppar_fix/gnss_stream.py | Blocking I/O, read_raw() for ACK scan |
+| scripts/peppar_fix/receiver.py | Raw byte ACK scan, no-sleep loops |
+| scripts/peppar_fix/servo.py | (unchanged) |
+| scripts/peppar-fix | known_pos→position.json, PEROUT restart removed |
+| scripts/ticc.py | Lock leak fix, dsrdtr=False |
+| scripts/ntrip_client.py | close() alias |
+| config/receivers.toml | Kp tuning, glide_zeta, search_time_s, pps_out_pin, track_max_ppb |
+| docs/phc-bootstrap.md | Full rewrite documenting implemented design |
+| docs/caster-ephemeris.md | NEW: SFRBX-to-RTCM spec |
+| docs/ntrip-mdns-discovery.md | NEW: mDNS discovery spec |
+| docs/platform-support.md | initramfs requirement, oxco→ocxo |
+| drivers/ice-gnss-streaming/README.md | initramfs documentation |
