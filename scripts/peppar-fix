@@ -320,11 +320,13 @@ if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
     echo "=== peppar-fix: Step 2b — PHC bootstrap ==="
     bootstrap_phc_args=(
         --serial "$SERIAL"
-        --baud "$BAUD"
         --port-type "$UBX_PORT"
         --position-file "$POSITION_FILE"
         --ptp-dev "$PTP_DEV"
     )
+    if [[ -n "$BAUD" ]]; then
+        bootstrap_phc_args+=(--baud "$BAUD")
+    fi
     if [[ -n "$PTP_PROFILE" ]]; then
         bootstrap_phc_args+=(--ptp-profile "$PTP_PROFILE")
     fi
@@ -462,11 +464,13 @@ while true; do
             if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
                 bootstrap_phc_args=(
                     --serial "$SERIAL"
-                    --baud "$BAUD"
                     --port-type "$UBX_PORT"
                     --position-file "$POSITION_FILE"
                     --ptp-dev "$PTP_DEV"
                 )
+                if [[ -n "$BAUD" ]]; then
+                    bootstrap_phc_args+=(--baud "$BAUD")
+                fi
                 if [[ -n "$PTP_PROFILE" ]]; then
                     bootstrap_phc_args+=(--ptp-profile "$PTP_PROFILE")
                 fi

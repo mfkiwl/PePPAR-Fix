@@ -1,9 +1,13 @@
 From: Michal Schmidt <mschmidt@redhat.com> (adapted for Ubuntu 24.04 in-kernel ice driver)
-Subject: ice: GNSS streaming delivery and reduced polling delay (in-tree)
+Subject: ice: GNSS streaming delivery, reduced polling delay, write yield (in-tree)
 
 Combines three upstream patches submitted to iwl-next (Dec 2024) by
 Michal Schmidt, adapted for the Ubuntu 24.04 in-kernel ice driver
 (linux-source-6.8.0).  This version preserves EXTTS and DPLL support.
+
+Added: periodic usleep_range() in the read loop every 8 I2C chunks to
+yield the admin queue to I2C writes (UBX CFG-VALSET).  Without this,
+the ~54 back-to-back reads per epoch starve the write path.
 
 Apply to files extracted from linux-source-6.8.0 at:
   drivers/net/ethernet/intel/ice/ice_gnss.c
@@ -16,7 +20,8 @@ Apply to files extracted from linux-source-6.8.0 at:
  	struct gnss_serial *gnss = container_of(work, struct gnss_serial,
  						read_work.work);
 -	unsigned long delay = ICE_GNSS_POLL_DATA_DELAY_TIME;
- 	unsigned int i, bytes_read, data_len, count;
+-	unsigned int i, bytes_read, data_len, count;
++	unsigned int i, bytes_read, data_len, count, chunks = 0;
  	struct ice_aqc_link_topo_addr link_topo;
  	struct ice_pf *pf;
  	struct ice_hw *hw;
@@ -41,7 +46,7 @@ Apply to files extracted from linux-source-6.8.0 at:
  	/* Read received data */
  	for (i = 0; i < data_len; i += bytes_read) {
  		unsigned int bytes_left = data_len - i;
-@@ -139,21 +130,20 @@
+@@ -139,21 +130,24 @@
 
  		err = ice_aq_read_i2c(hw, link_topo, ICE_GNSS_UBX_I2C_BUS_ADDR,
  				      cpu_to_le16(ICE_GNSS_UBX_EMPTY_DATA),
@@ -56,6 +61,10 @@ Apply to files extracted from linux-source-6.8.0 at:
 +			dev_dbg(ice_pf_to_dev(pf),
 +				"gnss_insert_raw ret=%d size=%d\n",
 +				count, bytes_read);
++
++		/* Yield every 8 chunks (~120 B) so I2C writes get through */
++		if (++chunks % ICE_GNSS_READ_YIELD_CHUNKS == 0)
++			usleep_range(1000, 2000);
  	}
 
 -	count = gnss_insert_raw(pf->gnss_dev, buf, i);
@@ -78,7 +87,7 @@ Apply to files extracted from linux-source-6.8.0 at:
 @@ -8,8 +8,8 @@
  #define ICE_GNSS_POLL_DATA_DELAY_TIME	(HZ / 50) /* poll every 20 ms */
 -#define ICE_GNSS_TIMER_DELAY_TIME	(HZ / 10) /* 0.1 second per message */
-+
++#define ICE_GNSS_READ_YIELD_CHUNKS	8 /* yield to writers every N reads */
  #define ICE_GNSS_TTY_WRITE_BUF		250
 -#define ICE_MAX_I2C_DATA_SIZE		FIELD_MAX(ICE_AQC_I2C_DATA_SIZE_M)
 +#define ICE_MAX_I2C_DATA_SIZE		15
