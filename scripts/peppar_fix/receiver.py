@@ -454,25 +454,27 @@ def configure_rate_ms(ser, ubr, meas_ms):
     }, f"Measurement rate = {rate_hz:.1f} Hz ({meas_ms} ms)")
 
 
-def configure_messages(ser, ubr, port_id, minimal=False):
+def configure_messages(ser, ubr, port_id, sfrbx_rate=1):
     """Enable required UBX messages on the specified port.
 
     Args:
-        minimal: If True, enable only RAWX+TIM-TP.  Used for
-                 bandwidth-limited transports (E810 I2C, 15-byte AQ limit).
-                 SFRBX, PVT, and NAV-SAT are omitted to stay within the
-                 ~1.5 kB/s I2C throughput ceiling.
+        sfrbx_rate: SFRBX output decimation (0=disabled, 1=every epoch).
+                    When 0, PVT and NAV-SAT are also disabled to minimize
+                    I2C bandwidth on E810 (15-byte AQ limit, ~1.6 kB/s).
     """
     pname = PORT_SUFFIX.get(port_id, f"port{port_id}")
     messages = {
         f"CFG_MSGOUT_UBX_RXM_RAWX_{pname}": 1,
         f"CFG_MSGOUT_UBX_TIM_TP_{pname}": 1,
+        f"CFG_MSGOUT_UBX_RXM_SFRBX_{pname}": sfrbx_rate,
     }
-    if not minimal:
-        messages[f"CFG_MSGOUT_UBX_RXM_SFRBX_{pname}"] = 1
+    if sfrbx_rate > 0:
         messages[f"CFG_MSGOUT_UBX_NAV_PVT_{pname}"] = 1
         messages[f"CFG_MSGOUT_UBX_NAV_SAT_{pname}"] = 5
-    names = "RAWX, TIM-TP" if minimal else "RAWX, SFRBX, PVT, SAT, TIM-TP"
+    else:
+        messages[f"CFG_MSGOUT_UBX_NAV_PVT_{pname}"] = 0
+        messages[f"CFG_MSGOUT_UBX_NAV_SAT_{pname}"] = 0
+    names = "RAWX, TIM-TP" if sfrbx_rate == 0 else "RAWX, SFRBX, PVT, SAT, TIM-TP"
     return send_cfg(ser, ubr, messages, f"UBX messages on {pname}: {names}")
 
 
@@ -765,7 +767,7 @@ def _detect_second_freq(sig_ids_seen):
 
 
 def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
-                          timeout_s=10, minimal_messages=False,
+                          timeout_s=10, sfrbx_rate=1,
                           measurement_rate_ms=1000):
     """Check that dual-frequency observations are arriving; reconfigure if not.
 
@@ -856,7 +858,7 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
 
     # Set measurement rate and enable required messages on the correct port
     configure_rate_ms(ser, ubr, measurement_rate_ms)
-    configure_messages(ser, ubr, pid, minimal=minimal_messages)
+    configure_messages(ser, ubr, pid, sfrbx_rate=sfrbx_rate)
     configure_nmea_off(ser, ubr, pid)
     ser.close()
 

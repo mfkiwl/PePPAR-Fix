@@ -116,11 +116,12 @@ def run(args):
 
     port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4, "I2C": 0}[args.port_type]
     driver = get_driver(args.receiver)
-    # Kernel GNSS char devices use I2C with a 15-byte AQ bandwidth limit.
-    # Only require RAWX+TIM-TP to stay within ~1.5 kB/s throughput ceiling.
-    minimal = _is_kernel_gnss(args.serial)
+    # sfrbx_rate=0 disables SFRBX+PVT+SAT on the port (E810 I2C bandwidth).
+    # Default: 0 for kernel GNSS (I2C), 1 for serial.
+    sfrbx_rate = 0 if _is_kernel_gnss(args.serial) else 1
+    minimal = (sfrbx_rate == 0)
     if minimal:
-        log.info("Kernel GNSS device — using minimal message set (RAWX+TIM-TP)")
+        log.info("Kernel GNSS device — using minimal message set (RAWX+TIM-TP, sfrbx_rate=0)")
 
     # ── Factory reset if requested ──────────────────────────────────────
     if args.factory_reset:
@@ -228,7 +229,7 @@ def run(args):
     for r in reasons:
         log.info(f"  Reason: {r}")
 
-    _do_configure(ser, ubr, args, port_id, driver, minimal=minimal)
+    _do_configure(ser, ubr, args, port_id, driver, sfrbx_rate=sfrbx_rate)
     ser.close()
 
     # ── Verify after configuration ──────────────────────────────────────
@@ -253,7 +254,7 @@ def run(args):
     return EXIT_OK
 
 
-def _do_configure(ser, ubr, args, port_id, driver, minimal=False):
+def _do_configure(ser, ubr, args, port_id, driver, sfrbx_rate=1):
     """Apply receiver configuration (signals, messages, rate, tmode, L5)."""
     configure_signals(ser, ubr, driver=driver)
     l5_ok = configure_gps_l5_health(ser, ubr)
@@ -265,7 +266,7 @@ def _do_configure(ser, ubr, args, port_id, driver, minimal=False):
         ser, ubr = reopen_after_reset(args.serial, wait_s=10)
 
     configure_rate(ser, ubr, args.rate)
-    configure_messages(ser, ubr, port_id, minimal=minimal)
+    configure_messages(ser, ubr, port_id, sfrbx_rate=sfrbx_rate)
     configure_nmea_off(ser, ubr, port_id)
     configure_tmode(ser, ubr, args.survey_dur, args.survey_acc)
 

@@ -311,6 +311,8 @@ def apply_ptp_profile(args):
         )
     if getattr(args, 'measurement_rate_ms', None) is None:
         args.measurement_rate_ms = profile.get("measurement_rate_ms", None)
+    if getattr(args, 'sfrbx_rate', None) is None:
+        args.sfrbx_rate = profile.get("sfrbx_rate", None)
 
 
 def apply_ticc_drive_defaults(args):
@@ -2061,14 +2063,9 @@ def run(args):
     from peppar_fix.receiver import ensure_receiver_ready
     port_type = getattr(args, 'port_type', 'USB') or 'USB'
     systems_for_check = set(args.systems.split(',')) if args.systems else {'gps', 'gal'}
-    # Kernel GNSS devices (E810 I2C) have a 15-byte AQ bandwidth limit.
-    # Use minimal messages (RAWX+TIM-TP) to stay within ~1.5 kB/s ceiling.
-    import os as _os
-    _base = _os.path.basename(args.serial)
-    _is_kernel_gnss = _base.startswith("gnss") and _base[4:].isdigit()
     driver = ensure_receiver_ready(args.serial, args.baud, port_type=port_type,
                                    systems=systems_for_check,
-                                   minimal_messages=_is_kernel_gnss,
+                                   sfrbx_rate=args.sfrbx_rate,
                                    measurement_rate_ms=args.measurement_rate_ms)
     if driver is None:
         driver = get_driver(args.receiver)
@@ -2301,6 +2298,8 @@ Two-phase operation:
                         help="Receiver port type for UBX message routing (default: USB)")
     serial.add_argument("--measurement-rate-ms", type=int, default=None,
                         help="F9T measurement rate in ms (profile default: 1000 for i226, 2000 for E810)")
+    serial.add_argument("--sfrbx-rate", type=int, default=None,
+                        help="SFRBX output rate (0=disabled, 1=every epoch; profile default: 1 for serial, 0 for E810 I2C)")
 
     # GNSS
     gnss = ap.add_argument_group("GNSS")
@@ -2475,6 +2474,8 @@ Two-phase operation:
         args.min_correlation_confidence = 0.5
     if getattr(args, 'measurement_rate_ms', None) is None:
         args.measurement_rate_ms = 1000
+    if getattr(args, 'sfrbx_rate', None) is None:
+        args.sfrbx_rate = 1  # default: enabled on serial transport
     if args.track_restep_ns is None:
         args.track_restep_ns = 100_000.0
     if args.phase_step_bias_ns is None:

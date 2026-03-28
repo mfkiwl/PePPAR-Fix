@@ -25,6 +25,7 @@ pps_pin = 1
 extts_channel = 0
 timescale = "tai"
 measurement_rate_ms = 1000    # 1 Hz — USB serial has ample bandwidth
+sfrbx_rate = 1                # every epoch — serial bandwidth is free
 # PHC step characterization (2026-03-24, characterize_phc_step.py)
 settime_lag_ns = 200000       # PPS-calibrated clock_settime lag
 step_error_ns = 10000         # achievable step accuracy (±10 µs)
@@ -68,9 +69,11 @@ device = "/dev/ptp1"
 pps_pin = 0
 extts_channel = 0
 timescale = "tai"
-measurement_rate_ms = 2000    # 0.5 Hz — E810 AQ I2C limited to 15 B/cmd (~1.6 kB/s)
-                              # At 1 Hz, RAWX alone saturates the bus and ~13% of epochs
-                              # are lost.  0.5 Hz is lossless with RAWX+TIM-TP.
+measurement_rate_ms = 2000    # 0.5 Hz — lossless on E810 AQ I2C (15 B/cmd, ~1.6 kB/s).
+                              # At 1 Hz RAWX alone (~1.5 kB/s) saturates the bus and
+                              # ~10% of epochs are lost.  0.5 Hz guarantees zero loss.
+sfrbx_rate = 0                # disabled — SFRBX consumes ~400 B/s on I2C, pushing total
+                              # output well above bus capacity.  Ephemeris comes from NTRIP.
 # PHC step characterization (2026-03-27, characterize_phc_step.py on ocxo)
 # Bimodal clock_settime: 1.6 ms typical, 16 ms ~30% of calls.
 # PPS-calibrated lag measured at ~16 ms (direct PPS phase at lag=0).
