@@ -89,7 +89,25 @@ class PpsEvent:
     estimator_residual_s: Optional[float] = None
 
     def rounded_sec(self):
+        """Integer second this PPS edge belongs to.
+
+        A disciplined PHC has PPS near 0 ns (slightly late) or near
+        1,000,000,000 ns (slightly early for the next second).  Both
+        cases should resolve to the same integer second.  We round to
+        the nearest whole second: nsec < 500ms → this second,
+        nsec >= 500ms → next second.
+        """
         return self.phc_sec if self.phc_nsec < 500_000_000 else self.phc_sec + 1
+
+    def fractional_error_ns(self):
+        """Signed PPS phase error in nanoseconds.
+
+        Positive = PPS is late (PHC reads past the whole second).
+        Negative = PPS is early (PHC reads just before the next second).
+        """
+        if self.phc_nsec < 500_000_000:
+            return self.phc_nsec
+        return self.phc_nsec - 1_000_000_000
 
     def __iter__(self):
         yield self.phc_sec

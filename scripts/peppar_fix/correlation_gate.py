@@ -214,10 +214,14 @@ def match_pps_event_from_history(
             getattr(obs_event, "correlation_confidence", None),
             getattr(pps_event, "correlation_confidence", None),
         )
+        # Sort by recv_dt closeness to expected (~1s) first, then
+        # delta_s as tiebreaker.  This prevents the match from jumping
+        # to a different PPS event when rounded_sec flips at the
+        # zero-crossing (disciplined PHC oscillates ±1 ns around 0).
         candidate = (
+            abs(recv_dt_s - 1.0),
             abs(delta_s),
             -combined_confidence,
-            abs(recv_dt_s - 1.0),
             idx,
             pps_event,
             delta_s,
