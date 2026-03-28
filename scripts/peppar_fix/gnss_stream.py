@@ -20,27 +20,29 @@ log = logging.getLogger(__name__)
 
 
 class KernelGnssStream:
-    """Serial-like wrapper for kernel GNSS char devices.
+    """File-like wrapper around a kernel GNSS char device (/dev/gnssN).
 
-    The kernel device can return short reads. pyubx2 expects a stream whose
+    pyubx2's UBXReader expects a stream where ``read(n)`` returns up to *n*
+    bytes of UBX data.  The kernel GNSS device delivers raw I2C chunks that
+    may contain UBX, NMEA, and RTCM mixed together.
+
     ``read(n)`` behaves more like a serial port and blocks until enough bytes
-    arrive, so coalesce reads here.
+    are available, reassembling complete UBX frames so pyubx2 never sees
+    partial headers.
     """
 
     def __init__(self, path):
         self._lock_fd, self._lock_path = acquire_device_lock(path)
         try:
             self._fd = os.open(path, os.O_RDWR)
-        except Exception:
+        except OSError:
             release_device_lock(self._lock_fd)
             raise
-        self.name = path
-        self._buf = bytearray()
-        self._out = bytearray()
+        self._buf = bytearray()      # raw bytes from device
+        self._out = bytearray()      # reassembled UBX frames for pyubx2
         self._read_chunk = 4096
         self._pending_packet_sizes = deque()
         self._pending_packet_timestamps = deque()
-        self._last_packet_timestamp = None
         self._last_packet_queue_remains = None
         self._last_fill_mono = None
 
@@ -81,7 +83,8 @@ class KernelGnssStream:
                     del self._buf[:-1]
                 else:
                     self._buf.clear()
-                self._fill_raw(1)
+                # Need at least 2 bytes to find the sync word.
+                self._fill_raw(2)
 
             self._fill_raw(6)
             payload_len = self._buf[4] | (self._buf[5] << 8)
@@ -100,7 +103,14 @@ class KernelGnssStream:
             self._out.clear()
             self._consume_packet_bytes(len(data))
             return data
-        self._fill_ubx(size)
+        # pyubx2 calls read(N) expecting 1..N bytes back (like a socket).
+        # Ensure at least one complete UBX frame is available, then return
+        # up to *size* bytes from whatever is buffered.  Do NOT loop to
+        # accumulate *size* bytes — that forces reading many small frames
+        # to satisfy a large read (e.g. 1500-byte RAWX payload), stalling
+        # the pipeline for seconds on 15-byte I2C streaming delivery.
+        if not self._out:
+            self._fill_ubx(1)
         data = bytes(self._out[:size])
         del self._out[:size]
         self._consume_packet_bytes(len(data))
@@ -128,160 +138,120 @@ class KernelGnssStream:
             head = self._pending_packet_sizes[0]
             if nbytes < head:
                 self._pending_packet_sizes[0] = head - nbytes
-                return
-            nbytes -= head
-            self._pending_packet_sizes.popleft()
-            self._last_packet_timestamp = self._pending_packet_timestamps.popleft()
-            self._last_packet_queue_remains = bool(
-                self._pending_packet_sizes or self._buf or self._out
-            )
-
-    def pop_packet_timestamp(self):
-        """Return the receive-monotonic timestamp for the last complete packet."""
-        ts = self._last_packet_timestamp
-        self._last_packet_timestamp = None
-        return ts
+                nbytes = 0
+            else:
+                nbytes -= head
+                self._pending_packet_sizes.popleft()
+                self._pending_packet_timestamps.popleft()
 
     def pop_packet_metadata(self):
-        """Return metadata for the last complete packet handed to pyubx2."""
-        ts = self._last_packet_timestamp
-        queue_remains = self._last_packet_queue_remains
-        self._last_packet_timestamp = None
-        self._last_packet_queue_remains = None
-        return ts, queue_remains
+        """Return (recv_mono, queue_remains) for the earliest unconsumed packet."""
+        if self._pending_packet_timestamps:
+            mono = self._pending_packet_timestamps[0]
+            queue_remains = len(self._pending_packet_sizes) > 1
+            return mono, queue_remains
+        return None, None
+
+    def pop_packet_timestamp(self):
+        """Return recv_mono for the earliest unconsumed packet (compat)."""
+        if self._pending_packet_timestamps:
+            return self._pending_packet_timestamps[0]
+        return None
 
     def write(self, data):
         return os.write(self._fd, data)
 
-    def readline(self, size=-1):
-        if size is None or size < 0:
-            size = 4096
-        line = bytearray()
-        while len(line) < size:
-            ch = self.read(1)
-            if not ch:
-                break
-            line.extend(ch)
-            if ch == b"\n":
-                break
-        return bytes(line)
+    @property
+    def in_waiting(self):
+        return len(self._out) + len(self._buf)
 
-    def flush(self):
-        return None
+    def discard_input(self, idle_s=0.5, max_drain_s=5.0):
+        """Discard queued input on a kernel GNSS device.
 
-    def discard_input(self, idle_s=0.2, max_s=2.0):
-        """Drop queued kernel GNSS bytes so subsequent reads start near live data.
+        Switches the fd to nonblocking mode, drains reads until the device
+        stays idle for *idle_s* seconds, then switches back to blocking.
 
-        The kernel device can accumulate a large backlog while no userspace
-        reader is attached. Drain any immediately available bytes in
-        nonblocking mode until the device stays idle for a short interval.
+        Returns the number of bytes discarded, or 0 on error.
         """
-        self._buf.clear()
-        self._out.clear()
-
-        start = time.monotonic()
-        idle_start = None
-        drained = 0
+        import fcntl
+        fl = fcntl.fcntl(self._fd, fcntl.F_GETFL)
+        fcntl.fcntl(self._fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        discarded = 0
+        last_data = time.monotonic()
+        deadline = time.monotonic() + max_drain_s
         try:
-            while time.monotonic() - start < max_s:
+            while time.monotonic() < deadline:
                 try:
-                    chunk = os.read(self._fd, self._read_chunk)
+                    data = os.read(self._fd, 4096)
+                    if data:
+                        discarded += len(data)
+                        last_data = time.monotonic()
                 except BlockingIOError:
-                    chunk = b""
-
-                if chunk:
-                    drained += len(chunk)
-                    idle_start = None
-                    continue
-
-                if idle_start is None:
-                    idle_start = time.monotonic()
-                elif time.monotonic() - idle_start >= idle_s:
+                    pass
+                if time.monotonic() - last_data > idle_s:
                     break
                 time.sleep(0.01)
         finally:
-            pass
-        return drained
+            fcntl.fcntl(self._fd, fcntl.F_SETFL, fl)
+            self._buf.clear()
+            self._out.clear()
+            self._pending_packet_sizes.clear()
+            self._pending_packet_timestamps.clear()
+        return discarded
 
     def close(self):
         try:
-            return os.close(self._fd)
-        finally:
-            release_device_lock(self._lock_fd)
-
-    def fileno(self):
-        return self._fd
+            os.close(self._fd)
+        except OSError:
+            pass
+        release_device_lock(self._lock_fd)
 
 
 def _open_serial_exclusive(device, baud):
-    import serial
-
+    """Open a serial port with advisory lock and optional TIOCEXCL."""
     lock_fd, _lock_path = acquire_device_lock(device)
+    import serial
     try:
         try:
             ser = serial.Serial(
-                device,
-                baud,
-                timeout=2.0,
-                dsrdtr=False,
-                rtscts=False,
+                device, baudrate=baud, timeout=1,
+                dsrdtr=False, rtscts=False,
                 exclusive=True,
             )
-        except serial.SerialException:
+        except (serial.SerialException, ValueError):
             # TIOCEXCL not supported on some cdc_acm drivers; fall back
+            log.debug("TIOCEXCL failed on %s — opening non-exclusive", device)
             ser = serial.Serial(
-                device,
-                baud,
-                timeout=2.0,
-                dsrdtr=False,
-                rtscts=False,
+                device, baudrate=baud, timeout=1,
+                dsrdtr=False, rtscts=False,
                 exclusive=False,
             )
-        ser.reset_input_buffer()
     except Exception:
         release_device_lock(lock_fd)
         raise
 
-    original_close = ser.close
     _lock_released = [False]  # mutable so closure can write it
-
+    _original_close = ser.close
     def close_with_lock():
-        try:
-            return original_close()
-        finally:
-            if not _lock_released[0]:
-                _lock_released[0] = True
-                release_device_lock(lock_fd)
+        _original_close()
+        if not _lock_released[0]:
+            _lock_released[0] = True
+            release_device_lock(lock_fd)
 
     ser.close = close_with_lock
     ser._peppar_lock_fd = lock_fd
     return ser
 
 
-def open_gnss(device, baud=115200):
-    """Open a GNSS device, auto-detecting serial vs kernel char device.
+def open_gnss(device, baud=9600):
+    """Open a GNSS device, returning (stream, device_type).
 
-    Args:
-        device: path like /dev/gnss0 or /dev/gnss-top or /dev/ttyACM0
-        baud: baud rate (only used for serial ports)
-
-    Returns:
-        (stream, device_type) where stream is readable/writable and
-        device_type is 'gnss' or 'serial'
+    device_type is "gnss" for kernel GNSS char devices, "serial" otherwise.
     """
-    # Kernel GNSS devices: /dev/gnss0, /dev/gnss1, etc.
-    basename = os.path.basename(device)
-    if basename.startswith('gnss') and basename[4:].isdigit():
-        log.info(f"Opening {device} as kernel GNSS char device")
-        stream = KernelGnssStream(device)
-        return stream, 'gnss'
-
-    # Everything else: try pyserial
-    log.info(f"Opening {device} as serial port at {baud} baud")
-    ser = _open_serial_exclusive(device, baud)
-    return ser, 'serial'
-
-
-def close_gnss(stream, device_type):
-    """Close a GNSS stream."""
-    stream.close()
+    base = os.path.basename(device)
+    if base.startswith("gnss") and base[4:].isdigit():
+        log.info("Opening %s as kernel GNSS char device", device)
+        return KernelGnssStream(device), "gnss"
+    else:
+        ser = _open_serial_exclusive(device, baud)
+        return ser, "serial"
