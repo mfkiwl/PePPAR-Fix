@@ -91,11 +91,16 @@ class Ticc:
         )
 
     def _open_serial(self) -> serial.Serial:
+        # dsrdtr=False, rtscts=False: prevent DTR toggle that would
+        # reboot the Arduino Mega 2560 (see CLAUDE.md "TICC resets
+        # on serial open").
         try:
             return serial.Serial(
                 self.port,
                 self.baud,
                 timeout=2.0,
+                dsrdtr=False,
+                rtscts=False,
                 exclusive=True,
             )
         except serial.SerialException:
@@ -112,46 +117,49 @@ class Ticc:
         self._lock_fd, _lock_path = acquire_device_lock(self.port)
         try:
             self._ser = self._open_serial()
+            self._ser.reset_input_buffer()
+
+            if self.wait_for_boot:
+                # Opening the port triggers Arduino auto-reset via DTR
+                # capacitor.  The TICC reboots, prints a config header,
+                # waits ~5s for menu input, then prints the sentinel line
+                # and starts data.  Total boot time: ~8-10 seconds.
+                #
+                # Read through boot output until we see the sentinel,
+                # then the first valid timestamp.  If the port becomes
+                # invalid during reboot (USB re-enumeration), close,
+                # wait, and reopen.
+                deadline = _time.monotonic() + 20
+                seen_sentinel = False
+                while _time.monotonic() < deadline:
+                    try:
+                        raw = self._ser.readline()
+                    except (serial.SerialException, OSError):
+                        try:
+                            self._ser.close()
+                        except Exception:
+                            pass
+                        _time.sleep(1)
+                        try:
+                            self._ser = self._open_serial()
+                            self._ser.reset_input_buffer()
+                        except (serial.SerialException, OSError):
+                            _time.sleep(1)
+                        continue
+                    line = raw.decode(errors="replace").strip()
+                    if _BOOT_SENTINEL in line:
+                        seen_sentinel = True
+                        continue
+                    if seen_sentinel and _LINE_RE.match(line):
+                        break  # first fresh timestamp — ready
         except Exception:
+            # Release lock if ANYTHING in __enter__ fails — serial open,
+            # boot wait, USB re-enumeration.  Without this, a failed
+            # __enter__ leaks the flock and the reconnect loop blocks
+            # itself on the next attempt.
             release_device_lock(self._lock_fd)
             self._lock_fd = None
             raise
-        self._ser.reset_input_buffer()
-
-        if self.wait_for_boot:
-            # Opening the port triggers Arduino auto-reset via DTR capacitor.
-            # The TICC reboots, prints a config header, waits ~5s for menu
-            # input, then prints "# timestamp (seconds)" and starts data.
-            # Total boot time: ~8-10 seconds.
-            #
-            # We read through the boot output until we see the sentinel line,
-            # then the first valid timestamp.  If the serial port becomes
-            # invalid during reboot (USB re-enumeration), we catch the error
-            # and retry the open.
-            deadline = _time.monotonic() + 20
-            seen_sentinel = False
-            while _time.monotonic() < deadline:
-                try:
-                    raw = self._ser.readline()
-                except (serial.SerialException, OSError):
-                    # Port became invalid during reboot — close, wait, reopen
-                    try:
-                        self._ser.close()
-                    except Exception:
-                        pass
-                    _time.sleep(1)
-                    try:
-                        self._ser = self._open_serial()
-                        self._ser.reset_input_buffer()
-                    except (serial.SerialException, OSError):
-                        _time.sleep(1)
-                    continue
-                line = raw.decode(errors="replace").strip()
-                if _BOOT_SENTINEL in line:
-                    seen_sentinel = True
-                    continue
-                if seen_sentinel and _LINE_RE.match(line):
-                    break  # first fresh timestamp — ready
 
         return self
 
