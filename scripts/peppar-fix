@@ -195,6 +195,14 @@ ntrip_args() {
 }
 
 # ── Step 1: Verify/configure receiver ───────────────────────────────────── #
+#
+# Single entry point: checks dual-freq observations, reconfigures signals
+# (L5 or L2C), applies L5 health override + warm restart if needed, sets
+# measurement rate and message routing, verifies the result.  All config
+# is saved to RAM + BBR + Flash.
+#
+# This replaces the old peppar_rx_config.py call.  ensure_receiver_ready
+# subsumes everything rx_config did, plus dual-freq validation and L5.
 
 echo "=== peppar-fix: Step 1 — Receiver configuration ==="
 
@@ -203,18 +211,18 @@ rx_max_retries=3
 for ((rx_try=1; rx_try<=rx_max_retries; rx_try++)); do
     rx_args=(
         "$SERIAL"
+        --port-type "$UBX_PORT"
+        --systems "$SYSTEMS"
     )
     if [[ -n "$BAUD" ]]; then
         rx_args+=(--baud "$BAUD")
     fi
-    rx_args+=(
-        --port-type "$UBX_PORT"
-        --receiver "$RECEIVER"
-    )
-    if [[ -n "$PTP_PROFILE" ]]; then
-        rx_args+=(--ptp-profile "$PTP_PROFILE")
-    fi
-    if "$PYTHON_BIN" "$SCRIPT_DIR/peppar_rx_config.py" "${rx_args[@]}"; then
+    if DETECTED_DRIVER=$("$PYTHON_BIN" "$SCRIPT_DIR/peppar_ensure_receiver.py" "${rx_args[@]}"); then
+        # Map driver name to --receiver arg for downstream scripts
+        case "$DETECTED_DRIVER" in
+            *L1/L5*|*l5*)  RECEIVER="f9t-l5" ;;
+            *L1/L2*|*f9t*) RECEIVER="f9t" ;;
+        esac
         break
     fi
     if [[ $rx_try -eq $rx_max_retries ]]; then
@@ -232,6 +240,7 @@ bootstrap_position() {
     echo "=== peppar-fix: Step 2 — Position bootstrap ==="
     local pos_args=(
         --serial "$SERIAL"
+        --receiver "$RECEIVER"
         --systems "$SYSTEMS"
         --save --position-file "$POSITION_FILE"
     )
