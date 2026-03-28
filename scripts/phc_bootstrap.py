@@ -99,17 +99,18 @@ def _realtime_to_phc_offset_s(phc_timescale, leap, tai_minus_gps):
 
 
 def _enable_pps_out(ptp, args):
-    """Program PPS OUT pin and enable PEROUT if configured.
+    """Enable PEROUT (PPS OUT) if configured.
 
     Must be called after any PHC phase step — stepping the PHC
     invalidates the PEROUT alignment, stopping the output pulse.
     """
     if args.pps_out_pin < 0:
         return
-    from peppar_fix.ptp_device import PTP_PF_PEROUT
     try:
-        ptp.set_pin_function(args.pps_out_pin, PTP_PF_PEROUT,
-                             args.pps_out_channel)
+        if args.program_pin:
+            from peppar_fix.ptp_device import PTP_PF_PEROUT
+            ptp.set_pin_function(args.pps_out_pin, PTP_PF_PEROUT,
+                                 args.pps_out_channel)
         # Cancel any stale PEROUT, then re-enable
         ptp.disable_perout(args.pps_out_channel)
         ptp.enable_perout(args.pps_out_channel)
