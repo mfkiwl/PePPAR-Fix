@@ -43,6 +43,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="python3"
 if [[ -x "$REPO_ROOT/venv/bin/python" ]]; then
     PYTHON_BIN="$REPO_ROOT/venv/bin/python"
+elif [[ -x "$HOME/pygpsclient/bin/python" ]]; then
+    PYTHON_BIN="$HOME/pygpsclient/bin/python"
 fi
 export PYTHONPATH="$REPO_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
 
