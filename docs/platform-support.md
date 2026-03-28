@@ -208,13 +208,23 @@ A boot-aware probe of `/dev/ticc3` on `ocxo` completed with zero timestamp
 events, so the device is present and named correctly but the post-move PPS
 wiring has not yet been confirmed by measurement.
 
-Current interpretation:
+Current state:
 
 - E810 PPS input (EXTTS) works with the in-tree ice driver.  The GNSS pin
   captures the onboard F9T's 1PPS at channel 0.
-- E810 PPS output (PEROUT) on SMA connectors is not yet configured.
-  TICC #3 chA is wired to the upper SMA but sees no signal until PEROUT
-  is enabled.
+- E810 PPS output (PEROUT) on SMA1 is enabled by the PHC bootstrap via
+  sysfs pin programming.  The ice driver rejects `PTP_PIN_SETFUNC` ioctl
+  but accepts writes to `/sys/class/ptp/ptpN/pins/SMA1`.
+- **udev rule required**: the sysfs pin files must be writable by the
+  `dialout` group.  Deploy `99-ptp-pins.rules`:
+  ```
+  SUBSYSTEM=="ptp", ACTION=="add", RUN+="/bin/chmod -R g+w /sys/class/ptp/%k/pins/"
+  SUBSYSTEM=="ptp", ACTION=="add", RUN+="/bin/chgrp -R dialout /sys/class/ptp/%k/pins/"
+  ```
+  Without this rule, PEROUT enable succeeds but the signal doesn't reach
+  the physical SMA connector (pin stays at function=NONE).
+- TICC #3 chA is wired to SMA1 (upper bracket connector) and records
+  disciplined PHC PPS timestamps at 1 Hz.
 - The F9T PPS is internal to the E810 PCB and **not accessible externally**
   without soldering to a test point.  TICC can only observe the disciplined
   PHC PEROUT, not the raw F9T PPS.
