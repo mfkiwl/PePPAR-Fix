@@ -238,8 +238,8 @@ def _apply_bootstrap_profile(args):
     # Step parameters — only apply if the user didn't override on CLI
     if args.settime_lag_ns == 0:
         args.settime_lag_ns = profile.get("settime_lag_ns", args.settime_lag_ns)
-    if args.step_error_ns == 5000:
-        args.step_error_ns = profile.get("step_error_ns", args.step_error_ns)
+    if args.step_accuracy_ns == 10000:
+        args.step_accuracy_ns = profile.get("step_accuracy_ns", args.step_accuracy_ns)
 
     # Pin/EXTTS parameters
     if args.pps_pin is None:
@@ -267,8 +267,8 @@ def _apply_bootstrap_profile(args):
     if args.search_time_s == 1.0:
         args.search_time_s = profile.get("search_time_s", args.search_time_s)
 
-    log.info("  settime_lag_ns=%d step_error_ns=%d search_time=%.1fs",
-             args.settime_lag_ns, args.step_error_ns, args.search_time_s)
+    log.info("  settime_lag_ns=%d step_accuracy_ns=%d search_time=%.1fs",
+             args.settime_lag_ns, args.step_accuracy_ns, args.search_time_s)
     log.info("  track_kp=%.4f track_ki=%.4f glide_zeta=%.2f track_max=%.0f ppb",
              args.track_kp, args.track_ki, args.glide_zeta, args.track_max_ppb)
     log.info("  search_time=%.1fs", args.search_time_s)
@@ -307,8 +307,8 @@ def main():
                     help="Number of filter epochs before evaluating PHC")
     ap.add_argument("--freq-tolerance-ppb", type=float, default=10.0,
                     help="Frequency sanity threshold in ppb")
-    ap.add_argument("--step-error-ns", type=int, default=5000,
-                    help="Phase error threshold for skipping bootstrap (ns)")
+    ap.add_argument("--step-accuracy-ns", type=int, default=10000,
+                    help="Expected step accuracy (ns) — skip bootstrap if phase error already within this")
     ap.add_argument("--settime-lag-ns", type=int, default=0,
                     help="Mean clock_settime-to-PHC landing lag in ns (aim correction)")
     ap.add_argument("--max-pps-iterations", type=int, default=8,
@@ -577,12 +577,12 @@ def main():
                      pps_freq_ppb, pps_freq_unc, args.freq_tolerance_ppb)
 
     # Phase sanity check
-    phase_sane = abs(phase_error_ns) < args.step_error_ns
+    phase_sane = abs(phase_error_ns) < args.step_accuracy_ns
 
     if phase_sane and freq_sane:
         log.info("PHC state is sane — blessing without intervention")
         log.info("  Phase error: %+.0f ns (within %d ns)",
-                 phase_error_ns, args.step_error_ns)
+                 phase_error_ns, args.step_accuracy_ns)
         _enable_pps_out(ptp, args)
         ptp.close()
         return 0

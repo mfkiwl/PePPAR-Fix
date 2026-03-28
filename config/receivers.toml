@@ -29,6 +29,8 @@ sfrbx_rate = 1                # every epoch — serial bandwidth is free
 # PHC bootstrap (optimal stopping adapts to any PHC automatically)
 settime_lag_ns = 200000       # PPS-calibrated clock_settime lag (aim correction)
 search_time_s = 1.0           # optimal stop search budget
+step_accuracy_ns = 10000      # expected step accuracy (±10 µs) — skip bootstrap if
+                              # current phase error is already within this
 # Servo tuning — Kp chosen for damping ratio zeta ≈ 0.5 with Ki=0.001.
 # zeta = Kp / (2 * sqrt(Ki)) = 0.03 / (2 * 0.0316) = 0.47
 # Combined with bootstrap glide (zeta_target=0.7), the servo should
@@ -77,6 +79,8 @@ sfrbx_rate = 0                # disabled — SFRBX consumes ~400 B/s on I2C, pus
 # Bimodal clock_settime: 1.6 ms typical, 16 ms ~30% of calls.
 settime_lag_ns = 16000000     # PPS-calibrated clock_settime lag (aim correction)
 search_time_s = 5.0           # longer budget for E810's slow bimodal settime
+step_accuracy_ns = 2000000    # expected step accuracy (±2 ms) — skip bootstrap if
+                              # current phase error is already within this
 # Servo tuning — OCXO with bootstrap glide.  The glide handles the
 # large initial phase error (±2 ms); the servo just needs enough Kp
 # to damp the resulting trajectory.
