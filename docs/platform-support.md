@@ -36,40 +36,54 @@ Working:
   - BeiDou `B1I + B2I`
 - E810 PPS timestamps are available from the PHC EXTS path
 
-Known issue — GNSS I2C delivery latency (stock ice driver):
+Known issue — E810 AQ I2C bandwidth limit:
 
 - `/dev/gnss0` is a kernel GNSS char device backed by the `ice` driver's
-  I2C polling thread.  The stock driver (in-kernel through at least 6.17,
-  and Intel out-of-tree v2.4.5) accumulates I2C reads into a `PAGE_SIZE`
-  (4 KB) buffer via `get_zeroed_page()` before delivering to userspace.
-- With ~800 bytes per epoch at 15 bytes per I2C read, the driver needs
-  ~54 reads × 20 ms = ~1080 ms, plus a 100 ms post-delivery delay.
-  Two epochs fill the page, giving **~2100 ms delivery latency**.
-- `read()` system calls block for ~2 seconds and return exactly 4096 bytes.
-- This makes real-time servo discipline impossible: observations arrive
-  seconds after the GNSS epoch they describe, causing pipeline stalls.
+  I2C polling thread.  Each I2C read goes through the E810 Admin Queue
+  (AQ), which limits data payload to **15 bytes per command** (hardware
+  constraint: `ICE_AQC_I2C_DATA_SIZE_M` = `GENMASK(3,0)`, a 4-bit
+  field).  This cannot be changed without a hardware revision.
+- Each AQ I2C command takes ~2.8 ms, giving a burst throughput of
+  ~5.3 kB/s but an effective sustained rate of **~1.5-1.7 kB/s** after
+  polling gaps and AQ overhead.
+- The F9T generates ~1.5 kB/s for RAWX+TIM-TP alone, and ~2.2 kB/s with
+  SFRBX+PVT+NAV-SAT.  With all messages enabled, the I2C bus is
+  oversubscribed by ~2x.  The F9T's internal I2C buffer overflows and
+  **~25-35% of RAWX epochs are lost**.
+- The observation queue falls persistently behind PPS, with
+  `epoch_offset` growing to 8-9 and `match_recv_dt` hitting the 11s
+  correlation window limit.
 
-Fix:
+Fix — minimal I2C message set:
 
-- A patch in `drivers/ice-gnss-streaming/` changes the driver to stream
-  each 15-byte I2C chunk to userspace immediately and removes the 100 ms
-  delay.  See `drivers/ice-gnss-streaming/README.md` for build/install
-  instructions.
-- With the patch: `read()` returns 15 bytes every ~20 ms, max gap ~400 ms
-  (natural inter-epoch silence), 14000+ reads per 120 seconds vs 62.
-- The patch is adapted from upstream work by Michal Schmidt (Red Hat),
-  reviewed but not merged as of March 2026.
-- **After installing the patched module, you must update the initramfs:**
-  ```
-  sudo depmod -a
-  sudo update-initramfs -u -k $(uname -r)
-  sudo reboot
-  ```
-  Without the initramfs update, the kernel loads the stock ice.ko from
-  the initramfs before the `updates/` directory is available, and the
-  patched module is never used.  Verify with:
-  `cat /sys/module/ice/srcversion` vs
-  `modinfo /lib/modules/$(uname -r)/updates/.../ice.ko | grep srcversion`
+- Disable SFRBX, NAV-PVT, and NAV-SAT on the I2C port (port 0).
+  Keep only RXM-RAWX and TIM-TP.  This reduces F9T I2C output to
+  ~1.0-1.4 kB/s, within the bus capacity.
+- Broadcast ephemeris comes from NTRIP (BCEP00BKG0 mount), not SFRBX.
+  See "SFRBX on E810" section below.
+- With the minimal message set on the **stock in-kernel ice driver**:
+  RAWX delivery is ~0.87 Hz (vs 0.60 Hz with all messages), epoch_offset
+  stays at 0-1, correlation window is comfortable, writes succeed.
+- **No custom driver patch is needed.**  The stock driver's page-batched
+  delivery with 100 ms post-delivery delay is adequate when total I2C
+  output fits within bus capacity.  A streaming delivery patch
+  (`drivers/ice-gnss-streaming/`) is available for experimentation but
+  is not required or recommended for production use.
+
+SFRBX on E810:
+
+- RXM-SFRBX provides broadcast ephemeris decoded locally from the GNSS
+  signal.  On serial-connected F9T (TimeHat), SFRBX is enabled by
+  default — USB serial has ample bandwidth.
+- On E810 I2C, SFRBX consumes ~400 B/s (25% of bus capacity) and is
+  **redundant** with NTRIP-sourced ephemeris.  It is disabled by default
+  on the E810 platform via the `sfrbx_on_gnss_port` config option.
+- SFRBX IS needed for the NTRIP caster use case (encoding local ephemeris
+  as RTCM 1019/1042/1046 for peer bootstrap).  The caster runs on PiPuss
+  (serial transport), not on E810.
+- SFRBX is NOT needed for PPP-AR.  PPP-AR requires broadcast ephemeris
+  (from NTRIP) plus SSR phase biases (not currently available from our
+  SSR source).  SFRBX is just one source of broadcast ephemeris.
 
 ### `timehat` / i226
 
@@ -196,11 +210,14 @@ wiring has not yet been confirmed by measurement.
 
 Current interpretation:
 
-- the lack of `TICC #3 chA` activity is consistent with the present software
-  path on `ocxo`
-- E810 PPS input / EXTS works with the in-tree `ice` driver
-- E810 PPS output appears to require Intel's out-of-tree timing driver path
-  before the upper SMA will emit a disciplined 1 PPS signal
+- E810 PPS input (EXTTS) works with the in-tree ice driver.  The GNSS pin
+  captures the onboard F9T's 1PPS at channel 0.
+- E810 PPS output (PEROUT) on SMA connectors is not yet configured.
+  TICC #3 chA is wired to the upper SMA but sees no signal until PEROUT
+  is enabled.
+- The F9T PPS is internal to the E810 PCB and **not accessible externally**
+  without soldering to a test point.  TICC can only observe the disciplined
+  PHC PEROUT, not the raw F9T PPS.
 
 ## GNSS transport differences
 

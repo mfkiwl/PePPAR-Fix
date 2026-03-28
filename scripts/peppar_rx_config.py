@@ -27,7 +27,7 @@ import tomllib
 
 from peppar_fix.receiver import (
     probe_baud, open_receiver, listen_for_messages,
-    REQUIRED_MESSAGES, MESSAGE_TIMEOUTS,
+    REQUIRED_MESSAGES, MESSAGE_TIMEOUTS, required_messages,
     full_configure, configure_signals, configure_gps_l5_health,
     configure_messages, configure_nmea_off, configure_tmode,
     configure_rate, configure_uart_baud,
@@ -101,6 +101,12 @@ def check_pps(ptp_dev, extts_pin, extts_channel=0, program_pin=True, timeout_s=5
         return False
 
 
+def _is_kernel_gnss(port):
+    """Return True for kernel GNSS char devices like /dev/gnss0."""
+    base = os.path.basename(port)
+    return base.startswith("gnss") and base[4:].isdigit()
+
+
 def run(args):
     """Main verify-and-configure flow."""
     logging.basicConfig(
@@ -108,8 +114,13 @@ def run(args):
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4}[args.port_type]
+    port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4, "I2C": 0}[args.port_type]
     driver = get_driver(args.receiver)
+    # Kernel GNSS char devices use I2C with a 15-byte AQ bandwidth limit.
+    # Only require RAWX+TIM-TP to stay within ~1.5 kB/s throughput ceiling.
+    minimal = _is_kernel_gnss(args.serial)
+    if minimal:
+        log.info("Kernel GNSS device — using minimal message set (RAWX+TIM-TP)")
 
     # ── Factory reset if requested ──────────────────────────────────────
     if args.factory_reset:
@@ -147,7 +158,8 @@ def run(args):
 
     # ── Passive listen phase ────────────────────────────────────────────
     log.info("Listening for UBX messages...")
-    seen, missing, signal_info = listen_for_messages(ser, ubr, driver=driver)
+    req = required_messages(minimal=minimal)
+    seen, missing, signal_info = listen_for_messages(ser, ubr, required=req, driver=driver)
 
     # Report findings
     log.info(f"  Messages detected: {sorted(seen)}")
@@ -216,7 +228,7 @@ def run(args):
     for r in reasons:
         log.info(f"  Reason: {r}")
 
-    _do_configure(ser, ubr, args, port_id, driver)
+    _do_configure(ser, ubr, args, port_id, driver, minimal=minimal)
     ser.close()
 
     # ── Verify after configuration ──────────────────────────────────────
@@ -230,7 +242,7 @@ def run(args):
                 log.info(f"  Drained {drained} queued kernel-GNSS bytes before verify")
         except Exception as e:
             log.debug(f"  Kernel-GNSS drain skipped: {e}")
-    seen2, missing2, signal_info2 = listen_for_messages(ser, ubr, driver=driver)
+    seen2, missing2, signal_info2 = listen_for_messages(ser, ubr, required=req, driver=driver)
     ser.close()
 
     if missing2:
@@ -241,7 +253,7 @@ def run(args):
     return EXIT_OK
 
 
-def _do_configure(ser, ubr, args, port_id, driver):
+def _do_configure(ser, ubr, args, port_id, driver, minimal=False):
     """Apply receiver configuration (signals, messages, rate, tmode, L5)."""
     configure_signals(ser, ubr, driver=driver)
     l5_ok = configure_gps_l5_health(ser, ubr)
@@ -253,7 +265,7 @@ def _do_configure(ser, ubr, args, port_id, driver):
         ser, ubr = reopen_after_reset(args.serial, wait_s=10)
 
     configure_rate(ser, ubr, args.rate)
-    configure_messages(ser, ubr, port_id)
+    configure_messages(ser, ubr, port_id, minimal=minimal)
     configure_nmea_off(ser, ubr, port_id)
     configure_tmode(ser, ubr, args.survey_dur, args.survey_acc)
 

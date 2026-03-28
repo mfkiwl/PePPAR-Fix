@@ -1,5 +1,5 @@
 From: Michal Schmidt <mschmidt@redhat.com> (adapted for Ubuntu 24.04 in-kernel ice driver)
-Subject: ice: GNSS streaming delivery, reduced polling delay, write yield (in-tree)
+Subject: ice: GNSS streaming delivery, write yield, immediate re-poll (in-tree)
 
 Combines three upstream patches submitted to iwl-next (Dec 2024) by
 Michal Schmidt, adapted for the Ubuntu 24.04 in-kernel ice driver
@@ -9,18 +9,26 @@ Added: periodic usleep_range() in the read loop every 8 I2C chunks to
 yield the admin queue to I2C writes (UBX CFG-VALSET).  Without this,
 the ~54 back-to-back reads per epoch starve the write path.
 
+Added: immediate re-poll (delay=0) when data was read.  The 20ms idle
+poll is only used when data_len was 0.  The E810 AQ limits I2C reads
+to 15 bytes per command (~2.8ms each), so the 20ms gap between polls
+was the throughput bottleneck: 1050 B/s measured vs 2200 B/s F9T output.
+Without this fix, the u-blox I2C buffer overflows and observations are
+lost, causing the observation queue to fall persistently behind PPS.
+
 Apply to files extracted from linux-source-6.8.0 at:
   drivers/net/ethernet/intel/ice/ice_gnss.c
   drivers/net/ethernet/intel/ice/ice_gnss.h
 
 --- a/ice_gnss.c
 +++ b/ice_gnss.c
-@@ -85,13 +85,12 @@
+@@ -85,13 +85,13 @@
  {
  	struct gnss_serial *gnss = container_of(work, struct gnss_serial,
  						read_work.work);
 -	unsigned long delay = ICE_GNSS_POLL_DATA_DELAY_TIME;
 -	unsigned int i, bytes_read, data_len, count;
++	unsigned long delay = ICE_GNSS_POLL_DATA_DELAY_TIME;
 +	unsigned int i, bytes_read, data_len, count, chunks = 0;
  	struct ice_aqc_link_topo_addr link_topo;
  	struct ice_pf *pf;
@@ -46,7 +54,7 @@ Apply to files extracted from linux-source-6.8.0 at:
  	/* Read received data */
  	for (i = 0; i < data_len; i += bytes_read) {
  		unsigned int bytes_left = data_len - i;
-@@ -139,21 +130,24 @@
+@@ -139,21 +130,30 @@
 
  		err = ice_aq_read_i2c(hw, link_topo, ICE_GNSS_UBX_I2C_BUS_ADDR,
  				      cpu_to_le16(ICE_GNSS_UBX_EMPTY_DATA),
@@ -75,10 +83,15 @@ Apply to files extracted from linux-source-6.8.0 at:
 -	delay = ICE_GNSS_TIMER_DELAY_TIME;
 -free_buf:
 -	free_page((unsigned long)buf);
++	/* Re-poll immediately when data was available.  The 20 ms idle
++	 * delay is only needed when the u-blox had nothing buffered.
++	 * Without immediate re-poll, the 15-byte AQ I2C limit plus the
++	 * 20 ms gap caps throughput at ~1050 B/s — below the F9T's
++	 * ~2200 B/s output rate, causing persistent buffer overflow.
++	 */
++	delay = 0;
  requeue:
--	kthread_queue_delayed_work(gnss->kworker, &gnss->read_work, delay);
-+	kthread_queue_delayed_work(gnss->kworker, &gnss->read_work,
-+				   ICE_GNSS_POLL_DATA_DELAY_TIME);
+ 	kthread_queue_delayed_work(gnss->kworker, &gnss->read_work, delay);
  	if (err)
  		dev_dbg(ice_pf_to_dev(pf), "GNSS failed to read err=%d\n", err);
  }

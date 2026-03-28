@@ -94,8 +94,10 @@ F9T_L5_SIGNAL_CONFIG = {
     "CFG_SIGNAL_QZSS_ENA": 0,
 }
 
-# Required UBX messages for peppar-fix operation
+# Required UBX messages for peppar-fix operation.
+# SFRBX and PVT are optional on bandwidth-limited transports (E810 I2C).
 REQUIRED_MESSAGES = {"RXM-RAWX", "RXM-SFRBX", "NAV-PVT", "TIM-TP"}
+REQUIRED_MESSAGES_MINIMAL = {"RXM-RAWX", "TIM-TP"}
 
 # Worst-case repetition times (seconds) for required messages.
 # RAWX/PVT/TIM-TP repeat every measurement epoch (1s at 1 Hz).
@@ -107,6 +109,17 @@ MESSAGE_TIMEOUTS = {
     "NAV-PVT": 5,
     "TIM-TP": 5,
 }
+
+
+def required_messages(minimal=False):
+    """Return the set of required messages.
+
+    Args:
+        minimal: If True, return only RAWX+TIM-TP (for bandwidth-limited
+                 transports like E810 I2C where SFRBX/PVT are disabled to
+                 stay within the 15-byte AQ command throughput ceiling).
+    """
+    return REQUIRED_MESSAGES_MINIMAL if minimal else REQUIRED_MESSAGES
 
 # Port ID mapping
 PORT_SUFFIX = {0: "I2C", 1: "UART1", 2: "UART2", 3: "USB", 4: "SPI"}
@@ -435,18 +448,26 @@ def configure_rate(ser, ubr, rate_hz):
     }, f"Measurement rate = {rate_hz} Hz ({meas_ms} ms)")
 
 
-def configure_messages(ser, ubr, port_id):
-    """Enable required UBX messages on the specified port."""
+def configure_messages(ser, ubr, port_id, minimal=False):
+    """Enable required UBX messages on the specified port.
+
+    Args:
+        minimal: If True, enable only RAWX+TIM-TP.  Used for
+                 bandwidth-limited transports (E810 I2C, 15-byte AQ limit).
+                 SFRBX, PVT, and NAV-SAT are omitted to stay within the
+                 ~1.5 kB/s I2C throughput ceiling.
+    """
     pname = PORT_SUFFIX.get(port_id, f"port{port_id}")
     messages = {
         f"CFG_MSGOUT_UBX_RXM_RAWX_{pname}": 1,
-        f"CFG_MSGOUT_UBX_RXM_SFRBX_{pname}": 1,
-        f"CFG_MSGOUT_UBX_NAV_PVT_{pname}": 1,
-        f"CFG_MSGOUT_UBX_NAV_SAT_{pname}": 5,
         f"CFG_MSGOUT_UBX_TIM_TP_{pname}": 1,
     }
-    return send_cfg(ser, ubr, messages,
-                    f"UBX messages on {pname}: RAWX, SFRBX, PVT, SAT, TIM-TP")
+    if not minimal:
+        messages[f"CFG_MSGOUT_UBX_RXM_SFRBX_{pname}"] = 1
+        messages[f"CFG_MSGOUT_UBX_NAV_PVT_{pname}"] = 1
+        messages[f"CFG_MSGOUT_UBX_NAV_SAT_{pname}"] = 5
+    names = "RAWX, TIM-TP" if minimal else "RAWX, SFRBX, PVT, SAT, TIM-TP"
+    return send_cfg(ser, ubr, messages, f"UBX messages on {pname}: {names}")
 
 
 def configure_nmea_off(ser, ubr, port_id):
@@ -738,7 +759,7 @@ def _detect_second_freq(sig_ids_seen):
 
 
 def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
-                          timeout_s=10):
+                          timeout_s=10, minimal_messages=False):
     """Check that dual-frequency observations are arriving; reconfigure if not.
 
     This is the single entry point for receiver readiness. It:
@@ -746,6 +767,11 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
     2. Auto-detects whether L5 or L2 is the active second frequency
     3. If single-frequency only, reconfigures for L1+L5 and retries
     4. Returns the appropriate driver for the detected signal plan
+
+    Args:
+        minimal_messages: If True, configure only RAWX+TIM-TP on the GNSS
+            port.  Used for E810 I2C where the 15-byte AQ command limit
+            caps throughput at ~1.5 kB/s.
 
     Returns:
         driver: ReceiverDriver instance matching the active signals
@@ -822,7 +848,7 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
         log.info("L2C driver — no L5 health override needed")
 
     # Enable required messages on the correct port
-    configure_messages(ser, ubr, pid)
+    configure_messages(ser, ubr, pid, minimal=minimal_messages)
     configure_nmea_off(ser, ubr, pid)
     ser.close()
 

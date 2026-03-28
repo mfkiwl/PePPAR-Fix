@@ -253,6 +253,10 @@ def apply_ptp_profile(args):
         args.min_correlation_confidence = profile.get(
             "min_correlation_confidence", args.min_correlation_confidence
         )
+    if getattr(args, 'max_correlation_window_s', None) is None:
+        args.max_correlation_window_s = profile.get(
+            "max_correlation_window_s", None
+        )
     if args.min_broadcast_confidence is None:
         args.min_broadcast_confidence = profile.get(
             "min_broadcast_confidence", args.min_broadcast_confidence
@@ -2021,8 +2025,14 @@ def run(args):
     from peppar_fix.receiver import ensure_receiver_ready
     port_type = getattr(args, 'port_type', 'USB') or 'USB'
     systems_for_check = set(args.systems.split(',')) if args.systems else {'gps', 'gal'}
+    # Kernel GNSS devices (E810 I2C) have a 15-byte AQ bandwidth limit.
+    # Use minimal messages (RAWX+TIM-TP) to stay within ~1.5 kB/s ceiling.
+    import os as _os
+    _base = _os.path.basename(args.serial)
+    _is_kernel_gnss = _base.startswith("gnss") and _base[4:].isdigit()
     driver = ensure_receiver_ready(args.serial, args.baud, port_type=port_type,
-                                   systems=systems_for_check)
+                                   systems=systems_for_check,
+                                   minimal_messages=_is_kernel_gnss)
     if driver is None:
         driver = get_driver(args.receiver)
         log.warning("Receiver check failed — falling back to %s (may lack dual-freq)",
@@ -2301,6 +2311,8 @@ Two-phase operation:
                        help="Target PHC timescale for PPS alignment (profile/default if omitted)")
     servo.add_argument("--min-correlation-confidence", type=float, default=None,
                        help="Minimum acceptable confidence for observation/PPS correlation")
+    servo.add_argument("--max-correlation-window-s", type=float, default=None,
+                       help="Max recv_mono delta for obs/PPS correlation (default: 11s, increase for high-latency transports like E810 I2C)")
     servo.add_argument("--track-kp", type=float, default=0.3,
                        help="PI servo Kp gain (default: 0.3)")
     servo.add_argument("--track-ki", type=float, default=0.1,
