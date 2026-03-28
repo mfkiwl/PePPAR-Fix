@@ -1,130 +1,94 @@
-# Session Handoff — 2026-03-28
+# Session Handoff — 2026-03-28 (overnight)
 
-Long session covering PHC bootstrap redesign, NTRIP caster testing,
-PEROUT integration, TICC lock fix, ice driver I2C write investigation.
+Driver write-yield fix, gnss_stream bug fix, 4-hour TDEV runs started.
 
 ## What was accomplished
 
-### PHC bootstrap: optimal stopping + glide slope
-- Replaced 8-iteration PPS feedback loop with three-step approach:
-  1. Optimal stopping phase step (parametric, p5 threshold)
-  2. PPS ground truth measurement
-  3. Glide slope frequency for smooth servo handoff
-- Full-baseline PPS frequency measurement (first-to-last fractional
-  second drift, sqrt(N) better than per-interval)
-- Float64-safe arithmetic using elapsed seconds
-- Servo Kp increased for both platforms to match glide damping:
-  i226 0.01→0.03 (ζ=0.47), E810 0.005→0.015 (ζ=0.24)
+### Ice GNSS streaming patch: I2C write yield
+- Added `usleep_range(1000, 2000)` every 8 I2C read chunks in the read
+  work function to yield the admin queue to writes
+- Without this, the ~54 back-to-back reads per epoch starved
+  `ice_gnss_write()`, making UBX CFG-VALSET fail on E810
+- Tested: 10/10 writes succeed, streaming reads unaffected (~7ms added
+  latency per epoch)
+- Patch rebuilt, installed, initramfs updated on ocxo
 
-### PEROUT integrated into PHC bootstrap
-- Discovered igc driver adds period/2 to PEROUT start time
-- Fixed by setting start = next_PHC_second - period/2
-- PEROUT now owned by phc_bootstrap.py, not systemd service
-- Verified chA-chB alignment within 54 ns on TICC
-- Disabled systemd phc-pps-out.service (no longer needed)
+### KernelGnssStream spin loop + over-buffering fix
+- **Root cause found**: `_fill_ubx()` sync search had a spin loop when
+  the raw buffer contained a lone `0xB5` byte.  `_fill_raw(1)` was a
+  no-op (buffer already had 1 byte), so the loop never progressed.
+  Fix: `_fill_raw(2)` to force reading at least one more byte.
+- **Secondary bug**: `read(size)` called `_fill_ubx(size)`, forcing
+  accumulation of `size` bytes across multiple UBX frames.  For RAWX
+  payloads (~1500 bytes), this meant reading ~30 small frames on 15-byte
+  I2C delivery, stalling for seconds.  Fix: return buffered data or one
+  frame, matching socket `read()` semantics pyubx2 expects.
+- Tested: 11 RAWX/15s continuous on ocxo; 59 epochs/60s on TimeHat.
 
-### TICC lock leak fixed
-- Ticc.__enter__ leaked flock when wait_for_boot failed mid-boot
-- Wrapped entire __enter__ in try/except for guaranteed lock release
-- Added dsrdtr=False to primary serial open path
+### peppar-fix wrapper: --baud '' fix
+- Wrapper passed `--baud ""` to phc_bootstrap.py on kernel GNSS devices
+  (where BAUD is intentionally empty).  Fixed both bootstrap invocations.
 
-### NTRIP caster tested on PiPuss
-- Standalone caster works: MSM4 + 1005, clients connect and parse
-- Architecture gap: caster sends observations, not ephemeris
-- Spec written for SFRBX-to-RTCM encoding (docs/caster-ephemeris.md)
-- mDNS discovery spec written (docs/ntrip-mdns-discovery.md)
-- NtripStream.close() bug fixed
+## 4-hour TDEV runs in progress
 
-### Cold boot wrapper fix
-- peppar-fix wrapper now creates position.json from known_pos when
-  the file doesn't exist (was failing PHC bootstrap)
+Started ~04:55 UTC (23:55 CDT):
 
-### E810 ice driver I2C write investigation
-- **Root cause found**: streaming patch polls I2C every 20ms, starving
-  the write path. Stock driver (100ms gap) has working writes.
-- Stock driver restored on ocxo to enable receiver configuration
-- Patch needs write-yield logic: skip a read cycle when write is pending
+### TimeHat
+- PID 5342, duration 14400s (~4h)
+- Servo log: `data/tdev-4h-20260328-0053.csv`
+- TICC log: `data/ticc-4h-20260328-0053.csv`
+- Engine log: `data/peppar-4h-20260328-0053.log`
+- At 360 epochs (~6 min): PPS+PPP error -5.3 µs, gain 0.50x
+- Expected completion: ~05:00 CDT
 
-### Other fixes
-- Serial exclusive lock fallback (TIOCEXCL → non-exclusive)
-- 100% CPU spin fix: raw byte ACK scan instead of pyubx2 deserialization
-- KernelGnssStream: blocking I/O (removed O_NONBLOCK)
-- Hostname oxco → ocxo everywhere (including the actual host)
-- Renamed phc-initialization.md → phc-bootstrap.md
-- Private timelab repo created (github.com/bobvan/timelab)
-- First sync of timelab/ public slice to PePPAR-Fix
+### ocxo
+- PID 15493, duration 14400s (~4h)
+- Servo log: `data/tdev-4h-20260328-0455.csv`
+- TICC log: `data/ticc-4h-20260328-0455.csv`
+- Engine log: `data/peppar-4h-20260328-0455.log`
+- At 60 epochs (~4 min): TICC reader started, servo active
+- Expected completion: ~05:00 CDT
+- TICC #3 on /dev/ticc3, only chA wired
 
-## TDEV results (TimeHat, 1-hour run)
+## Commits (not yet pushed)
 
-| tau | TICC TDEV | PHC TDEV |
-|-----|-----------|----------|
-| 1s  | 3.2 ns    | 3.9 ns   |
-| 10s | 215 ns    | 220 ns   |
-| 100s| 6.4 µs   | 8.6 µs   |
-| 300s| 3.0 µs   | 3.5 µs   |
-
-TICC converged state (last 1000 samples): mean=24 ns, stdev=54 ns.
-Disciplined PHC tracks F9T PPS within ±12.5 ns (1σ) as measured by TICC.
+```
+c39838e Add I2C write-yield to ice GNSS streaming patch, fix --baud for kernel GNSS
+649e723 Fix KernelGnssStream spin loop and read over-buffering on E810
+```
 
 ## Current host state
 
 ### TimeHat
-- Last 1-hour run completed cleanly (3599 epochs, TICC data collected)
-- PEROUT working via bootstrap (igc period/2 compensation)
-- TICC #1 at /dev/ticc1, both chA and chB recording
-- ModemManager disabled (was locking serial port after reboot)
-- phc-pps-out.service disabled (PEROUT now in bootstrap)
+- Running 4-hour TDEV collection
+- TICC #1 at /dev/ticc1, both channels
+- Serial F9T on /dev/gnss-top (USB)
 
 ### ocxo
-- Rebooting with stock ice driver (I2C writes restored)
-- Hostname changed from oxco to ocxo
-- TICC #3 at /dev/ticc3, only chA wired (no signal — needs PEROUT or PPS routing)
-- Patched driver backed up at /home/bob/ice-intree-patch/
+- Running 4-hour TDEV collection
+- Patched ice driver with write-yield (initramfs updated)
+- TICC #3 at /dev/ticc3, only chA wired
+- Kernel GNSS on /dev/gnss0 (I2C, streaming patch)
 
-### PiPuss
-- Running latest code from git pull
-- NTRIP caster may still be running (port 2102)
-- No PHC (no discipline, caster-only role)
+## What to do next
 
-## What to do next (priority order)
+### 1. Check 4-hour run results
+Pull servo and TICC CSV logs from both hosts.  Compute TDEV at
+tau=1s, 10s, 100s, 300s, 1000s.  Compare TimeHat (i226) vs ocxo (E810).
+The E810 is the first full servo run — expect worse TDEV at short tau
+due to the bimodal clock_settime latency (±2 ms step error vs ±10 µs
+on i226).
 
-### 1. Fix ice-gnss streaming patch for I2C write coexistence
-The streaming patch needs to yield the I2C bus when a write is pending.
-Check in the read work function: if gnss_serial has pending write data,
-increase the delay or skip one read cycle.  This restores both streaming
-reads AND working writes.
+### 2. Push commits
+Two commits on main, not yet pushed to origin.
 
-### 2. E810 2-minute test run
-Once writes work with the patched driver (or with stock driver after
-reboot), run the 2-minute test to verify I2C delivery rate and TICC
-on ocxo.  The TICC chA needs a PPS source — either configure E810
-PEROUT or verify the F9T PPS routing to the SMA connector.
+### 3. E810 servo tuning
+The 2-minute test showed the servo converging slowly on E810
+(655 µs error at epoch 30).  May need more aggressive Kp during the
+initial convergence period, or the glide slope from PHC bootstrap
+isn't landing close enough.
 
-### 3. Longer stability runs
-The 1-hour TimeHat TDEV data is good but the servo oscillation
-(tau=10-100s peak) could improve with further gain tuning.  A 4-hour
-run would give meaningful TDEV at tau=1000s+.
-
-### 4. SFRBX-to-RTCM ephemeris encoding
-Spec is written (docs/caster-ephemeris.md).  Phase 1 (GPS 1019,
-~200 lines) would make the PiPuss caster self-sufficient for peer
-bootstrap without the Australian NTRIP service.
-
-## Key files changed
-
-| File | Changes |
-|------|---------|
-| scripts/phc_bootstrap.py | Optimal stopping, glide slope, PPS freq measurement, PEROUT |
-| scripts/peppar_fix/ptp_device.py | enable_perout/disable_perout, optimal_stop mode, igc period/2 fix |
-| scripts/peppar_fix/gnss_stream.py | Blocking I/O, read_raw() for ACK scan |
-| scripts/peppar_fix/receiver.py | Raw byte ACK scan, no-sleep loops |
-| scripts/peppar_fix/servo.py | (unchanged) |
-| scripts/peppar-fix | known_pos→position.json, PEROUT restart removed |
-| scripts/ticc.py | Lock leak fix, dsrdtr=False |
-| scripts/ntrip_client.py | close() alias |
-| config/receivers.toml | Kp tuning, glide_zeta, search_time_s, pps_out_pin, track_max_ppb |
-| docs/phc-bootstrap.md | Full rewrite documenting implemented design |
-| docs/caster-ephemeris.md | NEW: SFRBX-to-RTCM spec |
-| docs/ntrip-mdns-discovery.md | NEW: mDNS discovery spec |
-| docs/platform-support.md | initramfs requirement, oxco→ocxo |
-| drivers/ice-gnss-streaming/README.md | initramfs documentation |
+### 4. ocxo TICC #3 signal routing
+Only chA is wired.  Need to route either PEROUT (E810 PHC PPS OUT)
+or F9T raw PPS to SMA for TICC chA, and the other to chB for
+a reference.  Currently no PEROUT configured on E810 (unlike TimeHat).
