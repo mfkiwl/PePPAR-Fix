@@ -441,11 +441,17 @@ def configure_gps_l5_health(ser, ubr):
 def configure_rate(ser, ubr, rate_hz):
     """Set measurement and navigation rate."""
     meas_ms = int(1000 / rate_hz)
+    return configure_rate_ms(ser, ubr, meas_ms)
+
+
+def configure_rate_ms(ser, ubr, meas_ms):
+    """Set measurement rate in milliseconds."""
+    rate_hz = 1000 / meas_ms
     return send_cfg(ser, ubr, {
         "CFG_RATE_MEAS": meas_ms,
         "CFG_RATE_NAV": 1,
         "CFG_RATE_TIMEREF": 0,
-    }, f"Measurement rate = {rate_hz} Hz ({meas_ms} ms)")
+    }, f"Measurement rate = {rate_hz:.1f} Hz ({meas_ms} ms)")
 
 
 def configure_messages(ser, ubr, port_id, minimal=False):
@@ -759,7 +765,8 @@ def _detect_second_freq(sig_ids_seen):
 
 
 def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
-                          timeout_s=10, minimal_messages=False):
+                          timeout_s=10, minimal_messages=False,
+                          measurement_rate_ms=1000):
     """Check that dual-frequency observations are arriving; reconfigure if not.
 
     This is the single entry point for receiver readiness. It:
@@ -847,7 +854,8 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
     else:
         log.info("L2C driver — no L5 health override needed")
 
-    # Enable required messages on the correct port
+    # Set measurement rate and enable required messages on the correct port
+    configure_rate_ms(ser, ubr, measurement_rate_ms)
     configure_messages(ser, ubr, pid, minimal=minimal_messages)
     configure_nmea_off(ser, ubr, pid)
     ser.close()

@@ -309,6 +309,8 @@ def apply_ptp_profile(args):
         args.scheduler_unconverge_factor = profile.get(
             "scheduler_unconverge_factor", args.scheduler_unconverge_factor
         )
+    if getattr(args, 'measurement_rate_ms', None) is None:
+        args.measurement_rate_ms = profile.get("measurement_rate_ms", None)
 
 
 def apply_ticc_drive_defaults(args):
@@ -2066,7 +2068,8 @@ def run(args):
     _is_kernel_gnss = _base.startswith("gnss") and _base[4:].isdigit()
     driver = ensure_receiver_ready(args.serial, args.baud, port_type=port_type,
                                    systems=systems_for_check,
-                                   minimal_messages=_is_kernel_gnss)
+                                   minimal_messages=_is_kernel_gnss,
+                                   measurement_rate_ms=args.measurement_rate_ms)
     if driver is None:
         driver = get_driver(args.receiver)
         log.warning("Receiver check failed — falling back to %s (may lack dual-freq)",
@@ -2296,6 +2299,8 @@ Two-phase operation:
     serial.add_argument("--port-type", default="USB",
                         choices=["UART", "UART2", "USB", "SPI", "I2C"],
                         help="Receiver port type for UBX message routing (default: USB)")
+    serial.add_argument("--measurement-rate-ms", type=int, default=None,
+                        help="F9T measurement rate in ms (profile default: 1000 for i226, 2000 for E810)")
 
     # GNSS
     gnss = ap.add_argument_group("GNSS")
@@ -2468,6 +2473,8 @@ Two-phase operation:
         args.max_ssr_age_s = 30.0
     if args.min_correlation_confidence is None:
         args.min_correlation_confidence = 0.5
+    if getattr(args, 'measurement_rate_ms', None) is None:
+        args.measurement_rate_ms = 1000
     if args.track_restep_ns is None:
         args.track_restep_ns = 100_000.0
     if args.phase_step_bias_ns is None:
