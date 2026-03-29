@@ -4,6 +4,14 @@ You are working on PePPAR Fix, a GNSS-disciplined precision clock system.
 This file contains hard-won operational knowledge. Read it before writing
 code or touching lab hardware.
 
+## Lab Test Protocol
+
+PePPAR Fix is implemented as component scripts that can be run directly from the CLI, but
+users would be unlikely to run them individually. They are normally invoked by the orchestration
+wrapper in scripts/peppar-fix. That's over 500 lines of code that should be tested whenever
+possible. Always prefer testing using the wrapper as a user would, but it's ok to
+run components individually for diagnosis or troubleshooting.
+
 ## Lab Hosts and Access
 
 All lab hosts are Raspberry Pis or similar SBCs. SSH access is

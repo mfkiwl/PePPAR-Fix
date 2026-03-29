@@ -105,6 +105,19 @@ class RunningVarianceWindow:
         residuals = [v - (slope * t + intercept) for t, v in zip(ts, values)]
         return float(pvariance(residuals))
 
+    def diff_variance(self):
+        """Variance of first-differences: var(x[n] - x[n-1]).
+
+        Immune to linear drift, quadratic glide, or any smooth trend —
+        only measures the epoch-to-epoch jitter.
+        """
+        n = len(self._values)
+        if n < 3:
+            return None
+        values = list(self._values)
+        diffs = [values[i] - values[i - 1] for i in range(1, n)]
+        return float(pvariance(diffs))
+
     def count(self):
         return len(self._values)
 
@@ -1256,7 +1269,7 @@ def _setup_servo(args, known_ecef, qerr_store):
             'pps_confidence', 'pps_estimator_residual_s', 'match_confidence',
             'broadcast_confidence', 'ssr_confidence',
             'dt_rx_ns', 'dt_rx_sigma_ns', 'pps_error_ns', 'qerr_ns',
-            'qerr_age_s', 'qerr_tow_delta_ms', 'ticc_diff_ns', 'ticc_age_s',
+            'qerr_offset_s', 'ticc_diff_ns', 'ticc_age_s',
             'ticc_confidence', 'pps_var_ns2',
             'pps_qerr_plus_var_ns2', 'pps_qerr_plus_ratio',
             'pps_qerr_minus_var_ns2', 'pps_qerr_minus_ratio',
@@ -1518,7 +1531,10 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     timescale_error_ns = epoch_offset * 1_000_000_000 + pps_error_ns
     pps_queue_depth = pps_queue.qsize()
 
-    qerr_ns, _qerr_tow_ms, qerr_age_s, qerr_tow_delta_ms = qerr_store.match_gps_time(gps_time)
+    # Match qErr to this PPS edge by host monotonic time.  TIM-TP
+    # arrives ~900 ms before the PPS it describes; correlating by
+    # monotonic clock avoids all GPS TOW / receiver clock bias issues.
+    qerr_ns, qerr_offset_s = qerr_store.match_pps_mono(pps_event.recv_mono)
     ticc_diff_ns = None
     ticc_age_s = None
     ticc_confidence = None
@@ -1531,34 +1547,28 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             ticc_age_s = max(0.0, time.monotonic() - ticc_measurement.recv_mono)
             ticc_confidence = ticc_measurement.confidence
     if qerr_ns is None and n_epochs % 10 == 0:
-        qdbg = qerr_store.debug_match_gps_time(gps_time)
-        log.info(
-            "  [%s] qErr match miss: samples=%s target_tow_ms=%s latest_tow_ms=%s "
-            "latest_age=%.3fs best_tow_ms=%s best_delta_ms=%s",
-            n_epochs,
-            qdbg["sample_count"],
-            qdbg["target_tow_ms"],
-            qdbg["latest_tow_ms"],
-            qdbg["latest_age_s"] if qdbg["latest_age_s"] is not None else -1.0,
-            qdbg["best_tow_ms"],
-            qdbg["best_tow_delta_ms"],
-        )
+        log.info("  [%s] qErr match miss (mono)", n_epochs)
     elif qerr_ns is not None and n_epochs % 10 == 0:
         log.info(
-            "  [%s] qErr match ok: tow_ms=%s delta_ms=%s age=%.3fs qerr=%+.1fns",
+            "  [%s] qErr match ok: offset=%.3fs qerr=%+.1fns",
             n_epochs,
-            _qerr_tow_ms,
-            qerr_tow_delta_ms,
-            qerr_age_s if qerr_age_s is not None else -1.0,
+            qerr_offset_s if qerr_offset_s is not None else -1.0,
             qerr_ns,
         )
-    qerr_alignment["pps_var"].add(pps_error_ns)
-    pps_var_ns2 = qerr_alignment["pps_var"].detrended_variance()
+    # qErr litmus: subtract the known PHC rate (adjfine) so the residual
+    # is pure PPS jitter, then use first-difference variance.  This works
+    # identically whether the servo is pulling in, tracking, or idle.
+    # adjfine_ppb * 1s = ns of expected phase change per epoch.
+    cum_adj = qerr_alignment.get("cumulative_adjfine_ns", 0.0)
+    rate_compensated = pps_error_ns - cum_adj
+    qerr_alignment["cumulative_adjfine_ns"] = cum_adj + ctx['adjfine_ppb']
+    qerr_alignment["pps_var"].add(rate_compensated)
     if qerr_ns is not None:
-        qerr_alignment["pps_qerr_plus_var"].add(pps_error_ns + qerr_ns)
-        qerr_alignment["pps_qerr_minus_var"].add(pps_error_ns - qerr_ns)
-    pps_qerr_plus_var_ns2 = qerr_alignment["pps_qerr_plus_var"].detrended_variance()
-    pps_qerr_minus_var_ns2 = qerr_alignment["pps_qerr_minus_var"].detrended_variance()
+        qerr_alignment["pps_qerr_plus_var"].add(rate_compensated + qerr_ns)
+        qerr_alignment["pps_qerr_minus_var"].add(rate_compensated - qerr_ns)
+    pps_var_ns2 = qerr_alignment["pps_var"].diff_variance()
+    pps_qerr_plus_var_ns2 = qerr_alignment["pps_qerr_plus_var"].diff_variance()
+    pps_qerr_minus_var_ns2 = qerr_alignment["pps_qerr_minus_var"].diff_variance()
     qerr_plus_ratio = None
     qerr_minus_ratio = None
     if (
@@ -1575,49 +1585,12 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         qerr_minus_ratio = pps_var_ns2 / pps_qerr_minus_var_ns2
     if n_epochs % 10 == 0:
         if qerr_plus_ratio is not None and qerr_alignment["pps_qerr_plus_var"].count() >= 8:
-            if qerr_plus_ratio >= 5.0:
-                log.info(
-                    "  [%s] qErr litmus (+): raw PPS variance is %.3fx PPS+qErr variance "
-                    "(excellent alignment)",
-                    n_epochs,
-                    qerr_plus_ratio,
-                )
-            elif qerr_plus_ratio >= 2.0:
-                log.info(
-                    "  [%s] qErr litmus (+): raw PPS variance is %.3fx PPS+qErr variance "
-                    "(good alignment)",
-                    n_epochs,
-                    qerr_plus_ratio,
-                )
-            elif qerr_plus_ratio < 1.0:
-                log.warning(
-                    "  [%s] qErr litmus (+): raw PPS variance is only %.3fx PPS+qErr variance "
-                    "(suspicious alignment)",
-                    n_epochs,
-                    qerr_plus_ratio,
-                )
-        if qerr_minus_ratio is not None and qerr_alignment["pps_qerr_minus_var"].count() >= 8:
-            if qerr_minus_ratio >= 5.0:
-                log.info(
-                    "  [%s] qErr litmus (-): raw PPS variance is %.3fx PPS-qErr variance "
-                    "(excellent alignment)",
-                    n_epochs,
-                    qerr_minus_ratio,
-                )
-            elif qerr_minus_ratio >= 2.0:
-                log.info(
-                    "  [%s] qErr litmus (-): raw PPS variance is %.3fx PPS-qErr variance "
-                    "(good alignment)",
-                    n_epochs,
-                    qerr_minus_ratio,
-                )
-            elif qerr_minus_ratio < 1.0:
-                log.warning(
-                    "  [%s] qErr litmus (-): raw PPS variance is only %.3fx PPS-qErr variance "
-                    "(suspicious alignment)",
-                    n_epochs,
-                    qerr_minus_ratio,
-                )
+            label = ("good" if qerr_plus_ratio >= 1.5
+                     else "ok" if qerr_plus_ratio >= 1.0
+                     else "BAD")
+            lvl = log.info if qerr_plus_ratio >= 1.0 else log.warning
+            lvl("  [%s] qErr litmus: Δvar(pps)/Δvar(pps+qErr) = %.2f (%s)",
+                n_epochs, qerr_plus_ratio, label)
 
     if args.ticc_drive:
         if ticc_diff_ns is None:
@@ -1814,7 +1787,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                phc_rounded_sec, epoch_offset, timescale_error_ns,
                extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
                obs_event, pps_event, _match_confidence, corr_snapshot,
-               dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, qerr_age_s, qerr_tow_delta_ms,
+               dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, qerr_offset_s,
                ticc_diff_ns, ticc_age_s, ticc_confidence,
                pps_var_ns2, pps_qerr_plus_var_ns2, qerr_plus_ratio,
                pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
@@ -1828,7 +1801,7 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
                phc_rounded_sec, epoch_offset_s, timescale_error_ns,
                extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
                obs_event, pps_event, match_confidence, corr_snapshot,
-               dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, qerr_age_s, qerr_tow_delta_ms,
+               dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, qerr_offset_s,
                ticc_diff_ns, ticc_age_s, ticc_confidence,
                pps_var_ns2, pps_qerr_plus_var_ns2, qerr_plus_ratio,
                pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
@@ -1860,8 +1833,7 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
         f'{ssr_confidence:.3f}' if ssr_confidence is not None else '',
         f'{dt_rx_ns:.3f}', f'{dt_rx_sigma:.3f}',
         f'{pps_error_ns:.1f}', f'{qerr_ns:.3f}' if qerr_ns is not None else '',
-        f'{qerr_age_s:.3f}' if qerr_age_s is not None else '',
-        f'{qerr_tow_delta_ms:.0f}' if qerr_tow_delta_ms is not None else '',
+        f'{qerr_offset_s:.3f}' if qerr_offset_s is not None else '',
         f'{ticc_diff_ns:.3f}' if ticc_diff_ns is not None else '',
         f'{ticc_age_s:.3f}' if ticc_age_s is not None else '',
         f'{ticc_confidence:.3f}' if ticc_confidence is not None else '',

@@ -204,13 +204,41 @@ class QErrStore:
                 return None, None, None
             return latest["qerr_ns"], latest["tow_ms"], age_s
 
+    def match_pps_mono(self, pps_recv_mono, expected_offset_s=0.9,
+                       tolerance_s=0.2, max_age_s=5.0):
+        """Match qErr to a PPS edge by host monotonic time.
+
+        TIM-TP describes the *next* timepulse and arrives ~900 ms before
+        the PPS edge it describes.  This correlates them solely by host
+        clock, independent of GPS TOW, receiver clock bias, or servo
+        state.
+
+        Returns ``(qerr_ns, offset_s)`` or ``(None, None)`` when no
+        sample falls within the tolerance window.
+        """
+        with self._lock:
+            best = None
+            for sample in reversed(self._samples):
+                age_s = pps_recv_mono - sample["host_time"]
+                if age_s > max_age_s:
+                    break  # oldest-first insertion; older won't match
+                offset_err = abs(age_s - expected_offset_s)
+                if offset_err > tolerance_s:
+                    continue
+                if best is None or offset_err < best[0]:
+                    best = (offset_err, sample, age_s)
+            if best is None:
+                return None, None
+            _, sample, offset_s = best
+            return sample["qerr_ns"], offset_s
+
     def match_gps_time(self, gps_time, max_age_s=30.0, max_tow_delta_ms=1000):
         """Return qErr matched to the GNSS epoch second.
 
-        TIM-TP describes the timing of the next timepulse. RXM-RAWX arrives
-        near the end of the current second, so the qErr relevant to the PPS
-        edge aligned with a RAWX epoch is the most recent TIM-TP sample whose
-        `towMS` matches the RAWX epoch rounded to the nearest second.
+        TIM-TP describes the timing of the *next* timepulse, so its towMS
+        is 1 second ahead of the current epoch.  RAWX rcvTow includes
+        receiver clock bias (~-10 ms on TimeHat), placing it just below
+        the true integer second — round() recovers the correct second.
 
         Returns `(qerr_ns, tow_ms, age_s, tow_delta_ms)` or Nones when no
         sufficiently fresh, close TIM-TP sample is available.
