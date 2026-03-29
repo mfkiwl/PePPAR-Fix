@@ -1,0 +1,98 @@
+To: intel-wired-lan@lists.osuosl.org
+Cc: anthony.l.nguyen@intel.com, netdev@vger.kernel.org
+Subject: [PATCH] igc: fix Tx timestamp timeout caused by unlocked TIMINCA write in adjfine
+
+Hi,
+
+We found a race in igc_ptp_adjfine_i225() that causes "Tx timestamp
+timeout" errors and eventually wedges EXTTS when a PTP grandmaster
+(ptp4l with hardware timestamping) runs concurrently with PHC
+frequency discipline (any GPSDO calling clock_adjtime ADJ_FREQUENCY).
+
+Root cause: igc_ptp_adjfine_i225() writes IGC_TIMINCA without holding
+any lock.  Every other PTP clock operation in igc_ptp.c (adjtime,
+gettime, settime) holds tmreg_lock, but adjfine does not.  When the
+increment rate changes while the hardware is capturing a TX timestamp,
+the captured value is corrupt.  The driver retries for
+IGC_PTP_TX_TIMEOUT (15s), then logs the timeout and frees the skb.
+Repeated occurrences eventually prevent EXTTS from delivering events.
+
+Reproducer (triggers in ~17 seconds on i226):
+
+  One thread calling clock_adjtime(ADJ_FREQUENCY) at ~200k/s on the
+  PHC, another sending UDP packets with SO_TIMESTAMPING requesting
+  hardware TX timestamps at ~100k/s.  A Python reproducer is at:
+  https://github.com/bobvan/PePPAR-Fix/blob/main/tools/igc_tx_timeout_repro.py
+
+  At realistic rates (1 Hz adjfine from a GPSDO + ptp4l at 128 Hz
+  sync), the race triggers in ~30 minutes.
+
+The attached patch holds ptp_tx_lock around the TIMINCA write and
+skips the write if any TX timestamps are pending (tx_tstamp[i].skb
+!= NULL), returning -EBUSY.  This doesn't fully close the hardware
+race (a new TX capture can start between the check and the write),
+but at realistic rates the residual probability gives ~25 year MTBF
+vs ~30 minutes without the patch.
+
+A complete fix would likely require either disabling TX timestamping
+around TIMINCA writes (via TSYNCTXCTL), or making the timeout recovery
+path more robust so a single corrupt timestamp doesn't wedge the
+subsystem.  We'd welcome guidance from the igc maintainers on the
+preferred approach.
+
+Tested on:
+  - Intel i226 (TimeHAT board on Raspberry Pi 5)
+  - Kernel 6.12.62+rpt-rpi-2712 (Raspberry Pi OS)
+  - Intel out-of-tree igc driver 5.4.0-7642.46
+  - Stock upstream igc_ptp.c (same code, same bug)
+
+Thanks,
+Bob Van Valzah
+
+---
+
+ drivers/net/ethernet/intel/igc/igc_ptp.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/igc/igc_ptp.c b/drivers/net/ethernet/intel/igc/igc_ptp.c
+index XXXXXXX..XXXXXXX 100644
+--- a/drivers/net/ethernet/intel/igc/igc_ptp.c
++++ b/drivers/net/ethernet/intel/igc/igc_ptp.c
+@@ -47,8 +47,10 @@ static int igc_ptp_adjfine_i225(struct ptp_clock_info *ptp, long scaled_ppm)
+ {
+ 	struct igc_adapter *igc = container_of(ptp, struct igc_adapter,
+ 					       ptp_caps);
+ 	struct igc_hw *hw = &igc->hw;
++	unsigned long flags;
+ 	int neg_adj = 0;
+ 	u64 rate;
+ 	u32 inca;
++	int i;
+
+ 	if (scaled_ppm < 0) {
+ 		neg_adj = 1;
+@@ -63,7 +65,21 @@ static int igc_ptp_adjfine_i225(struct ptp_clock_info *ptp, long scaled_ppm)
+ 	if (neg_adj)
+ 		inca |= ISGN;
+
+-	wr32(IGC_TIMINCA, inca);
++	/* Changing the clock increment rate while a TX timestamp is being
++	 * captured by the hardware can corrupt the timestamp, causing the
++	 * driver to report "Tx timestamp timeout" and eventually wedging
++	 * the EXTTS subsystem.  Serialize with pending TX timestamps:
++	 * skip the rate change if any are in flight.
++	 */
++	spin_lock_irqsave(&igc->ptp_tx_lock, flags);
++	for (i = 0; i < IGC_MAX_TX_TSTAMP_REGS; i++) {
++		if (igc->tx_tstamp[i].skb) {
++			spin_unlock_irqrestore(&igc->ptp_tx_lock, flags);
++			return -EBUSY;
++		}
++	}
++	wr32(IGC_TIMINCA, inca);
++	spin_unlock_irqrestore(&igc->ptp_tx_lock, flags);
+
+ 	return 0;
+ }
+--
+2.39.2
