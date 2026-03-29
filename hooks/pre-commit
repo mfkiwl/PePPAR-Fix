@@ -19,8 +19,7 @@ EXEMPT='ntrip.conf.example|hooks/pre-commit'
 FOUND=0
 for pattern in "${PATTERNS[@]}"; do
     # Scan only staged (added/modified) file content
-    matches=$(git diff --cached --diff-filter=ACMR -U0 -- \
-        ':!*.pyc' ':!__pycache__' \
+    matches=$(git diff --cached --diff-filter=ACMR -U0 \
         | grep -E "^\+" \
         | grep -v "^+++" \
         | grep -Ev "$EXEMPT" \
