@@ -1,90 +1,99 @@
-# Session Handoff — 2026-03-28 (afternoon)
+# Session Handoff — 2026-03-29 (overnight)
 
-E810 I2C bandwidth investigation, SFRBX config, consumption sanity check.
+Major session: ADJ_SETOFFSET discovery, igc driver bug, PEROUT on E810.
 
 ## What was accomplished
 
-### E810 AQ I2C bandwidth limit — root cause found
-- The E810 Admin Queue limits I2C reads to **15 bytes per command**
-  (hardware: `ICE_AQC_I2C_DATA_SIZE_M = GENMASK(3,0)`, 4-bit field).
-- Each AQ command takes ~2.8ms, giving ~5.3 kB/s burst but ~1.6 kB/s
-  sustained throughput after polling gaps.
-- With all UBX messages enabled, F9T generates ~2.2 kB/s — 2x over-
-  subscribed.  The F9T's I2C buffer overflows, shedding ~35% of RAWX.
-- The overnight run's observation queue grew from `recv_dt=1.7` to 10+
-  seconds in 14 epochs, then hit the 11s correlation window limit.
+### ADJ_SETOFFSET for PHC stepping
+- Discovered ADJ_SETOFFSET gives **±2 ns precision on E810** and
+  **±2 µs on i226** — 10,000x better than clock_settime.
+- E810 bimodality was entirely in the clock_settime path.  Gone with
+  ADJ_SETOFFSET.  No lag compensation needed.
+- Now the default PHC step method.  Optimal stopping clock_settime
+  retained as automatic fallback.
+- phc_step_threshold_ns reduced to 10 µs on E810 (was 2 ms).
 
-### Resolution: stock driver + SFRBX disabled + 0.5 Hz
-- **No custom driver patch needed.** Stock ice driver is sufficient when
-  I2C bandwidth is managed.  The streaming patch is retained for reference.
-- `sfrbx_rate = 0` on E810 (disabled — ephemeris from NTRIP).  SFRBX
-  consumed ~400 B/s (25% of bus), was redundant with NTRIP.
-- `measurement_rate_ms = 2000` on E810 (0.5 Hz).  At 1 Hz, RAWX alone
-  (~1.5 kB/s) still saturates the bus (~10% loss).  0.5 Hz is lossless.
-- Every servo epoch gets the full PPS+qErr+PPP stack.  Intervening 1 Hz
-  PPS events are pruned by the correlation gate.
-- TimeHat unchanged: 1 Hz, sfrbx_rate=1, all messages.
+### igc driver TX timestamp race bug
+- **Root cause**: igc_ptp_adjfine_i225() writes IGC_TIMINCA without
+  any lock, racing with hardware TX timestamp capture when ptp4l sends
+  sync packets.  At 128 Hz sync: ~30 min MTBF.
+- **Reproducer**: tools/igc_tx_timeout_repro.py triggers in 17 seconds.
+- **Fix**: defer TIMINCA write when TX timestamps pending.  Extends
+  stress MTBF from 17s to 43s, real-world to ~25 years.  Applied via
+  DKMS on TimeHat.
+- **EBUSY retry**: adjfine() now retries up to 50 times on EBUSY from
+  the patched driver.
+- **Workaround**: lowered ptp4l logSyncInterval from -7 (128 Hz) to 0
+  (1 Hz) on TimeHat.
+- **Upstream**: email sent to intel-wired-lan with patch and reproducer.
 
-### KernelGnssStream fixes (from overnight)
-- Spin loop: `_fill_raw(1)` was no-op when buffer had lone `0xB5`.
-  Fix: `_fill_raw(2)`.
-- Over-buffering: `read(size)` forced `_fill_ubx(size)`, accumulating
-  many frames.  Fix: return buffered data or one frame.
+### E810 PEROUT via sysfs
+- ice driver rejects PTP_PIN_SETFUNC ioctl but accepts sysfs writes
+  to /sys/class/ptp/ptpN/pins/SMA1.
+- Bootstrap now auto-programs SMA1 for PEROUT via sysfs fallback.
+- udev rule deployed on ocxo for dialout group write access.
+- TICC #3 chA now records E810 disciplined PPS at 1 Hz.
 
-### Consumption rate sanity check
-- Tracks `recv_dt_s` over 30 correlated epochs.  If growth > 3s, fires
-  CONSUMPTION RATE ALARM and degrades clockClass to freerun.
-- Tested: fires on E810 at 1 Hz (0.87 Hz delivery), does NOT fire on
-  TimeHat or E810 at 0.5 Hz.
+### Correlation gate fix
+- recv_dt-first sort prevents observation drops from rounded_sec
+  zero-crossing.  gate_wait_obs: 11% → 0.03% in verification run.
+- Some residual drops at 6% over the overnight run — the fix helps
+  but doesn't fully eliminate the fundamental epoch_offset=-1 issue.
 
-### Documentation
-- `docs/platform-support.md` updated with AQ bandwidth findings, SFRBX
-  consequences, stock driver recommendation, TICC/PPS routing notes.
+### Receiver initialization unified
+- peppar_ensure_receiver.py replaces peppar_rx_config.py in wrapper.
+- Single entry point: dual-freq check + signal config + L5 health +
+  warm restart + message routing + rate config.
+- Detected driver name flows to peppar_find_position.py via --receiver.
+- PTP_DEV no longer defaults to /dev/ptp0 — must be explicit.
 
-## 4-hour stability runs in progress
+### Position repeatability (PiPuss)
+- 10/10 cold-start runs converged (30 min each, ~5 hours total).
+- Scatter (1σ): N=28.7m, E=13.9m, **U=46.7m**
+- Mean altitude: 189m (vs ~200m truth)
+- This is the PPP broadcast ephemeris baseline for PPP-AR comparison.
 
-Started ~17:03 UTC (12:03 CDT):
+### Credentials cleaned up
+- NTRIP password removed from CLAUDE.md.
+- Pre-commit hook scans for credential patterns.
 
-### TimeHat
-- PID 6526, duration 14400s
-- 1 Hz, sfrbx_rate=1, TICC #1
-- Expected completion: ~21:03 UTC
+## Overnight data collected
+
+### TimeHat (still running)
+- peppar-overnight-20260328-2359: ~20k epochs, ~42k TICC samples
+- gate_wait_obs=1220 (~6% drop from epoch_offset=-1 issue)
+- ptp4l at 1 Hz sync (was 128 Hz — lowered for igc bug mitigation)
+- Should finish ~6:20 AM CDT
 
 ### ocxo
-- PID 23872, duration 14400s
-- 0.5 Hz, sfrbx_rate=0, stock ice driver, TICC #3 (chA only)
-- At epoch 70 (~2 min): PPS+PPP error +7.0 ns, adj +0.3 ppb (converged)
-- Expected completion: ~21:03 UTC
+- peppar-overnight-20260329-0344: 3993 epochs, 8525 TICC samples
+- Stopped at ~2.2 hours: POSITION WATCHDOG ALARM (vertical drift)
+- peppar-overnight2-20260329-0646: 941 epochs (restart, also watchdog)
+- The first run's data is usable for TDEV at tau up to ~1000s
 
-## Commits (not pushed)
+### PiPuss
+- data/pos-repeat-20260328-2255/summary.json — 10 converged positions
 
-```
-c39838e Add I2C write-yield to ice GNSS streaming patch, fix --baud for kernel GNSS
-649e723 Fix KernelGnssStream spin loop and read over-buffering on E810
-edfb80e Update session handoff for 2026-03-28 overnight
-ebd94fa Make SFRBX optional on E810 I2C, document AQ bandwidth limit
-3e7c32f Add consumption rate sanity check with clockClass degradation
-18ccbda Add measurement_rate_ms to PTP profiles: 1 Hz i226, 0.5 Hz E810
-215dded Replace minimal_messages with sfrbx_rate config knob
-b7bb303 Set E810 measurement rate to 2000ms (0.5 Hz lossless)
-```
+## Known issues to investigate
 
-## What to do next
+### epoch_offset = -1 (TimeHat)
+All epochs show epoch_offset=-1.  This is a systematic 1-second offset
+between target_sec and PPS rounded_sec, likely from leap second
+contamination in gps_time.timestamp().  The correlation gate handles
+it but the rounded_sec zero-crossing still drops ~6% of observations.
+Root fix: correct _target_timescale_sec or match by recv_dt only.
 
-### 1. Check 4-hour run results
-Both runs should complete ~21:03 UTC.  Pull CSV/TICC logs, compute TDEV.
-Compare TimeHat (1 Hz) vs ocxo (0.5 Hz).  ocxo showed +7 ns error at
-epoch 70 with 0.3 ppb adj — should converge well.
+### Position watchdog on ocxo
+The FixedPosFilter's position drifts enough to trigger the 100m
+watchdog after 2+ hours.  Likely the same vertical bias from
+uncompensated troposphere.  May need: larger watchdog threshold,
+troposphere state in the filter, or a known-position mode that
+bypasses the watchdog.
 
-### 2. Push commits
-8 commits on main, not yet pushed to origin.
+### TimeHat missing epochs
+1911/3600 consumed despite 0 gate drops in verification run.
+Unknown drop path — needs instrumentation.
 
-### 3. E810 PEROUT for TICC
-TICC #3 chA needs a PPS signal.  Configure E810 PEROUT on SMA so TICC
-can measure disciplined PHC PPS independently.
+## Commits pushed (since last handoff)
 
-### 4. PPS-driven servo loop (future)
-Currently the servo is observation-gated (runs only when RAWX arrives).
-A PPS-driven loop would allow 1 Hz PPS+qErr steering with 0.5 Hz PPP
-updates on E810.  Requires architecture change — the servo clock must
-move from observation-driven to PPS-driven.
+Latest: f488ca0 (Retry adjfine on EBUSY from patched igc driver)
