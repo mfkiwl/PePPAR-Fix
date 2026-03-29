@@ -1,0 +1,42 @@
+#!/bin/bash
+# Pre-commit hook: reject commits containing likely credentials.
+#
+# Install: cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Or:      cd .git/hooks && ln -sf ../../hooks/pre-commit
+
+set -euo pipefail
+
+# Patterns that should never appear in committed files.
+# Each is a grep -E regex tested against staged file content.
+PATTERNS=(
+    'password\s*=\s*[A-Za-z0-9!@#$%^&*]{6,}'   # password = <real value>
+    'maHxyc'                                      # known NTRIP password
+)
+
+# Files exempt from scanning (templates, docs about credential handling).
+EXEMPT='ntrip.conf.example|hooks/pre-commit'
+
+FOUND=0
+for pattern in "${PATTERNS[@]}"; do
+    # Scan only staged (added/modified) file content
+    matches=$(git diff --cached --diff-filter=ACMR -U0 -- \
+        ':!*.pyc' ':!__pycache__' \
+        | grep -E "^\+" \
+        | grep -v "^+++" \
+        | grep -Ev "$EXEMPT" \
+        | grep -Ei "$pattern" || true)
+    if [[ -n "$matches" ]]; then
+        echo "ERROR: Credential pattern detected in staged changes:"
+        echo "  Pattern: $pattern"
+        echo "$matches" | head -5 | sed 's/^/  /'
+        FOUND=1
+    fi
+done
+
+if [[ $FOUND -eq 1 ]]; then
+    echo ""
+    echo "Credentials must not be committed to the repo."
+    echo "Store them in ntrip.conf (gitignored) or deploy via scp."
+    echo "To bypass (if this is a false positive): git commit --no-verify"
+    exit 1
+fi

@@ -76,16 +76,15 @@ symlinks. Your code must identify them at runtime.
 
 NTRIP config file: `/home/bob/peppar-fix/ntrip.conf` on TimeHat.
 
-```ini
-[ntrip]
-caster = ntrip.data.gnss.ga.gov.au
-port = 443
-mount = SSRA00BKG0         # SSR corrections
-user = bobvan
-password = maHxyc!gebweb6
-tls = true
+Credentials are in `ntrip.conf` on each lab host (not committed to the repo).
+See `ntrip.conf.example` for the format.  To deploy credentials to a new host:
+
+```bash
+scp TimeHat:~/peppar-fix/ntrip.conf .
 ```
 
+Caster: `ntrip.data.gnss.ga.gov.au:443` (TLS).
+SSR mount: `SSRA00BKG0`.
 Broadcast ephemeris mount: `BCEP00BKG0` (same caster, pass via `--eph-mount`).
 
 **SSR status**: Orbit + clock + code bias available. **Phase bias = 0**
