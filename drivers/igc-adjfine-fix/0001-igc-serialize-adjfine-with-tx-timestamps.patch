@@ -1,0 +1,75 @@
+From: Bob Van Valzah <bob@vanvalzah.com>
+Subject: [PATCH] igc: serialize TIMINCA write with pending TX timestamps
+
+igc_ptp_adjfine_i225() writes IGC_TIMINCA without any synchronization.
+When ptp4l (or any PTP stack) sends hardware-timestamped packets while
+a clock discipline daemon adjusts the frequency, the TIMINCA change can
+race with the hardware's TX timestamp capture, producing a corrupt
+timestamp that the driver interprets as "not ready."  After
+IGC_PTP_TX_TIMEOUT (15s), the driver logs "Tx timestamp timeout" and
+eventually the EXTTS subsystem stops delivering PPS events.
+
+This is easily reproducible: one thread calling clock_adjtime
+(ADJ_FREQUENCY) at ~200k/s while another sends hardware-timestamped
+UDP packets at ~100k/s triggers the timeout within 17 seconds.  At
+realistic rates (1 adjfine/s + 128 sync/s), the race takes ~30 minutes
+to trigger.
+
+Every other PTP clock operation in igc_ptp.c (adjtime, gettime, settime)
+holds tmreg_lock, but adjfine does not.  However, the race is between
+TIMINCA and the TX timestamp capture hardware, not between software
+register accesses.  Adding tmreg_lock alone does not fix it.
+
+Fix: hold ptp_tx_lock around the TIMINCA write and skip the write if
+any TX timestamps are pending (tx_tstamp[i].skb != NULL).  This
+prevents the hardware from seeing a rate change while a timestamp is
+in flight.  Return -EBUSY so the PTP subsystem can retry.
+
+Under stress testing, this extends the time-to-failure from 17s to 43s.
+At realistic rates (1 Hz discipline + 128 Hz PTP sync), the residual
+race probability gives an estimated MTBF of ~25 years.
+
+Signed-off-by: Bob Van Valzah <bob@vanvalzah.com>
+---
+ drivers/net/ethernet/intel/igc/igc_ptp.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/igc/igc_ptp.c b/drivers/net/ethernet/intel/igc/igc_ptp.c
+--- a/drivers/net/ethernet/intel/igc/igc_ptp.c
++++ b/drivers/net/ethernet/intel/igc/igc_ptp.c
+@@ -47,8 +47,10 @@ static int igc_ptp_adjfine_i225(struct ptp_clock_info *ptp, long scaled_ppm)
+ {
+ 	struct igc_adapter *igc = container_of(ptp, struct igc_adapter,
+ 					       ptp_caps);
+ 	struct igc_hw *hw = &igc->hw;
++	unsigned long flags;
+ 	int neg_adj = 0;
+ 	u64 rate;
+ 	u32 inca;
++	int i;
+
+ 	if (scaled_ppm < 0) {
+ 		neg_adj = 1;
+@@ -63,7 +65,21 @@ static int igc_ptp_adjfine_i225(struct ptp_clock_info *ptp, long scaled_ppm)
+ 	if (neg_adj)
+ 		inca |= ISGN;
+
+-	wr32(IGC_TIMINCA, inca);
++	/* Changing the clock increment rate while a TX timestamp is being
++	 * captured by the hardware can corrupt the timestamp, causing the
++	 * driver to report "Tx timestamp timeout" and eventually wedging
++	 * the EXTTS subsystem.  Serialize with pending TX timestamps:
++	 * skip the rate change if any are in flight.
++	 */
++	spin_lock_irqsave(&igc->ptp_tx_lock, flags);
++	for (i = 0; i < IGC_MAX_TX_TSTAMP_REGS; i++) {
++		if (igc->tx_tstamp[i].skb) {
++			spin_unlock_irqrestore(&igc->ptp_tx_lock, flags);
++			return -EBUSY;
++		}
++	}
++	wr32(IGC_TIMINCA, inca);
++	spin_unlock_irqrestore(&igc->ptp_tx_lock, flags);
+
+ 	return 0;
+ }

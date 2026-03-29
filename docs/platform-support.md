@@ -107,6 +107,26 @@ Working:
   - `--receiver f9t-l5` is used
   - the PHC timescale is treated as `tai`
 
+Known issue — igc adjfine TX timestamp race:
+
+- The igc driver has a race between `adjfine()` (PHC frequency adjustment)
+  and hardware TX timestamping.  `igc_ptp_adjfine_i225()` writes the
+  `IGC_TIMINCA` register without any lock, which can corrupt an in-flight
+  TX timestamp, causing "Tx timestamp timeout" in dmesg and eventually
+  breaking EXTTS (PPS capture).
+- This is triggered by any PHC discipline software (peppar-fix, SatPulse)
+  running concurrently with ptp4l using `time_stamping hardware`.
+- At `logSyncInterval -7` (128 Hz), MTBF is ~30 minutes.
+  At `logSyncInterval 0` (1 Hz), MTBF is ~64 hours.
+- **Fix**: a patch in `drivers/igc-adjfine-fix/` serializes TIMINCA writes
+  with pending TX timestamps.  Applied via DKMS on TimeHat.
+  See `drivers/igc-adjfine-fix/README.md` for details.
+- **Recovery** (without patch): `sudo rmmod igc && sudo modprobe igc`
+  followed by SDP pin restore (`testptp -L 0,2 && testptp -L 1,1` or
+  equivalent `set_pin_function()` calls).
+- **Upstream**: bug is present in Linux master as of March 2026.
+  Reproducer: `tools/igc_tx_timeout_repro.py`.
+
 Current caveats:
 
 - `satpulse@ttyACM0.service` will occupy `/dev/ttyACM0` and prevent
