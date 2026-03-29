@@ -196,19 +196,26 @@ class PtpDevice:
 
     def adjfine(self, ppb):
         """Adjust PHC frequency by ppb (parts per billion)."""
+        import errno as errno_mod
         freq = int(ppb * 65.536)
         timex_size = 208
         buf = bytearray(timex_size)
         struct.pack_into('<I', buf, 0, ADJ_FREQUENCY)
         struct.pack_into('<q', buf, 16, freq)
-        ret = self._libc.clock_adjtime(
-            ctypes.c_int32(self.clock_id),
-            ctypes.c_char_p(bytes(buf)),
-        )
-        if ret < 0:
-            errno = ctypes.get_errno()
-            raise OSError(errno, f"clock_adjtime failed: {os.strerror(errno)}")
-        return ppb
+        # Retry on EBUSY — the patched igc driver returns EBUSY when
+        # adjfine races with a pending TX timestamp.
+        for _ in range(50):
+            ret = self._libc.clock_adjtime(
+                ctypes.c_int32(self.clock_id),
+                ctypes.c_char_p(bytes(buf)),
+            )
+            if ret >= 0:
+                return ppb
+            err = ctypes.get_errno()
+            if err != errno_mod.EBUSY:
+                raise OSError(err, f"clock_adjtime failed: {os.strerror(err)}")
+            time.sleep(0.0001)  # 100µs — TX timestamp completes in ~1ms
+        raise OSError(errno_mod.EBUSY, "clock_adjtime: EBUSY after 50 retries")
 
     def step_time(self, offset_ns):
         """Step the PHC by offset_ns nanoseconds using ADJ_SETOFFSET."""
