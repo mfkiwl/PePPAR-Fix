@@ -430,6 +430,11 @@ Desired host-side timing attached:
 - queue-remains indicator if available from the serial reader path
 - confidence estimate for TICC-boot time to host-monotonic mapping
 
+#### TICC open/reset discipline
+
+- All code paths now rely on the shared helper in [`scripts/ticc.py`](../scripts/ticc.py) so that each TICC port is opened exactly once per process and the first open raises DTR. That helper waits for the boot sentinel, writes a carriage return to accept the default menu option, and keeps the serial port open so DTR never drops until the process exits. Subsequent context managers reuse the same serial object and skip the long boot cycle.
+- Callers that need a fresh boot can still pass `wait_for_boot=True`, but this only blocks on the first open for a given `(port, baud)` pair; once the shared port is marked as booted, additional `wait_for_boot` calls return immediately.  The shared helper also holds the exclusive lock while the port is in use, so every tool honors the DTR/reset discipline.
+
 ### S6. NTRIP caster client sockets
 
 Ingress:

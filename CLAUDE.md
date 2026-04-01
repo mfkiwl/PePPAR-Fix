@@ -40,13 +40,27 @@ TAPR TICCs use Arduino Mega 2560. **Opening the serial port toggles DTR,
 which reboots the Arduino.** The TICC goes silent for ~10 seconds during
 boot, then outputs its config header before starting measurements.
 
-```python
-# WRONG — resets the TICC:
-ser = serial.Serial("/dev/ticc1", 115200)
+The Arduino resets on the **rising edge** of DTR (via a capacitor to
+RESET). When a process closes the serial port, the `cdc_acm` driver
+drops DTR. When the next process opens it, DTR rises — triggering a
+reboot. `dsrdtr=False` in pyserial is **not sufficient** to prevent
+this; it only controls pyserial's flow control, not the kernel driver.
 
-# RIGHT — prevents DTR toggle:
+The fix is to clear the `HUPCL` termios flag, which tells the kernel
+to leave DTR asserted when the fd closes:
+
+```python
+import termios
+
+# RIGHT — prevents DTR drop on close, so next open won't reboot:
 ser = serial.Serial("/dev/ticc1", 115200, dsrdtr=False, rtscts=False)
+attrs = termios.tcgetattr(ser.fd)
+attrs[2] &= ~termios.HUPCL  # cflag
+termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
 ```
+
+All TICC access should go through `scripts/ticc.py` which handles
+this automatically via the `_SharedTiccPort` helper.
 
 If you WANT to reset a TICC intentionally:
 ```python
@@ -210,6 +224,7 @@ here before changing anything in the areas they cover.
 | [packaging-plan.md](docs/packaging-plan.md) | Plan for making peppar-fix pip-installable from GitHub Releases. Phased: pyproject.toml stub (done), flatten imports, versioned releases. |
 | [ptp4l-supervision.md](docs/ptp4l-supervision.md) | Layered ptp4l clockClass supervision via systemd. Three layers: engine (Python UDS), wrapper (pmc command), systemd ExecStopPost. Covers clock-class mapping, ptp4l config, privilege model, and example unit file in `deploy/`. |
 | [extts-lifecycle.md](docs/extts-lifecycle.md) | EXTTS (PPS IN/OUT) initialization lifecycle. Bootstrap owns pin programming; engine inherits and verifies. Covers PTP profile extension for IN+OUT pins, PEROUT for TICC, fd persistence, platform matrix (i226/E810), and phased migration path. |
+| [wr-gm-research.md](docs/wr-gm-research.md) | White Rabbit GM architecture review: softpll internals (helper/main/external PLLs), how GM uses PPS vs 10 MHz, qErr injection points, PEROUT at 10 MHz, two integration paths (PHC PEROUT vs OCXO+ClockMatrix). |
 
 ## Lab Documentation Pointers
 

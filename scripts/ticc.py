@@ -47,7 +47,9 @@ Precision notes:
 from __future__ import annotations
 
 import re
+import termios
 import time as _time
+import atexit
 
 import serial
 
@@ -56,7 +58,7 @@ from peppar_fix.event_time import (
     estimate_correlation_confidence,
     estimator_sample_weight,
 )
-from peppar_fix.exclusive_io import acquire_device_lock, release_device_lock
+
 from peppar_fix.timebase_estimator import TimebaseRelationEstimator
 
 # Integer part DOT 11-or-12 fractional digits whitespace ch followed by A or B.
@@ -64,6 +66,155 @@ _LINE_RE = re.compile(r"^(\d+)\.(\d{11,12})\s+(ch[AB])$")
 
 # Boot sentinel: the TICC prints this line just before starting timestamp output.
 _BOOT_SENTINEL = "# timestamp"
+
+_shared_ticc_ports: dict[tuple[str, int], "_SharedTiccPort"] = {}
+
+
+class _SharedTiccPort:
+    def __init__(self, port: str, baud: int) -> None:
+        self.port = port
+        self.baud = baud
+        self.serial: serial.Serial | None = None
+        self.refcount = 0
+        self.booted = False
+
+    def _open_serial(self) -> serial.Serial:
+        # dsrdtr=False, rtscts=False: tell pyserial not to manage
+        # DTR/RTS for hardware flow control.
+        #
+        # HUPCL clear: prevent the kernel from dropping DTR when the
+        # last fd closes.  Without this, closing the port drops DTR,
+        # and the next open raises it — the rising edge triggers the
+        # Arduino Mega 2560's auto-reset via the DTR-RESET capacitor,
+        # rebooting the TICC (~10s of lost data).  With HUPCL cleared,
+        # DTR stays asserted across close/reopen, so subsequent opens
+        # (same or different process) don't trigger a reboot.
+        # See CLAUDE.md "TICC resets on serial open".
+        #
+        # exclusive=True: kernel-enforced exclusive open (TIOCEXCL).
+        # Prevents other processes from opening the same tty.
+        # Automatically released when the fd is closed, even on
+        # crash or SIGKILL — no stale lock files to clean up.
+        try:
+            ser = serial.Serial(
+                self.port,
+                self.baud,
+                timeout=2.0,
+                dsrdtr=False,
+                rtscts=False,
+                exclusive=True,
+            )
+        except serial.SerialException:
+            ser = serial.Serial(
+                self.port,
+                self.baud,
+                timeout=2.0,
+                dsrdtr=False,
+                rtscts=False,
+                exclusive=False,
+            )
+        # Clear HUPCL so DTR stays asserted after close.
+        attrs = termios.tcgetattr(ser.fd)
+        attrs[2] &= ~termios.HUPCL  # cflag
+        termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
+        return ser
+
+    def acquire(self, wait_for_boot: bool) -> None:
+        if self.serial is None:
+            self.serial = self._open_serial()
+            self.serial.reset_input_buffer()
+            self.booted = False
+        self.refcount += 1
+        if wait_for_boot and not self.booted:
+            self._wait_for_boot()
+            self.booted = True
+
+    def release(self) -> None:
+        if self.refcount > 0:
+            self.refcount -= 1
+
+    def _wait_for_boot(self) -> None:
+        """Wait for TICC to be ready (booting or already running).
+
+        The TICC (Arduino Mega) boot sequence after DTR reset:
+          1. Prints config header (# lines)
+          2. Waits ~5s for config menu input
+          3. Prints "# timestamp" sentinel
+          4. Begins timestamp output at ref_sec=1
+
+        We send a CR during the menu wait to accept defaults and
+        shorten the boot.
+
+        If the TICC is already running (dsrdtr=False prevented reset),
+        the first line will be a valid timestamp — accept it immediately.
+
+        Raises TimeoutError if the TICC doesn't produce a valid
+        timestamp within 20 seconds.
+        """
+        assert self.serial is not None
+        deadline = _time.monotonic() + 20
+        seen_header = False
+        sent_cr = False
+        seen_sentinel = False
+        while _time.monotonic() < deadline:
+            try:
+                raw = self.serial.readline()
+            except (serial.SerialException, OSError):
+                self.serial.close()
+                _time.sleep(1)
+                try:
+                    self.serial = self._open_serial()
+                    self.serial.reset_input_buffer()
+                except (serial.SerialException, OSError):
+                    _time.sleep(1)
+                continue
+            line = raw.decode(errors="replace").strip()
+            if not line:
+                continue
+            # Valid timestamp line — TICC is ready, whether we went
+            # through a boot sequence or it was already running.
+            if _LINE_RE.match(line):
+                break
+            if line.startswith("#"):
+                seen_header = True
+                # Send CR during menu wait to accept defaults and
+                # skip the ~5s menu timeout.  Send once, early.
+                if not sent_cr:
+                    try:
+                        self.serial.write(b"\r")
+                    except (serial.SerialException, OSError):
+                        pass
+                    sent_cr = True
+                if _BOOT_SENTINEL in line:
+                    seen_sentinel = True
+        else:
+            raise TimeoutError(
+                f"TICC on {self.port} did not produce data within 20s "
+                f"(seen_header={seen_header}, seen_sentinel={seen_sentinel})"
+            )
+
+    def close(self) -> None:
+        if self.serial is not None:
+            try:
+                self.serial.close()
+            finally:
+                self.serial = None
+                self.booted = False
+
+
+def _get_shared_port(port: str, baud: int) -> _SharedTiccPort:
+    key = (port, baud)
+    if key not in _shared_ticc_ports:
+        _shared_ticc_ports[key] = _SharedTiccPort(port, baud)
+    return _shared_ticc_ports[key]
+
+
+def _close_all_shared_ports() -> None:
+    for port in list(_shared_ticc_ports.values()):
+        port.close()
+
+
+atexit.register(_close_all_shared_ports)
 
 
 class Ticc:
@@ -84,92 +235,23 @@ class Ticc:
         self.baud = baud
         self.wait_for_boot = wait_for_boot
         self._ser: serial.Serial | None = None
-        self._lock_fd: int | None = None
         self._recv_estimator = TimebaseRelationEstimator(
             min_sigma_s=0.05,
             sigma_scale=4.0,
         )
-
-    def _open_serial(self) -> serial.Serial:
-        # dsrdtr=False, rtscts=False: prevent DTR toggle that would
-        # reboot the Arduino Mega 2560 (see CLAUDE.md "TICC resets
-        # on serial open").
-        try:
-            return serial.Serial(
-                self.port,
-                self.baud,
-                timeout=2.0,
-                dsrdtr=False,
-                rtscts=False,
-                exclusive=True,
-            )
-        except serial.SerialException:
-            return serial.Serial(
-                self.port,
-                self.baud,
-                timeout=2.0,
-                dsrdtr=False,
-                rtscts=False,
-                exclusive=False,
-            )
+        self._shared_port = _get_shared_port(self.port, self.baud)
 
     def __enter__(self) -> "Ticc":
-        self._lock_fd, _lock_path = acquire_device_lock(self.port)
-        try:
-            self._ser = self._open_serial()
-            self._ser.reset_input_buffer()
-
-            if self.wait_for_boot:
-                # Opening the port triggers Arduino auto-reset via DTR
-                # capacitor.  The TICC reboots, prints a config header,
-                # waits ~5s for menu input, then prints the sentinel line
-                # and starts data.  Total boot time: ~8-10 seconds.
-                #
-                # Read through boot output until we see the sentinel,
-                # then the first valid timestamp.  If the port becomes
-                # invalid during reboot (USB re-enumeration), close,
-                # wait, and reopen.
-                deadline = _time.monotonic() + 20
-                seen_sentinel = False
-                while _time.monotonic() < deadline:
-                    try:
-                        raw = self._ser.readline()
-                    except (serial.SerialException, OSError):
-                        try:
-                            self._ser.close()
-                        except Exception:
-                            pass
-                        _time.sleep(1)
-                        try:
-                            self._ser = self._open_serial()
-                            self._ser.reset_input_buffer()
-                        except (serial.SerialException, OSError):
-                            _time.sleep(1)
-                        continue
-                    line = raw.decode(errors="replace").strip()
-                    if _BOOT_SENTINEL in line:
-                        seen_sentinel = True
-                        continue
-                    if seen_sentinel and _LINE_RE.match(line):
-                        break  # first fresh timestamp — ready
-        except Exception:
-            # Release lock if ANYTHING in __enter__ fails — serial open,
-            # boot wait, USB re-enumeration.  Without this, a failed
-            # __enter__ leaks the flock and the reconnect loop blocks
-            # itself on the next attempt.
-            release_device_lock(self._lock_fd)
-            self._lock_fd = None
-            raise
-
+        # Exclusive access is enforced by the serial port's TIOCEXCL
+        # (exclusive=True in _open_serial).  No flock needed — the
+        # kernel releases the exclusion automatically when the fd
+        # closes, even on crash or SIGKILL.
+        self._shared_port.acquire(self.wait_for_boot)
+        self._ser = self._shared_port.serial
         return self
 
     def __exit__(self, *_) -> None:
-        try:
-            if self._ser:
-                self._ser.close()
-        finally:
-            release_device_lock(self._lock_fd)
-            self._lock_fd = None
+        self._shared_port.release()
 
     def __iter__(self):
         """Yield (channel, ref_sec, ref_ps) for each valid edge line."""
