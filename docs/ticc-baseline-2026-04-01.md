@@ -120,33 +120,143 @@ The TCXO drifts at -2.6 to -3.2 ppb relative to the TICC reference
 residual adjfine error: bootstrap set 101 ppb but temperature changed
 overnight.
 
+## EXTTS resolution analysis
+
+### The F9T 125 MHz clock sets the test signal range
+
+The F9T generates PPS at the nearest tick of its 125 MHz internal
+clock (8 ns period).  As the F9T's TCXO beats against the GNSS clocks,
+the PPS edge visits different positions within this 8 ns range.  The
+TICC confirms this — the full sawtooth has ~2.3 ns TDEV(1s) and sweeps
+across the 8 ns tick grid over the beat period.
+
+This means any timestamper observing the F9T PPS will see the edge
+move over an 8 ns range.  The question is whether a given EXTTS path
+can resolve that movement.
+
+### E810 EXTTS: 77% identical timestamps → ~8 ns effective resolution
+
+The E810 EXTTS reported TDEV(1s) = 0.34 ns for a signal with 2.3 ns
+true jitter.  77% of adjacent timestamps were identical.  If the E810
+truly had 1 ns resolution, the probability of identical adjacent
+timestamps would be ~12% (for a Gaussian with σ_diff ≈ 3.8 ns in 1 ns
+bins).  Working backward from P(same) = 0.77:
+
+    P(same bin) = 0.77, σ_diff = 3.8 ns → effective bin width ≈ 9 ns
+
+The E810 EXTTS for GPIO/SMA events has **~8 ns effective resolution**,
+despite reporting 1 ns in the timestamp format.  The sub-ns capability
+advertised for the E810 applies to the MAC's packet timestamp path
+(which uses the 812.5 MHz PLL), not the external pin capture path.
+
+The E810 EXTTS adds very little noise within each bin (timestamps are
+clean) but cannot resolve changes smaller than ~8 ns.  Most of the
+F9T sawtooth is invisible to it.
+
+### i226 EXTTS: noisy but resolving
+
+The i226 EXTTS reported TDEV(1s) = 1.99 ns with 0% identical adjacent
+timestamps.  Every pair differs.  The i226's 125 MHz clock gives 8 ns
+tick quantization, and its capture path adds ~1.7 ns RSS noise on top.
+This noise is a nuisance, but it means the i226 is always reporting
+a different value — it tracks the PPS movement, albeit noisily.
+
+The i226's dithering noise may actually provide better effective
+resolution than the E810's clean-but-flat timestamps when averaged
+over multiple epochs.  Stochastic resonance: noise that spans the
+quantization boundary lets averaging interpolate between bins.
+
+### Both platforms: ~8 ns EXTTS resolution
+
+Despite very different noise characteristics, both the i226 and E810
+have similar EXTTS resolution (~8 ns, the 125 MHz period).  They
+differ in how they behave within that quantization:
+
+| Property | i226 | E810 |
+|----------|------|------|
+| EXTTS resolution | ~8 ns | ~8 ns |
+| Within-bin noise | ~1.7 ns (noisy) | <1 ns (flat) |
+| Adjacent identical | 0% | 77% |
+| Tracks PPS movement | Yes (noisily) | Rarely (bin crossings only) |
+| Averaging benefit | Yes (noise dithers bins) | Limited (flat within bins) |
+
+## Timestamper comparison: EXTTS vs TICC
+
+The PPS edge can be timestamped by EXTTS (8 ns bins) or by TICC
+(60 ps resolution).  These are independent measurement paths with
+different resolution, noise, and correlation requirements.
+
+### TICC advantage
+
+The TICC resolves the full F9T sawtooth at 60 ps.  With qErr
+correction (which removes the ~2.3 ns sawtooth), TICC+qErr should
+approach the TICC's own noise floor.  This is far below any EXTTS
+path.
+
+qErr's value is **independent of the timestamper**.  qErr tells you
+where the true GNSS second falls within the F9T's 8 ns tick.  Whether
+the PPS is timestamped by EXTTS or TICC, subtracting the sawtooth
+removes the same ~2.3 ns of jitter.  The improvement is:
+
+| Timestamper | Raw TDEV(1s) | With qErr | Improvement |
+|-------------|-------------|-----------|-------------|
+| TICC (60 ps) | 2.3 ns | ~60 ps floor | ~38x potential |
+| i226 EXTTS | 1.99 ns | 1.72 ns | 1.4x |
+| E810 EXTTS | 0.34 ns (flat) | worse | n/a (already below qErr) |
+
+The EXTTS+qErr improvement on i226 is modest (1.4x) because the 8 ns
+quantization noise dominates.  TICC+qErr removes the sawtooth entirely,
+limited only by the TICC's own 60 ps single-shot noise.
+
+### Correlation challenges differ
+
+Each timestamper has different correlation requirements:
+
+- **EXTTS**: captured in PHC time, correlated with GNSS observations
+  via the strict correlation gate (monotonic time matching, confidence
+  scoring).  Well-understood path.
+- **TICC**: captured in TICC time (arbitrary epoch), must be mapped to
+  host monotonic time via the `TimebaseRelationEstimator`, then
+  correlated with GNSS observations.  Additional uncertainty from the
+  serial transport delay (~1 ms jitter).
+
+Both paths must be correlated with TIM-TP for qErr.  The TIM-TP
+correlation was fixed in commit c15d3b4 (monotonic matching at 0.9s
+offset).
+
 ## Implications for peppar-fix
 
 ### Servo bandwidth
 
-The free-running TCXO at 1.17 ns TDEV(1s) is quieter than any
-correction source at tau=1s:
-- F9T PPS: 2.3 ns
-- PPS + qErr: ~1.7 ns (from freerun data)
-- PPS + PPP: ~0.1 ns confidence, but applied at 1 Hz
+The free-running TCXO at 1.17 ns TDEV(1s) is quieter than the raw PPS
+it's being disciplined to (2.3 ns).  At tau=1s, the servo cannot
+improve the PHC — it can only inject PPS noise.  The crossover where
+PPS correction becomes beneficial is around tau=5s.
 
-The servo should have low gain at short tau to avoid injecting PPS
-sawtooth noise into the PHC.  The current gain schedule (Kp=0.03,
-Ki=0.001) converges at tau ~10-30s, which is appropriate.
+The current gain schedule (Kp=0.03, Ki=0.001) is appropriate: it
+converges at tau ~10-30s, above the crossover point.
 
-### qErr value
+### qErr on EXTTS vs TICC
 
-qErr reduces the PPS correction noise from 2.3 ns to ~1.7 ns (1.4x at
-tau=1s, up to 2x at tau=5s).  Since the TCXO is 1.17 ns at tau=1s,
-even qErr-corrected PPS (1.7 ns) is noisier than the free-running
-TCXO.  qErr helps most in the tau=2-10s range where the PPS and TCXO
-TDEV are comparable.
+On the EXTTS path, qErr provides 1.4x improvement at tau=1s on i226.
+This is modest because the 8 ns quantization noise dominates over the
+~2.3 ns sawtooth being removed.
 
-### EXTTS comparison
+On the TICC path, qErr should provide dramatically larger improvement
+because the TICC resolves the full sawtooth.  TICC-driven servo with
+qErr correction is the path to sub-nanosecond discipline — the
+combination removes the F9T's 2.3 ns sawtooth while preserving the
+TICC's 60 ps measurement resolution.
 
-When EXTTS TDEV(1s) < 2.3 ns (the F9T baseline), the PHC timestamp
-quantization is masking real PPS jitter.  The E810 EXTTS reported
-0.34 ns — far below the 2.3 ns ground truth — confirming that 77% of
-its timestamps are quantization-flat.  The i226 EXTTS reported 1.99 ns,
-which is below the 2.3 ns baseline but close enough to be useful (the
-8 ns tick grid adds ~1.7 ns RSS noise to the measurement).
+### Platform choice
+
+For EXTTS-only operation (no TICC), the i226 and E810 are roughly
+equivalent in EXTTS resolution (~8 ns).  The i226's noisy-but-resolving
+timestamps may be slightly better for averaging.  The E810's advantage
+is its OCXO (much better holdover and long-tau stability), not its
+EXTTS resolution.
+
+For TICC-driven servo, the platform choice is less important — the
+TICC bypasses EXTTS entirely.  The PHC still matters for PEROUT
+(distributing the disciplined clock), but the measurement path is
+independent of PHC resolution.
