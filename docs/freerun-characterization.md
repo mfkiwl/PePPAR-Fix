@@ -86,11 +86,56 @@ before computing deviations.  The slope dominates otherwise and masks
 the oscillator's wander characteristics.  Report both the raw (with
 drift) and detrended deviations.
 
+## PHC timestamping resolution and noise
+
+A freerun capture can characterize the PHC's EXTTS capture path if a
+TICC is simultaneously recording the same PPS edge.
+
+### Method
+
+The TICC captures the same PPS edge as the PHC EXTTS, at ~60 ps
+single-shot resolution.  At each epoch:
+
+  `PHC_noise(k) = EXTTS(k) - TICC(k)`
+
+Since the PPS source jitter is common to both, it cancels.  The
+residual isolates:
+
+1. **PHC counter quantization** — the tick grid (8 ns on i226 at
+   125 MHz, sub-ns on E810)
+2. **EXTTS latch jitter** — noise in the hardware timestamp capture
+3. **Cable/splitter differential delay** — a static bias (removable
+   by detrending)
+
+### Requirements
+
+- TICC must be connected with one channel on the same PPS signal
+  that feeds the PHC EXTTS input.  On TimeHat, TICC #1 chB carries
+  the F9T PPS.  On ocxo, TICC #2 chB carries the F9T PPS.
+- The TICC and EXTTS timestamps must be correlated by epoch.  Since
+  both are triggered by the same PPS edge at 1 Hz, matching is by
+  sequence number (both produce one event per second).
+- The TICC-to-EXTTS time offset is arbitrary (different cable lengths,
+  different capture latencies).  Only the variation matters, not the
+  absolute offset.
+
+### Output
+
+- Histogram of `EXTTS - TICC` residuals (shows quantization grid)
+- TDEV of the residual (shows capture noise floor vs tau)
+- Allan deviation of the residual (should be flat — white noise)
+
+This characterization answers: "what is the best TDEV the servo can
+achieve at tau=1s on this platform?"  On i226 with 8 ns ticks, this
+is the quantization noise floor.  With qErr correction, the effective
+resolution improves.
+
 ## Implementation checklist
 
-- [ ] Add `--freerun` flag to `peppar_fix_engine.py` (skip adjfine, restep)
-- [ ] Add `--freerun` to wrapper (pass through, hold clockClass at 248)
-- [ ] Add `phc_gettime_ns` column to servo CSV
-- [ ] Add auto-stop on PPS error threshold
+- [x] Add `--freerun` flag to `peppar_fix_engine.py` (skip adjfine, restep)
+- [x] Add `--freerun` to wrapper (pass through, hold clockClass at 248)
+- [x] Add `phc_gettime_ns` column to servo CSV
+- [x] Add auto-stop on PPS error threshold (`--freerun-max-error-ns`)
 - [ ] Write `tools/plot_deviation.py` (ADEV, TDEV, MDEV with Plotly)
+- [ ] Add EXTTS-TICC noise analysis to plot_deviation.py
 - [ ] Test freerun on both TimeHat (TCXO) and ocxo (OCXO)

@@ -1116,6 +1116,10 @@ def _setup_servo(args, known_ecef, qerr_store):
     # Preserve adjfine from bootstrap — don't reset to 0.
     current_adj = ptp.read_adjfine()
     log.info("PHC adjfine at start: %.1f ppb", current_adj)
+    if args.freerun:
+        log.info("FREERUN MODE: PHC will not be steered. "
+                 "Auto-stop at |pps_error| > %.0f ns",
+                 args.freerun_max_error_ns or float('inf'))
 
     # Import PTP constants for pin setup
     from peppar_fix.ptp_device import PTP_PF_EXTTS
@@ -1278,6 +1282,7 @@ def _setup_servo(args, known_ecef, qerr_store):
             'discipline_interval', 'n_accumulated', 'watchdog_alarm',
             'tracking_mode', 'time_to_zero_s',
             'isb_gal_ns', 'isb_bds_ns',
+            'phc_gettime_ns',
         ])
 
     return {
@@ -1297,7 +1302,8 @@ def _setup_servo(args, known_ecef, qerr_store):
         'caps': caps,
         'log_f': log_f,
         'log_w': log_w,
-        'phase': 'tracking',
+        'freerun': args.freerun,
+        'phase': 'freerun' if args.freerun else 'tracking',
         'adjfine_ppb': current_adj,
         'gain_scale': 1.0,
         'prev_source': None,
@@ -1674,12 +1680,14 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     # Three-stage clockClass promotion: 248 (boot) → 52 (PHC bootstrapped,
     # set by wrapper after bootstrap) → 6 (servo settled).  Demote back
     # to 52 if the scheduler leaves settled state.
-    if not scheduler._converging:
-        _set_clock_class(ctx, "locked")
-    else:
-        _set_clock_class(ctx, "initialized")
+    # In freerun mode, clockClass stays at 248 — PHC is not disciplined.
+    if not args.freerun:
+        if not scheduler._converging:
+            _set_clock_class(ctx, "locked")
+        else:
+            _set_clock_class(ctx, "initialized")
 
-    if TRACK_RESTEP_NS is not None:
+    if TRACK_RESTEP_NS is not None and not args.freerun:
         # Use pps_error_ns (raw PHC fractional offset) for the restep
         # check, not best.error_ns which includes the filter's dt_rx.
         # After a step, dt_rx is stale and large while the filter
@@ -1694,6 +1702,16 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 "exiting for PHC re-bootstrap (exit code 5)",
                 TRACK_RESTEP_NS,
                 ctx['tracking_large_error_count'],
+            )
+            ctx['phc_diverged'] = True
+
+    # Freerun auto-stop: exit when PPS error grows too large for
+    # the correlation gate to work reliably.
+    if args.freerun and args.freerun_max_error_ns is not None:
+        if abs(pps_error_ns) >= args.freerun_max_error_ns:
+            log.info(
+                "Freerun auto-stop: |pps_error|=%.0fns exceeds %.0fns threshold",
+                abs(pps_error_ns), args.freerun_max_error_ns,
             )
             ctx['phc_diverged'] = True
 
@@ -1753,7 +1771,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         if abs(adjfine_ppb) >= max_track_ppb * 0.95:
             servo.integral = -adjfine_ppb / servo.ki if servo.ki != 0 else 0
             log.warning(f'  Anti-windup: adj={adjfine_ppb:+.0f}ppb at rail, integral reset')
-        ptp.adjfine(adjfine_ppb)
+        if not args.freerun:
+            ptp.adjfine(adjfine_ppb)
         ctx['adjfine_ppb'] = adjfine_ppb
         ctx['gain_scale'] = gain_scale
 
@@ -1783,6 +1802,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                      f"coast ({scheduler.n_accumulated}/{scheduler.interval}) "
                      f"adj={ctx['adjfine_ppb']:+.1f}ppb{mode_suffix}")
 
+    # PHC time at PPS edge (from EXTTS hardware timestamp).
+    phc_gettime_ns = phc_sec * 1_000_000_000 + phc_nsec
     _log_servo(log_w, ctx['log_f'], ts_str, target_sec, phc_sec, phc_nsec,
                phc_rounded_sec, epoch_offset, timescale_error_ns,
                extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
@@ -1793,7 +1814,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
                ctx['adjfine_ppb'], ctx['phase'], n_used,
                ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns,
-               ctx.get('tracking_mode'), mode_time_to_zero_s)
+               ctx.get('tracking_mode'), mode_time_to_zero_s,
+               phc_gettime_ns)
     return "logged"
 
 
@@ -1806,7 +1828,8 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
                pps_var_ns2, pps_qerr_plus_var_ns2, qerr_plus_ratio,
                pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
                adjfine_ppb, phase, n_used, gain_scale, scheduler,
-               isb_gal_ns, isb_bds_ns, tracking_mode, time_to_zero_s):
+               isb_gal_ns, isb_bds_ns, tracking_mode, time_to_zero_s,
+               phc_gettime_ns=None):
     """Write one servo log row."""
     if log_w is None:
         return
@@ -1848,6 +1871,7 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
         tracking_mode or '',
         f'{time_to_zero_s:.3f}' if time_to_zero_s is not None else '',
         f'{isb_gal_ns:.3f}', f'{isb_bds_ns:.3f}',
+        str(phc_gettime_ns) if phc_gettime_ns is not None else '',
     ])
     if log_f is not None:
         log_f.flush()
@@ -1859,10 +1883,11 @@ def _cleanup_servo(ctx):
     if 'stop_ticc' in ctx:
         ctx['stop_ticc'].set()
     ptp = ctx['ptp']
-    try:
-        ptp.adjfine(0.0)
-    except Exception:
-        pass
+    if not ctx.get('freerun'):
+        try:
+            ptp.adjfine(0.0)
+        except Exception:
+            pass
     ptp.disable_extts(ctx['extts_channel'])
     ptp.close()
     if ctx['log_f']:
@@ -2393,6 +2418,13 @@ Two-phase operation:
                        help="PTP domain number for pmc messages (must match ptp4l config, default: 0)")
     servo.add_argument("--pid-file", default=None,
                        help="Write engine PID here for external test control")
+    servo.add_argument("--freerun", action="store_true",
+                       help="Run full pipeline without steering PHC. "
+                            "Logs what the servo would do but never calls adjfine. "
+                            "For characterizing EXTTS precision and oscillator stability.")
+    servo.add_argument("--freerun-max-error-ns", type=float, default=None,
+                       help="Auto-stop freerun when |pps_error_ns| exceeds this "
+                            "(default: 100000 for OCXO, 500000 for TCXO)")
 
     ticc = ap.add_argument_group("TICC experimental input (optional)")
     ticc.add_argument("--ticc-port", default=None,
@@ -2462,6 +2494,10 @@ Two-phase operation:
         args.min_broadcast_confidence = 0.0
     if args.min_ssr_confidence is None:
         args.min_ssr_confidence = 0.0
+    if args.freerun and args.freerun_max_error_ns is None:
+        # Default auto-stop threshold: 100 µs for OCXO, 500 µs for TCXO.
+        # Heuristic: if bootstrap adjfine is > 1000 ppb, likely a TCXO.
+        args.freerun_max_error_ns = 500_000.0  # conservative default
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

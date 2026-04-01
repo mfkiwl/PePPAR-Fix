@@ -58,6 +58,44 @@ def adev(phase_s, rate, taus):
     return results
 
 
+def mdev(phase_s, rate, taus):
+    """Modified Allan Deviation from phase data (seconds)."""
+    N = len(phase_s)
+    results = {}
+    for tau in taus:
+        n = int(tau * rate)
+        if n < 1 or 3 * n >= N:
+            continue
+        # MDEV uses overlapping second differences
+        sd = phase_s[2*n:] - 2*phase_s[n:-n] + phase_s[:-(2*n)]
+        M = len(sd)
+        if M < n:
+            continue
+        # Running average of n consecutive second differences
+        cumsum = np.cumsum(sd)
+        avg = (cumsum[n:] - cumsum[:-n]) / n
+        if len(avg) < 1:
+            continue
+        results[tau] = np.sqrt(np.sum(avg**2) / (2.0 * len(avg))) / tau
+    return results
+
+
+def detrend_linear(phase_s):
+    """Remove linear trend (frequency offset) from phase data.
+
+    Returns (detrended_phase, slope_ppb).
+    """
+    N = len(phase_s)
+    x = np.arange(N, dtype=float)
+    # Simple least squares
+    x_mean = x.mean()
+    y_mean = phase_s.mean()
+    slope = np.sum((x - x_mean) * (phase_s - y_mean)) / np.sum((x - x_mean)**2)
+    detrended = phase_s - (slope * x + (y_mean - slope * x_mean))
+    slope_ppb = slope * 1e9  # phase is in seconds, rate is 1 Hz → slope is s/s = fractional
+    return detrended, slope_ppb
+
+
 def log_taus(duration_s, rate, n_points=30):
     """Generate logarithmically spaced tau values."""
     min_tau = max(1, 1.0 / rate)
@@ -146,7 +184,8 @@ def load_servo_csv(path):
 
 # ── Plotting ───────────────────────────────────────────────────────────── #
 
-def make_plots(all_sources, output_path, title=None):
+def make_plots(all_sources, output_path, title=None, do_detrend=False,
+               show_mdev=False):
     """Generate ADEV and TDEV overlay plots."""
     try:
         import plotly.graph_objects as go
@@ -166,17 +205,27 @@ def make_plots(all_sources, output_path, title=None):
         '#9467bd', '#8c564b', '#e377c2', '#7f7f7f',
     ]
 
+    n_rows = 3 if show_mdev else 2
+    subtitles = ["TDEV (Time Deviation)", "ADEV (Allan Deviation)"]
+    if show_mdev:
+        subtitles.append("MDEV (Modified Allan Deviation)")
     fig = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=("TDEV (Time Deviation)", "ADEV (Allan Deviation)"),
-        vertical_spacing=0.12,
+        rows=n_rows, cols=1,
+        subplot_titles=subtitles,
+        vertical_spacing=0.10,
     )
 
     for file_idx, (file_label, sources) in enumerate(all_sources):
         for src_name, (taus_list, phase, rate) in sources.items():
+            if do_detrend:
+                phase, slope_ppb = detrend_linear(phase)
+                print(f"  {file_label}/{src_name}: detrended, "
+                      f"removed {slope_ppb:.1f} ppb linear drift")
+
             # Compute deviations
             td = tdev(phase, rate, taus_list)
             ad = adev(phase, rate, taus_list)
+            md = mdev(phase, rate, taus_list) if show_mdev else {}
 
             if not td:
                 continue
@@ -221,16 +270,33 @@ def make_plots(all_sources, output_path, title=None):
                 showlegend=False,
             ), row=2, col=1)
 
+            # MDEV trace
+            if show_mdev and md:
+                m_taus = sorted(md.keys())
+                m_vals = [md[t] for t in m_taus]
+                fig.add_trace(go.Scatter(
+                    x=m_taus, y=m_vals,
+                    mode='lines+markers',
+                    name=label,
+                    line=dict(color=color, dash=dash, width=2),
+                    marker=dict(size=5),
+                    legendgroup=label,
+                    showlegend=False,
+                ), row=3, col=1)
+
     fig.update_xaxes(type="log", title_text="τ (seconds)", row=1, col=1)
     fig.update_xaxes(type="log", title_text="τ (seconds)", row=2, col=1)
     fig.update_yaxes(type="log", title_text="TDEV (seconds)", row=1, col=1)
     fig.update_yaxes(type="log", title_text="ADEV (fractional)", row=2, col=1)
+    if show_mdev:
+        fig.update_xaxes(type="log", title_text="τ (seconds)", row=3, col=1)
+        fig.update_yaxes(type="log", title_text="MDEV (fractional)", row=3, col=1)
 
     if title is None:
         title = "Stability Analysis"
     fig.update_layout(
         title=title,
-        height=900,
+        height=450 * n_rows,
         width=1000,
         legend=dict(x=0.01, y=0.49),
     )
@@ -263,6 +329,11 @@ Examples:
     ap.add_argument("-o", "--output", default=None,
                     help="Output HTML path (default: <first_file>.html)")
     ap.add_argument("-t", "--title", default=None, help="Plot title")
+    ap.add_argument("--detrend", action="store_true",
+                    help="Remove linear frequency offset before computing "
+                         "deviations (essential for freerun data)")
+    ap.add_argument("--mdev", action="store_true",
+                    help="Include Modified Allan Deviation (MDEV) plot")
 
     args = ap.parse_args()
 
@@ -298,7 +369,8 @@ Examples:
     if title is None and len(files) == 1:
         title = f"Stability: {os.path.basename(files[0])}"
 
-    make_plots(all_sources, output, title=title)
+    make_plots(all_sources, output, title=title,
+               do_detrend=args.detrend, show_mdev=args.mdev)
 
 
 if __name__ == "__main__":
