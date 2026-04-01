@@ -217,16 +217,12 @@ Current verified state on `ocxo`:
 - `bob` has been added to the `dialout` group on `ocxo`
 - the lab-wide udev rule has been installed at:
   - `/etc/udev/rules.d/99-timelab.rules`
-- `TICC #3 chA` is wired to the E810 upper SMA on `ocxo`
-
-Current unverified state after the move:
-
-- live PPS timestamps on `TICC #3 chA/chB`
-- `TICC #3 chB` cabling after the move
-
-A boot-aware probe of `/dev/ticc3` on `ocxo` completed with zero timestamp
-events, so the device is present and named correctly but the post-move PPS
-wiring has not yet been confirmed by measurement.
+- `TICC #3` is on `ocxo` at `/dev/ticc3`, wired to the Solarflare SFN8522:
+  - chA = Solarflare PPS OUT (u.FL, via u.FL→SMA adapter)
+  - chB = Solarflare PPS IN (u.FL, via u.FL→SMA adapter, fed by F9T PPS)
+  - **Neither channel produces timestamps** with the upstream `sfc` driver
+    (PPS OUT not generating, PPS IN not capturing).  See Solarflare
+    section below.
 
 Current state:
 
@@ -248,6 +244,51 @@ Current state:
 - The F9T PPS is internal to the E810 PCB and **not accessible externally**
   without soldering to a test point.  TICC can only observe the disciplined
   PHC PEROUT, not the raw F9T PPS.
+
+### Solarflare SFN8522 on `ocxo` (investigated 2026-03-31)
+
+The SFN8522-R2 (SFC9220, "8000 Series") was installed on `ocxo` alongside
+the E810 to evaluate as a possible peppar-fix target platform.
+
+Hardware state:
+- PCI `02:00.0` / `02:00.1` (dual-port 10G SFP+)
+- Interfaces: `enp2s0f0np0`, `enp2s0f1np1`
+- PHC: `/dev/ptp0` (driver `sfc`)
+- PTP license: **active** (box labeled "PTP"; PHC appears, HW timestamping works)
+- u.FL connectors on PCB labeled "PPS IN" and "PPS OUT", wired via
+  u.FL→SMA adapters to TICC #3 (chA = PPS OUT, chB = PPS IN)
+- F9T PPS routed to Solarflare PPS IN
+
+**Result: not viable with upstream kernel driver.**
+
+The upstream `sfc` driver (kernel 6.8) reports:
+```
+n_ext_ts=0, n_per_out=0, n_pins=0, pps=1, max_adj=1000000
+```
+
+`PTP_EXTTS_REQUEST2` returns `EINVAL`.  TICC #3 shows no timestamps on
+either channel — PPS OUT is not generating a signal, and PPS IN captures
+are not accessible.
+
+The PPS hardware exists on the card but the upstream driver ignores it
+entirely.  PPS support requires the AMD out-of-tree `sfc-dkms` driver
+(from the OpenOnload package), which sets `n_ext_ts=1, n_pins=1` and
+handles `PTP_CLK_REQ_EXTTS` via the standard PTP API.
+
+Even with the out-of-tree driver:
+- EXTTS (PPS IN) would work via standard `PTP_EXTTS_REQUEST` ioctls —
+  same API peppar-fix already uses for i226/E810
+- **PEROUT is never supported** (`n_per_out=0` in all Solarflare drivers,
+  all generations).  PPS OUT is firmware-controlled and always-on when
+  PTP is active.  Cannot generate arbitrary frequencies like i226 PEROUT.
+
+**Next steps to bring up (if desired):**
+1. Install AMD out-of-tree `sfc-dkms` driver (may need testing on kernel 6.8)
+2. Verify `n_ext_ts=1` appears in PTP_CLOCK_GETCAPS
+3. Try `PTP_EXTTS_REQUEST` to capture F9T PPS on PPS IN
+4. Confirm TICC #3 sees Solarflare PPS OUT signal
+5. Add `sfc` PTP profile to `config/receivers.toml`
+6. Characterize PHC: tick resolution, adjfine granularity, EXTTS noise
 
 ## GNSS transport differences
 

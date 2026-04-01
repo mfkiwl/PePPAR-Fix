@@ -19,32 +19,62 @@ Devices without both are disqualified.
 
 | Device | PHC Res | adjfine | max_adj | PPS I/O | Oscillator | Interface | Price | Notes |
 |---|---|---|---|---|---|---|---|---|
-| **SFN6322F** ×2 | 1 ns | Unknown | Unknown | **u.FL on PCB** (PPS bracket) | Stratum 3 (<0.37 PPM/day) | PCIe 2.0/3.0, 2×10G SFP+ | ~$30 used | PTP standard (no license). HW tstamp: PTP pkts only, single port. **Bob has 2.** |
-| **SFN8522** ×4 | 1 ns | Unknown | Unknown | **u.FL on PCB** | Stratum 3 (<0.37 PPM/day) | PCIe 3.1 x8, 2×10G SFP+ | ~$25 used | **Needs AppFlex PTP license** (PLUS variant has it pre-installed). HW tstamp: all packets. **Bob has 4 (license status unknown).** |
-| SFN8522-PLUS | 1 ns | Unknown | Unknown | u.FL on PCB | Stratum 3 (<0.37 PPM/day) | PCIe 3.1 x8, 2×10G SFP+ | ~$50 used | PTP license pre-installed. Same HW as SFN8522. |
+| **SFN6322F** ×2 | 1 ns | Unknown | ±1000 ppm | **SMA on bracket** (PPS IN + OUT) | Stratum 3 (<0.37 PPM/day) | PCIe 2.0/3.0, 2×10G SFP+ | ~$30 used | PTP standard (no license). HW tstamp: PTP pkts only, single port. **Bob has 2.** |
+| **SFN8522** ×4 | 1 ns | Unknown | ±1000 ppm | **u.FL on PCB** | Stratum 3 (<0.37 PPM/day) | PCIe 3.1 x8, 2×10G SFP+ | ~$25 used | **Needs AppFlex PTP license** (PLUS variant has it pre-installed). HW tstamp: all packets. **Bob has 4; 1 tested, PTP licensed.** |
+| SFN8522-PLUS | 1 ns | Unknown | ±1000 ppm | u.FL on PCB | Stratum 3 (<0.37 PPM/day) | PCIe 3.1 x8, 2×10G SFP+ | ~$50 used | PTP license pre-installed. Same HW as SFN8522. |
+| X2522 | 1 ns | Unknown | Unknown | u.FL on PCB | Stratum 3 | PCIe 3.1, 2×10/25G SFP28 | ~$100 used | Medford2 chip. Same PPS architecture as SFN8000. |
+
+**Solarflare critical driver issue (tested 2026-03-31):**
+
+The **upstream kernel `sfc` driver reports `n_ext_ts=0, n_per_out=0,
+n_pins=0`** for ALL Solarflare generations.  PPS IN/OUT hardware exists
+on the cards but the upstream driver completely ignores it.
+`PTP_EXTTS_REQUEST` returns `EINVAL`.  Tested on SFN8522 with PTP
+license active on kernel 6.8.
+
+**PPS requires the AMD out-of-tree `sfc-dkms` driver** (from the
+OpenOnload/onload package).  The out-of-tree driver sets `n_ext_ts=1,
+n_pins=1` and handles `PTP_CLK_REQ_EXTTS` — PPS input timestamps are
+then available via the standard `PTP_EXTTS_REQUEST` / `PTP_EXTTS_EVENT`
+ioctls on `/dev/ptpN`, the same API peppar-fix uses for i226 and E810.
+
+**PEROUT is never supported** (`n_per_out=0` in both upstream and
+out-of-tree drivers, all generations).  PPS output is firmware-controlled
+and always-on when PTP is active — it cannot be programmed to arbitrary
+frequencies like the i226 PEROUT.
 
 **Solarflare notes:**
-- All use `sfc` driver + `sfptpd` daemon (AMD maintains both, open source)
 - Stratum 3 oscillator: < 0.37 PPM/day, < 4.6 PPM over 20 years — better than
   bare i226 XO (~20-50 PPM/temp) but worse than TimeHAT TCXO (±280 ppb)
-- PPS connectors are **u.FL on the PCB**, not SMA on the bracket. Need u.FL→SMA
-  pigtails to connect to external PPS sources/sinks
+- SFN6322F: SMA connectors on the bracket (no adapter needed). HW timestamping
+  limited to PTP packets, single port (closest to PCIe).  Best Solarflare option
+  for peppar-fix due to SMA connectors.
+- SFN7000 series: u.FL on PCB, needs SOLR-PPS-DP10G bracket kit (discontinued,
+  unobtainable).  **Disqualified** unless u.FL pigtails are used directly.
+- SFN8522/PLUS: u.FL on PCB.  Need u.FL→SMA pigtails or adapters.
+  HW timestamps on ALL packets, both ports.
 - adjfine/adjfreq granularity not documented in public sources
-- SFN6322F: HW timestamping limited to PTP packets, single port (closest to PCIe)
-- SFN8522/PLUS: HW timestamps on ALL packets, both ports — significantly better
+- `sfptpd` (AMD's PTP daemon) is optional — it uses the same standard
+  EXTTS ioctls that peppar-fix would use.  Not required as middleware.
+
+#### Solarflare driver installation for PPS
+
+```bash
+# The out-of-tree driver is required for PPS.  Install from:
+# https://github.com/Xilinx-CNS/onload (includes sfc-dkms)
+# or AMD download page for sfc-dkms standalone.
+#
+# After installing sfc-dkms, verify:
+#   sudo python3 -c "... PTP_CLOCK_GETCAPS ..." to check n_ext_ts=1
+#   or: sudo testptp -d /dev/ptpN -c
+```
 
 #### Testing for PTP license on SFN8522
 
 The SFN8522 base model requires an AppFlex license key for PTP. To check:
 
 ```bash
-# 1. Install Solarflare utilities (sfkey, sfupdate, sfboot)
-#    Available from AMD: https://www.amd.com/en/support/downloads/drivers.html/solarflare.html
-
-# 2. List installed license keys
-sfkey list
-
-# 3. Check hardware timestamping capability (quick test)
+# 1. Quick test: does a PHC device appear and does HW timestamping work?
 ethtool -T <interface>
 # If PTP is licensed, you'll see:
 #   SOF_TIMESTAMPING_TX_HARDWARE
@@ -52,12 +82,12 @@ ethtool -T <interface>
 #   SOF_TIMESTAMPING_RAW_HARDWARE
 # If NOT licensed, only software timestamping will appear.
 
-# 4. Check if PHC device appeared
+# 2. Check if PHC device appeared
 ls /dev/ptp*
 # A /dev/ptpN should appear for a licensed adapter
 
-# 5. Verify driver version and firmware
-ethtool -i <interface>
+# 3. For detailed license info (requires Solarflare utilities):
+sfkey list
 ```
 
 If no PTP license is present, the cards are still 10G NICs but cannot do
@@ -65,6 +95,10 @@ hardware timestamping or PPS — functionally equivalent to the base SFN8122F
 for our purposes (disqualified). AppFlex license keys were sold by Solarflare;
 with the company absorbed into AMD, obtaining new keys may be difficult.
 Check if the keys are tied to the NIC's MAC or serial number.
+
+The SFN8522 installed on ocxo (2026-03-31) has PTP licensed — it
+produces a PHC at `/dev/ptp0` and supports HW timestamping.  Box was
+labeled "PTP".
 
 ### Enterprise Tier
 
@@ -119,7 +153,8 @@ needs to maintain accuracy during brief GNSS outages, the TCXO is essential.
 | Device | Reason |
 |---|---|
 | Broadcom BCM54210PE (CM4/CM5) | Single pin for PPS — can't do simultaneous IN + OUT |
-| Solarflare SFN6122F / SFN7122F | Base 10G NICs — no PPS connectors. PTP variants (SFN6322F / SFN7322F) have PPS. SFN7000 bracket kit (SOLR-PPS-DP10G) unobtainable. |
+| Solarflare SFN6122F / SFN7122F | Base 10G NICs — no PPS connectors. PTP variants (SFN6322F / SFN7322F) have PPS. |
+| Solarflare (all, upstream driver) | Upstream kernel `sfc` driver ignores PPS hardware entirely (`n_ext_ts=0`). Out-of-tree `sfc-dkms` required for PPS. See Solarflare section above. |
 | Marvell/Aquantia AQR | No PPS I/O pins |
 | Microchip LAN743x | No PPS input (n_ext_ts=0) |
 | Microchip LAN937x | No PPS I/O |
