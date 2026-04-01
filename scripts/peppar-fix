@@ -346,6 +346,9 @@ if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
     fi
     # shellcheck disable=SC2046
     bootstrap_phc_args+=($(ntrip_args))
+    if [[ -n "$FREERUN" ]]; then
+        bootstrap_phc_args+=(--no-glide)
+    fi
     phc_bootstrap_ok=false
     for ((phc_try=1; phc_try<=3; phc_try++)); do
         if "$PYTHON_BIN" "$SCRIPT_DIR/phc_bootstrap.py" "${bootstrap_phc_args[@]}"; then

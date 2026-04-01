@@ -365,6 +365,9 @@ def main():
                     help="Phase step optimal stopping search budget in seconds")
     ap.add_argument("--glide-zeta", type=float, default=0.7,
                     help="Target damping ratio for servo glide (0.5-1.0)")
+    ap.add_argument("--no-glide", action="store_true",
+                    help="Skip glide slope — set adjfine to base frequency only "
+                         "(for freerun characterization)")
     ap.add_argument("--track-kp", type=float, default=0.01,
                     help="Servo Kp for glide computation (overridden by profile)")
     ap.add_argument("--track-ki", type=float, default=0.001,
@@ -728,7 +731,9 @@ def main():
 
     # Step 3: Glide slope — set frequency to drive φ₀ toward zero.
     glide_offset = 0.0
-    if not phase_sane and args.track_ki > 0:
+    if args.no_glide:
+        log.info("Glide disabled (--no-glide): adjfine = base frequency only")
+    elif not phase_sane and args.track_ki > 0:
         omega_n = math.sqrt(args.track_ki)
         zeta = args.glide_zeta
         glide_offset = -zeta * omega_n * phi_0

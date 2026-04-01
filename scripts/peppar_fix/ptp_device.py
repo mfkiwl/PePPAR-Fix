@@ -9,7 +9,6 @@ import select
 import struct
 import time
 
-from peppar_fix.exclusive_io import acquire_device_lock, release_device_lock
 
 # ── PTP ioctl constants (from linux/ptp_clock.h) ─────────────────────── #
 
@@ -61,20 +60,20 @@ class PtpDevice:
 
     def __init__(self, dev_path="/dev/ptp0"):
         self.path = dev_path
-        self._lock_fd, self._lock_path = acquire_device_lock(dev_path)
+        self.fd = os.open(dev_path, os.O_RDWR)
+        # Kernel-enforced exclusive open — prevents other processes from
+        # opening the same PTP device.  Automatically released when the
+        # fd is closed, even on crash or SIGKILL.  No stale lock files.
         try:
-            self.fd = os.open(dev_path, os.O_RDWR)
-        except Exception:
-            release_device_lock(self._lock_fd)
-            raise
+            TIOCEXCL = 0x540C
+            fcntl.ioctl(self.fd, TIOCEXCL)
+        except OSError:
+            pass  # Not all PTP devices support TIOCEXCL; proceed anyway
         self.clock_id = _clock_id_from_fd(self.fd)
         self._libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
 
     def close(self):
-        try:
-            os.close(self.fd)
-        finally:
-            release_device_lock(self._lock_fd)
+        os.close(self.fd)
 
     def get_caps(self):
         """Query PTP clock capabilities."""

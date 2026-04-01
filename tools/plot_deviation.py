@@ -152,7 +152,7 @@ def load_servo_csv(path):
             q = r.get('qerr_ns', '')
             if q and q != '':
                 q = float(q)
-                pps_qerr.append(p - q)  # qErr corrects PPS
+                pps_qerr.append(p + q)  # qErr compensates PPS sawtooth
             else:
                 pps_qerr.append(np.nan)
         except (ValueError, KeyError):
