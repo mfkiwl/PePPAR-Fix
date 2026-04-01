@@ -33,19 +33,79 @@ sudo python3 tools/igc_tx_timeout_repro.py eth1 /dev/ptp0 30
 # Watch: dmesg -w | grep "Tx timestamp"
 ```
 
-Triggers in ~17 seconds on unpatched driver.
+Triggers in ~17–22 seconds on unpatched driver (at extreme rates).
 
-## Fix
+**Note**: The stress reproducer (200k adjfine/s + 100k TX/s) also
+reveals a **separate TX-only timeout** at extreme TX rates (~166k/s),
+even without adjfine.  This is a different bug (TX timestamp hardware
+overload, not the adjfine race).  See "TX-only timeout" below.
 
-Patch: `0001-igc-serialize-adjfine-with-tx-timestamps.patch`
+## Patches
+
+### v1: ptp_tx_lock + EBUSY (`0001-igc-serialize-adjfine-with-tx-timestamps.patch`)
 
 Hold `ptp_tx_lock` and skip the TIMINCA write if any TX timestamps are
 pending (`tx_tstamp[i].skb != NULL`).  Return `-EBUSY` so the PTP
 subsystem retries.
 
-This doesn't fully close the race (a new TX timestamp can start between
-the check and the write), but under realistic rates the residual
-probability gives ~25 year MTBF.
+**Stress test**: fails (EBUSY starves adjfine when TX rate is extreme).
+**Realistic rates** (1 Hz adjfine + 128 Hz TX): **passes** — zero EBUSY
+in 5 minutes, all 301 adjfine calls succeed.  At 128 Hz TX, the
+probability of a pending TX timestamp during the 1 Hz adjfine is
+negligible.
+
+### v2: tmreg_lock only (`0002-igc-use-tmreg_lock-for-adjfine.patch`)
+
+Hold `tmreg_lock` around the TIMINCA write, consistent with all other
+timing register accesses in igc_ptp.c.  No TX-pending check.
+
+**Result**: does NOT fix the bug.  Fails in 17 seconds under stress,
+same as stock.  `tmreg_lock` serializes software register accesses but
+cannot prevent the hardware's asynchronous TX timestamp capture from
+reading TIMINCA at the instant software writes it.
+
+This was tested per kernel maintainer feedback suggesting `tmreg_lock`
+instead of `ptp_tx_lock`.  The experiment confirms the race is between
+software and hardware, not between two software threads.
+
+## Experimental results (2026-04-01)
+
+| Variant | Stress (200k+100k/s) | Realistic (1+128 Hz) |
+|---------|---------------------|----------------------|
+| Stock (no lock) | **FAIL 22s** | FAIL ~30 min |
+| v1 (ptp_tx_lock + EBUSY) | FAIL 16s (EBUSY) | **PASS 300s** |
+| v2 (tmreg_lock only) | **FAIL 17s** | Not tested (same as stock) |
+| TX-only (no adjfine) | **FAIL 30s** | Expected OK |
+
+### Key findings
+
+1. **tmreg_lock alone doesn't help** — the race is between the
+   software TIMINCA write and the hardware's asynchronous TX timestamp
+   capture.  No software lock can prevent the hardware from reading
+   TIMINCA at the same instant software writes it.
+
+2. **v1's EBUSY is fine at realistic rates** — at 1 Hz adjfine + 128 Hz
+   TX, there's never a pending TX timestamp when adjfine runs (zero
+   EBUSY in 5 minutes).  The maintainer's concern about adjfine
+   starvation is valid in theory but doesn't manifest in practice.
+
+3. **TX-only timeout exists** — at extreme TX rates (~166k/s), the TX
+   timestamp hardware times out even without adjfine.  This is a
+   separate bug (resource exhaustion, not the TIMINCA race).
+
+### Possible v3 approaches
+
+A complete fix would need to prevent the hardware from starting a new
+TX timestamp capture during the TIMINCA write:
+
+- **Disable TX timestamping** via TSYNCTXCTL around the TIMINCA write
+  (hold tmreg_lock, clear TSYNCTXCTL.TXTS_EN, write TIMINCA, restore
+  TSYNCTXCTL).  This is the cleanest hardware-level fix but may drop
+  one TX timestamp.
+
+- **Combined lock + EBUSY** — hold tmreg_lock (for register
+  consistency) AND check TX pending under ptp_tx_lock (for hardware
+  race).  Same EBUSY limitation as v1 at extreme rates.
 
 ## Applying to Intel's out-of-tree igc driver (DKMS)
 
@@ -65,6 +125,6 @@ sudo rmmod igc && sudo modprobe igc
 
 ## Upstream status
 
-Not yet submitted.  Upstream `igc_ptp_adjfine_i225` in
-`drivers/net/ethernet/intel/igc/igc_ptp.c` has no locking as of
-Linux 6.12+.
+Submitted to intel-wired-lan list.  Maintainer feedback: use
+`tmreg_lock` instead of `ptp_tx_lock`.  Testing shows tmreg_lock alone
+is insufficient (see experiments above).  Discussion ongoing.

@@ -1,0 +1,54 @@
+From: Bob Van Valzah <bob@vanvalzah.com>
+Subject: [PATCH v2] igc: hold tmreg_lock in adjfine to serialize TIMINCA writes
+
+igc_ptp_adjfine_i225() writes IGC_TIMINCA without holding any lock.
+Every other PTP clock operation in igc_ptp.c (adjtime, gettime, settime)
+holds tmreg_lock when accessing timing registers, but adjfine does not.
+
+When ptp4l (or any PTP stack) sends hardware-timestamped packets while
+a clock discipline daemon adjusts the frequency, the unsynchronized
+TIMINCA write can race with the hardware's TX timestamp capture,
+producing a corrupt timestamp.  After IGC_PTP_TX_TIMEOUT (15s), the
+driver logs "Tx timestamp timeout" and eventually the EXTTS subsystem
+stops delivering PPS events.
+
+Reproducible: one thread calling clock_adjtime(ADJ_FREQUENCY) at
+~200k/s while another sends hardware-timestamped UDP packets triggers
+the timeout within 17 seconds.
+
+Fix: hold tmreg_lock around the TIMINCA write, consistent with how
+all other timing register accesses are protected.
+
+v2: Use tmreg_lock (timing register lock) instead of ptp_tx_lock
+    (TX timestamp queue lock) per maintainer feedback.  Drop the
+    TX-pending check and -EBUSY return — tmreg_lock serializes the
+    register write itself, which is sufficient.
+
+Signed-off-by: Bob Van Valzah <bob@vanvalzah.com>
+---
+ drivers/net/ethernet/intel/igc/igc_ptp.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/igc/igc_ptp.c b/drivers/net/ethernet/intel/igc/igc_ptp.c
+--- a/drivers/net/ethernet/intel/igc/igc_ptp.c
++++ b/drivers/net/ethernet/intel/igc/igc_ptp.c
+@@ -47,6 +47,7 @@ static int igc_ptp_adjfine_i225(struct ptp_clock_info *ptp, long scaled_ppm)
+ {
+ 	struct igc_adapter *igc = container_of(ptp, struct igc_adapter,
+ 					       ptp_caps);
+ 	struct igc_hw *hw = &igc->hw;
++	unsigned long flags;
+ 	int neg_adj = 0;
+ 	u64 rate;
+ 	u32 inca;
+@@ -63,7 +64,9 @@ static int igc_ptp_adjfine_i225(struct ptp_clock_info *ptp, long scaled_ppm)
+ 	if (neg_adj)
+ 		inca |= ISGN;
+
+-	wr32(IGC_TIMINCA, inca);
++	spin_lock_irqsave(&igc->tmreg_lock, flags);
++	wr32(IGC_TIMINCA, inca);
++	spin_unlock_irqrestore(&igc->tmreg_lock, flags);
+
+ 	return 0;
+ }
