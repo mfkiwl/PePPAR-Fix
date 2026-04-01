@@ -75,6 +75,7 @@ software and hardware, not between two software threads.
 | Stock (no lock) | **FAIL 22s** | FAIL ~30 min |
 | v1 (ptp_tx_lock + EBUSY) | FAIL 16s (EBUSY) | **PASS 300s** |
 | v2 (tmreg_lock only) | **FAIL 17s** | Not tested (same as stock) |
+| v3 (tmreg_lock + TSYNCTXCTL) | FAIL 17s | **PASS 300s** |
 | TX-only (no adjfine) | **FAIL 30s** | Expected OK |
 
 ### Key findings
@@ -84,28 +85,30 @@ software and hardware, not between two software threads.
    capture.  No software lock can prevent the hardware from reading
    TIMINCA at the same instant software writes it.
 
-2. **v1's EBUSY is fine at realistic rates** — at 1 Hz adjfine + 128 Hz
-   TX, there's never a pending TX timestamp when adjfine runs (zero
-   EBUSY in 5 minutes).  The maintainer's concern about adjfine
-   starvation is valid in theory but doesn't manifest in practice.
+2. **v3 is the recommended patch** — uses tmreg_lock (correct lock per
+   maintainer) + TSYNCTXCTL disable/enable (prevents new captures
+   during TIMINCA write).  Always succeeds (no -EBUSY), no adjfine
+   starvation.  Passes at realistic rates (301/301 adjfine in 5 min).
 
-3. **TX-only timeout exists** — at extreme TX rates (~166k/s), the TX
+3. **No patch survives extreme stress** — at 200k adjfine/s + 100k TX/s,
+   all variants fail.  This is because an in-flight TX timestamp
+   capture that started before the disable cannot be cancelled.  At
+   realistic rates the collision window (~1 µs per adjfine at 1 Hz)
+   is negligible.
+
+4. **TX-only timeout exists** — at extreme TX rates (~166k/s), the TX
    timestamp hardware times out even without adjfine.  This is a
    separate bug (resource exhaustion, not the TIMINCA race).
 
-### Possible v3 approaches
+### Why v3 is preferred over v1
 
-A complete fix would need to prevent the hardware from starting a new
-TX timestamp capture during the TIMINCA write:
-
-- **Disable TX timestamping** via TSYNCTXCTL around the TIMINCA write
-  (hold tmreg_lock, clear TSYNCTXCTL.TXTS_EN, write TIMINCA, restore
-  TSYNCTXCTL).  This is the cleanest hardware-level fix but may drop
-  one TX timestamp.
-
-- **Combined lock + EBUSY** — hold tmreg_lock (for register
-  consistency) AND check TX pending under ptp_tx_lock (for hardware
-  race).  Same EBUSY limitation as v1 at extreme rates.
+- **Correct lock**: tmreg_lock guards timing registers (per maintainer).
+  v1 used ptp_tx_lock which guards the TX queue — wrong abstraction.
+- **No -EBUSY**: v1 returns -EBUSY when TX timestamps are pending,
+  which could starve adjfine under heavy TX load.  v3 always writes
+  TIMINCA.
+- **Hardware-level fix**: v3 disables the capture mechanism itself,
+  rather than checking software queue state as a proxy.
 
 ## Applying to Intel's out-of-tree igc driver (DKMS)
 

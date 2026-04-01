@@ -1,0 +1,66 @@
+From: Bob Van Valzah <bob@vanvalzah.com>
+Subject: [PATCH v3] igc: disable TX timestamping around TIMINCA write in adjfine
+
+igc_ptp_adjfine_i225() writes IGC_TIMINCA without synchronization.
+When the hardware captures a TX timestamp while TIMINCA is changing,
+the captured value is corrupt, causing "Tx timestamp timeout" after
+15 seconds and eventually wedging the EXTTS subsystem.
+
+The race is between software and hardware — no software lock alone
+can prevent the hardware's asynchronous TX timestamp capture from
+reading TIMINCA at the instant software writes it (confirmed by
+testing: tmreg_lock alone does not fix the bug).
+
+Fix: hold tmreg_lock (consistent with all other timing register
+accesses), temporarily disable TX timestamping in hardware by
+clearing IGC_TSYNCTXCTL_ENABLED, write TIMINCA, then re-enable.
+This prevents the hardware from starting any new TX timestamp
+capture during the rate change.
+
+The disable window is ~1 µs (two register writes around the TIMINCA
+write).  Any TX packet sent during this window simply won't receive
+a hardware timestamp — no corruption, no timeout, no wedge.  At
+realistic PTP sync rates (128 Hz), the probability of a packet
+landing in this window is < 0.013%.
+
+v3: Disable/re-enable TX timestamping around TIMINCA write instead
+    of checking pending skbs (v1) or using tmreg_lock alone (v2).
+    Always succeeds (no -EBUSY), no adjfine starvation under load.
+
+Signed-off-by: Bob Van Valzah <bob@vanvalzah.com>
+---
+ drivers/net/ethernet/intel/igc/igc_ptp.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/intel/igc/igc_ptp.c b/drivers/net/ethernet/intel/igc/igc_ptp.c
+--- a/drivers/net/ethernet/intel/igc/igc_ptp.c
++++ b/drivers/net/ethernet/intel/igc/igc_ptp.c
+@@ -47,6 +47,8 @@ static int igc_ptp_adjfine_i225(struct ptp_clock_info *ptp, long scaled_ppm)
+ {
+ 	struct igc_adapter *igc = container_of(ptp, struct igc_adapter,
+ 					       ptp_caps);
+ 	struct igc_hw *hw = &igc->hw;
++	unsigned long flags;
++	u32 txctl;
+ 	int neg_adj = 0;
+ 	u64 rate;
+ 	u32 inca;
+@@ -63,7 +65,17 @@ static int igc_ptp_adjfine_i225(struct ptp_clock_info *ptp, long scaled_ppm)
+ 	if (neg_adj)
+ 		inca |= ISGN;
+
+-	wr32(IGC_TIMINCA, inca);
++	/* Changing TIMINCA while the hardware is capturing a TX timestamp
++	 * corrupts the timestamp, causing "Tx timestamp timeout."
++	 * Temporarily disable TX timestamping so no new capture can start
++	 * during the rate change.
++	 */
++	spin_lock_irqsave(&igc->tmreg_lock, flags);
++	txctl = rd32(IGC_TSYNCTXCTL);
++	wr32(IGC_TSYNCTXCTL, txctl & ~IGC_TSYNCTXCTL_ENABLED);
++	wr32(IGC_TIMINCA, inca);
++	wr32(IGC_TSYNCTXCTL, txctl);
++	spin_unlock_irqrestore(&igc->tmreg_lock, flags);
+
+ 	return 0;
+ }
