@@ -1,109 +1,120 @@
-# Session Handoff — 2026-03-29 (afternoon)
+# Session Handoff — 2026-04-01
 
 ## What was accomplished this session
 
-### qErr correlation fixed (was top priority)
+### White Rabbit GM architecture review
 
-Root cause: the old TOW-based qErr matching (`round(rcvTow)`) paired
-TIM-TP samples with the wrong PPS edge. The litmus test showed 0.999x
-(no improvement) because the wrong qErr was applied.
+Reviewed WR softpll codebase. Key finding: the GM uses PPS only for
+one-shot alignment (then ignores it), and distributes frequency/phase
+from 10 MHz.  peppar-fix's continuous PPS+PPP discipline is strictly
+better than the GM's alignment approach.  Two integration paths
+documented: PHC PEROUT as 10 MHz reference, or OCXO+ClockMatrix with
+software steering (preferred).  See `docs/wr-gm-research.md`.
 
-**Fix**: match TIM-TP to PPS by host monotonic time. TIM-TP arrives
-~900 ms before the PPS edge it describes. `QErrStore.match_pps_mono()`
-finds the closest qErr at that offset — no GPS time, no receiver clock
-bias, no round/floor ambiguity.
+### Solarflare SFN8522 evaluated — not viable with upstream driver
 
-**Verification** (servo-free, `tools/qerr_offset_sweep.py`):
-- Offset 0.9s, sign +, **ratio 2.0–3.7x** variance reduction
-- Works at both +200 and -200 ppb adjfine (no sign dependence)
-- Adjacent offsets (0.0s, 1.9s) also show partial correlation due to
-  smooth F9T sawtooth, but 0.9s is the clear best
+Installed on ocxo.  PTP license is active (PHC appears, HW timestamping
+works) but upstream `sfc` driver reports `n_ext_ts=0` — PPS hardware
+exists but is invisible.  Out-of-tree `sfc-dkms` driver required.
+PEROUT never supported on any Solarflare generation.  TICC #3 wired
+to Solarflare PPS IN/OUT but shows no data.  See updated
+`docs/nic-survey.md` and `docs/platform-support.md`.
 
-**Key finding**: `round()` was correct for TOW matching (not `floor()`).
-RAWX rcvTow includes ~-10 ms receiver clock bias, so rcvTow ≈ N.990
-and `round(N.990) = N+1` = correct PPS second. But TOW matching was
-fundamentally fragile — monotonic matching is robust.
+**PTP device numbering changed**: Solarflare pushed E810 from ptp1 to
+ptp2.  Updated `config/ocxo.toml`.
 
-### Litmus test fixed
+### TICC serial open — HUPCL fix
 
-Old litmus used `detrended_variance()` (linear fit removal) on raw
-`pps_error_ns`. This failed because:
-1. During servo pull-in, the nonlinear glide created ~600 ns residuals
-   that drowned the ~3 ns qErr signal
-2. In steady state, servo adjfine changes between epochs added phase
-   steps unrelated to qErr
+`dsrdtr=False` was insufficient to prevent Arduino reboot across
+process boundaries.  Root cause: `cdc_acm` driver toggles DTR on
+open/close regardless.  Fix: clear HUPCL termios flag so DTR stays
+asserted after close.  Tested cross-process (3 independent opens) on
+both TimeHat (kernel 6.12) and ocxo (kernel 6.8) — no reboots.
 
-New litmus:
-- `diff_variance()` — first-difference variance, immune to any smooth trend
-- Subtracts cumulative adjfine rate before differencing to remove servo footprint
-- Always logs the ratio (no silent zone between 1.0 and 2.0)
+Also: shared port singleton (`_SharedTiccPort`) for within-process
+reuse, `TimeoutError` on boot wait failure, CR sent during menu phase,
+flock replaced with TIOCEXCL.
 
-### TIM-TP timing characterized
+### Freerun mode implemented
 
-Message ordering within each F9T burst (after PPS fires):
-```
-PPS(N) fires → RAWX(rcvTow≈(N-1).990) at +50ms → TIM-TP(towMS=(N+1)*1000) at +100ms → PVT(iTOW=N*1000) at +100ms
-```
+`--freerun` runs the full pipeline without steering the PHC.  Logs what
+the servo would do (adjfine, error sources, qErr litmus) but never calls
+adjfine.  For characterizing EXTTS precision and oscillator stability.
 
-TIM-TP in each burst describes the PPS **two** seconds ahead of
-`floor(rcvTow)`. It predicts qErr for the **following** PPS edge
-(the one ~900 ms in the future).
+- `--freerun-max-error-ns` auto-stops when PPS error exceeds threshold
+- `--no-glide` in bootstrap (automatic with freerun): sets adjfine to
+  base oscillator frequency only, no glide slope
+- `phc_gettime_ns` column added to servo CSV
+- clockClass held at 248 throughout
 
-### New diagnostic tools
+### flock replaced with TIOCEXCL in PtpDevice
 
-- `tools/qerr_offset_sweep.py` — servo-free PPS+TIM-TP correlation
-  sweep across monotonic time offsets. The definitive qErr test.
-- `tools/qerr_servo_impact.py` — analyze how much variance the servo
-  adds at each run phase (pull-in, glide, tracking, steady)
-- `tools/qerr_correlation_check.py` — direct Pearson r of pps_error
-  vs qerr from servo CSV data
+Stale flock files from crashed processes blocked re-runs.  TIOCEXCL is
+kernel-enforced and auto-released on fd close, even on SIGKILL.
 
-### CLAUDE.md updated
+### qErr sign fixed in plot_deviation.py
 
-Added Lab Test Protocol section: prefer `scripts/peppar-fix` wrapper
-for testing over running component scripts directly.
+Was using `pps - qerr` (wrong), fixed to `pps + qerr` (correct).
+Now shows 1.4–2.0x improvement, consistent with qerr_offset_sweep.
+
+### TICC baseline characterization (overnight)
+
+Four captures on TimeHat TICC #1 (2×30m + 2×2h):
+
+**F9T PPS TDEV(1s) = 2.3 ±0.1 ns** (2-hour baseline).  30-minute runs
+give 1.0–1.4 ns depending on sawtooth phase — short observations are
+unreliable.  The 2-hour value is the authoritative F9T PPS baseline.
+
+**i226 TCXO PEROUT TDEV(1s) = 1.170 ±0.002 ns** (0.2% spread across
+all 4 runs).  The free-running TCXO is quieter than the F9T PPS at
+tau=1–5s.  The servo cannot improve the PHC at short tau.
+
+**E810 EXTTS TDEV(1s) = 0.34 ns** — artifact of quantization flatness
+(77% identical adjacent timestamps).  The E810 sub-ns resolution can't
+distinguish the ~2.3 ns PPS jitter.  Not a real measurement of
+timing precision.
+
+See `docs/ticc-baseline-2026-04-01.md`.
 
 ## Known issues
 
-### Litmus still shows ~1.0 during pull-in with rate compensation
+### E810 ADJ_SETOFFSET residual
 
-The rate-compensated first-difference litmus in the engine showed ~1.0
-during a short test (80 epochs, mostly pull-in). The sweep tool without
-the servo shows 2–3.7x. The rate compensation model (subtracting
-cumulative adjfine) may be imperfect, or the 32-sample window needs
-more settled epochs. Needs a longer run to confirm the litmus passes
-in steady state with the new monotonic matching.
+`step_relative` reports +3281 ns but PPS truth shows -87192 ns.
+The readback from `clock_adjtime` doesn't reflect actual E810 PHC
+state.  Pre-existing but not previously characterized.
+
+### ocxo E810 I2C qErr coverage
+
+Only 133/436 epochs (30%) had qErr in the ocxo freerun run.
+TIM-TP should arrive at 1 Hz even when RAWX is at 0.5 Hz.  May need
+to check TIM-TP configuration on the I2C port.
+
+### TimeHat "missing epochs" — not missing
+
+96 epochs in "300s" duration was actually 96 epochs in 95s of servo
+time — bootstrap consumed most of the 300s budget.  Use `--duration 600`
+for ~5 min of servo data.
 
 ### Position watchdog on ocxo
 
-Trips after ~2.4 hours. Vertical drift from uncompensated troposphere.
-Needs: larger threshold, or troposphere state, or fixed-position mode.
-
-### TimeHat missing epochs
-
-1911/3600 in verification run despite 0 gate drops. Unknown path.
-See memory: project_timehat_missing_epochs.md.
-
-### Correlation gate still drops ~6%
-
-epoch_offset=0 now (was -1) but gate_wait_obs=1220 in overnight.
-May be residual zero-crossing drops or a different issue.
-
-### ocxo repo was out of date
-
-Had to rsync full scripts/ directory to ocxo. The ocxo repo at
-`~/git/PePPAR-Fix` may drift again. Consider a deploy script or
-git pull workflow.
+Still trips after ~2.4 hours (from previous sessions).
 
 ## Commits pushed
 
-- c15d3b4: Fix qErr correlation: match by host monotonic time, not GPS TOW
+- 79a6f59: Fix TICC serial open: use HUPCL to prevent cross-process reboots
+- c088f2c: Add White Rabbit GM architecture research doc
+- 3a7f48c: Update Solarflare platform docs
+- 24e49b5: Add --freerun mode for PHC stability characterization
+- 340f838: Fix freerun issues: no-glide, drop flock, fix qErr sign
+- 0d825db: Add TICC baseline characterization: F9T PPS and i226 TCXO
 
 All on main, pushed to origin.
 
 ## Host state
 
-- TimeHat: idle, adjfine restored to 94.7 ppb (from drift.json),
-  EXTTS enabled, igc patched (DKMS), ptp4l at 1 Hz sync
-- ocxo: idle, scripts synced, stock ice driver, PEROUT via sysfs
-- PiPuss: idle, position repeatability complete
+- TimeHat: idle, adjfine at ~101 ppb (base freq from bootstrap),
+  EXTTS enabled, PEROUT running, TICC #1 available
+- ocxo: idle, ptp_dev updated to /dev/ptp2 (Solarflare shifted E810),
+  Solarflare at ptp0 (upstream driver, no PPS), TICC #2/#3 available
+- PiPuss: not touched this session
