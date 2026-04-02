@@ -226,6 +226,7 @@ here before changing anything in the areas they cover.
 | [extts-lifecycle.md](docs/extts-lifecycle.md) | EXTTS (PPS IN/OUT) initialization lifecycle. Bootstrap owns pin programming; engine inherits and verifies. Covers PTP profile extension for IN+OUT pins, PEROUT for TICC, fd persistence, platform matrix (i226/E810), and phased migration path. |
 | [wr-gm-research.md](docs/wr-gm-research.md) | White Rabbit GM architecture review: softpll internals (helper/main/external PLLs), how GM uses PPS vs 10 MHz, qErr injection points, PEROUT at 10 MHz, two integration paths (PHC PEROUT vs OCXO+ClockMatrix). |
 | [ticc-baseline-2026-04-01.md](docs/ticc-baseline-2026-04-01.md) | F9T PPS baseline TDEV(1s)=2.3 ns (2h runs); i226 TCXO PEROUT TDEV(1s)=1.170 ns (0.2% spread); servo bandwidth implications; EXTTS quantization analysis. |
+| [ppp-ar-design.md](docs/ppp-ar-design.md) | Design for PPP-AR: phase bias sources, filter changes, ambiguity resolution algorithm, 4-phase implementation plan, 5 validation tests. |
 
 ## Lab Documentation Pointers
 
