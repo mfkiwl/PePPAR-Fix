@@ -681,22 +681,16 @@ def main():
     phi_0 = phase_error_ns
 
     if not phase_sane:
-        # Step 1: Phase step.
-        # Default: ADJ_SETOFFSET (relative, ±2 ns on both i226 and E810).
-        # Fallback: optimal stopping with clock_settime (if ADJ_SETOFFSET fails).
-        pps_anchor_ns = target_sec * 1_000_000_000
+        # Step: apply the PPS-measured phase error as a relative correction.
+        # ADJ_SETOFFSET is precise on both i226 and E810 — no readback or
+        # system clock cross-referencing needed.  Verify via the next PPS.
         try:
-            log.info("Stepping PHC (ADJ_SETOFFSET, target_sec=%d)", target_sec)
-            residual, attempts, met = ptp.step_relative(
-                target_ns=0,
-                pps_anchor_ns=pps_anchor_ns,
-                pps_realtime_ns=pps_realtime_ns,
-            )
-            log.info("Step: residual=%+.0f ns (ADJ_SETOFFSET, single-shot)",
-                     residual)
+            log.info("Stepping PHC by %+.0f ns (ADJ_SETOFFSET)", -phase_error_ns)
+            ptp.adj_setoffset(-phase_error_ns)
         except OSError as e:
             log.warning("ADJ_SETOFFSET failed (%s), falling back to optimal stopping",
                         e)
+            pps_anchor_ns = target_sec * 1_000_000_000
             log.info("Stepping PHC (optimal_stop, limit=%.1fs, lag=%d ns)",
                      args.phc_optimal_stop_limit_s, args.phc_settime_lag_ns)
             residual, attempts, met = ptp.step_to(
@@ -709,7 +703,7 @@ def main():
                      residual, attempts, "ACCEPTED" if met else "DEADLINE",
                      args.phc_optimal_stop_limit_s)
 
-        # Step 2: Measure true residual φ₀ via PPS.
+        # Verify: measure true residual φ₀ from the next PPS edge.
         ptp.enable_extts(args.extts_channel, rising_edge=True)
         evt = ptp.read_extts(timeout_ms=2000)
         if evt is not None:
@@ -720,11 +714,11 @@ def main():
             v_epoch_off = v_rounded - v_target
             v_sub_ns = v_nsec if v_nsec < 500_000_000 else v_nsec - 1_000_000_000
             phi_0 = v_epoch_off * 1_000_000_000 + v_sub_ns
-            log.info("PPS truth: phi_0 = %+.0f ns (epoch_offset=%d)",
+            log.info("PPS verify: phi_0 = %+.0f ns (epoch_offset=%d)",
                      phi_0, v_epoch_off)
         else:
-            log.warning("No PPS event — using readback residual as phi_0")
-            phi_0 = residual
+            log.warning("No PPS event — assuming step landed at 0")
+            phi_0 = 0
         ptp.disable_extts(args.extts_channel)
     else:
         log.info("Phase OK (%+.0f ns) — frequency-only correction", phase_error_ns)
