@@ -1639,11 +1639,11 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                          f"({ppp_cal._n} samples)")
         sources = compute_error_sources(
             pps_error_ns,
-            qerr_ns,
+            None if args.no_qerr else qerr_ns,
             dt_rx_ns,
             dt_rx_sigma,
             carrier_max_sigma=args.carrier_max_sigma_ns,
-            ppp_cal=ppp_cal,
+            ppp_cal=None if args.no_ppp else ppp_cal,
         )
     best = sources[0]
 
@@ -2425,6 +2425,11 @@ Two-phase operation:
     servo.add_argument("--freerun-max-error-ns", type=float, default=None,
                        help="Auto-stop freerun when |pps_error_ns| exceeds this "
                             "(default: 100000 for OCXO, 500000 for TCXO)")
+    servo.add_argument("--no-qerr", action="store_true",
+                       help="Disable qErr correction (PPS-only discipline)")
+    servo.add_argument("--no-ppp", action="store_true",
+                       help="Disable PPP carrier-phase correction "
+                            "(PPS+qErr only, no PPS+PPP source)")
 
     ticc = ap.add_argument_group("TICC experimental input (optional)")
     ticc.add_argument("--ticc-port", default=None,
