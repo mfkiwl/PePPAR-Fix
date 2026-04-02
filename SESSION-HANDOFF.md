@@ -1,120 +1,145 @@
-# Session Handoff — 2026-04-01
+# Session Handoff — 2026-04-01/02 (overnight)
 
 ## What was accomplished this session
 
-### White Rabbit GM architecture review
+### igc adjfine TX timestamp race — full investigation
 
-Reviewed WR softpll codebase. Key finding: the GM uses PPS only for
-one-shot alignment (then ignores it), and distributes frequency/phase
-from 10 MHz.  peppar-fix's continuous PPS+PPP discipline is strictly
-better than the GM's alignment approach.  Two integration paths
-documented: PHC PEROUT as 10 MHz reference, or OCXO+ClockMatrix with
-software steering (preferred).  See `docs/wr-gm-research.md`.
+Tested three patches per kernel maintainer feedback:
+- v1 (ptp_tx_lock + EBUSY): works at realistic rates, starves adjfine
+  under extreme TX load
+- v2 (tmreg_lock only): does NOT fix bug — race is hardware, not
+  software register contention
+- v3 (tmreg_lock + TSYNCTXCTL disable/enable): works at realistic
+  rates, strands in-progress captures at extreme rates
 
-### Solarflare SFN8522 evaluated — not viable with upstream driver
+Diagnostic testing with driver reload between each test revealed three
+distinct failure modes: TIMINCA corruption (the original bug), TX
+timestamp slot exhaustion (4-slot hardware limit at ~65k TX/s), and
+TSYNCTXCTL stranding (v3 side effect).
 
-Installed on ocxo.  PTP license is active (PHC appears, HW timestamping
-works) but upstream `sfc` driver reports `n_ext_ts=0` — PPS hardware
-exists but is invisible.  Out-of-tree `sfc-dkms` driver required.
-PEROUT never supported on any Solarflare generation.  TICC #3 wired
-to Solarflare PPS IN/OUT but shows no data.  See updated
-`docs/nic-survey.md` and `docs/platform-support.md`.
+PTP GM scaling: i226 handles ~500 PTP clients (65k TX timestamps/s)
+before slot exhaustion.  The adjfine race is negligible at 1 Hz.
 
-**PTP device numbering changed**: Solarflare pushed E810 from ptp1 to
-ptp2.  Updated `config/ocxo.toml`.
+Draft upstream reply with v3 patch at
+`drivers/igc-adjfine-fix/upstream-reply-v3.txt`.
 
-### TICC serial open — HUPCL fix
+### PHC bootstrap simplified — ADJ_SETOFFSET
 
-`dsrdtr=False` was insufficient to prevent Arduino reboot across
-process boundaries.  Root cause: `cdc_acm` driver toggles DTR on
-open/close regardless.  Fix: clear HUPCL termios flag so DTR stays
-asserted after close.  Tested cross-process (3 independent opens) on
-both TimeHat (kernel 6.12) and ocxo (kernel 6.8) — no reboots.
+Removed the vestigial PTP_SYS_OFFSET readback and system clock
+extrapolation from the step path.  The PPS measurement already gives
+the exact phase error; `adj_setoffset(-phase_error_ns)` applies it
+directly.
 
-Also: shared port singleton (`_SharedTiccPort`) for within-process
-reuse, `TimeoutError` on boot wait failure, CR sent during menu phase,
-flock replaced with TIOCEXCL.
+Results: E810 step residual went from -87192 ns to 0 ns.  TimeHat
+i226: -1968 ns (±2 µs).
 
-### Freerun mode implemented
+### Overnight TICC + freerun characterization (2h captures)
 
-`--freerun` runs the full pipeline without steering the PHC.  Logs what
-the servo would do (adjfine, error sources, qErr litmus) but never calls
-adjfine.  For characterizing EXTTS precision and oscillator stability.
+Four parallel captures: TICC on TimeHat (existing), TICC on ocxo,
+freerun on TimeHat, freerun on ocxo.
 
-- `--freerun-max-error-ns` auto-stops when PPS error exceeds threshold
-- `--no-glide` in bootstrap (automatic with freerun): sets adjfine to
-  base oscillator frequency only, no glide slope
-- `phc_gettime_ns` column added to servo CSV
-- clockClass held at 248 throughout
+**F9T PPS baseline** (TICC chB, 2h):
+- TimeHat: TDEV(1s) = 2.23 ns
+- ocxo: TDEV(1s) = 3.01 ns
+- Both converge at tau>10s (same underlying F9T behavior)
 
-### flock replaced with TIOCEXCL in PtpDevice
+**PHC PEROUT stability** (TICC chA, 2h, free-running):
+- TimeHat i226 TCXO: TDEV(1s) = 1.17 ns (0.2% reproducible)
+- ocxo E810 OCXO: TDEV(1s) = 2.78 ns (surprisingly noisier)
+- E810 PEROUT noise tracks the F9T PPS (3.01 ns), suggesting internal
+  coupling between PPS and PEROUT paths
 
-Stale flock files from crashed processes blocked re-runs.  TIOCEXCL is
-kernel-enforced and auto-released on fd close, even on SIGKILL.
+**PHC noise extraction** (EXTTS vs TICC, duration-matched 2h):
+- i226 EXTTS TDEV(1s) = 3.64 ns
+- i226 PHC capture noise = 2.88 ns RSS (36% of 8 ns tick)
+- i226 EXTTS + qErr TDEV(1s) = 2.23 ns = TICC ground truth
+- **qErr fully compensates the 8 ns quantization** at tau=1s (1.63x)
 
-### qErr sign fixed in plot_deviation.py
+**E810 EXTTS** quantization analysis:
+- Both i226 and E810 have ~8 ns effective EXTTS resolution
+- i226 adds noise (resolves PPS movement), E810 is flat (77% identical)
+- E810's sub-ns capability is in the packet timestamp path, not GPIO
 
-Was using `pps - qerr` (wrong), fixed to `pps + qerr` (correct).
-Now shows 1.4–2.0x improvement, consistent with qerr_offset_sweep.
+### EXTTS resolution analysis documented
 
-### TICC baseline characterization (overnight)
+Updated `docs/ticc-baseline-2026-04-01.md` with the 8 ns quantization
+analysis, PHC noise extraction method, qErr value assessment for each
+timestamper, and TICC vs EXTTS comparison.
 
-Four captures on TimeHat TICC #1 (2×30m + 2×2h):
+### PPP-AR design document
 
-**F9T PPS TDEV(1s) = 2.3 ±0.1 ns** (2-hour baseline).  30-minute runs
-give 1.0–1.4 ns depending on sawtooth phase — short observations are
-unreliable.  The 2-hour value is the authoritative F9T PPS baseline.
+`docs/ppp-ar-design.md`: four-phase plan from float PPP to PPP-AR.
+Phase bias sources (Galileo HAS IDD, single-AC NTRIP), filter changes,
+bootstrapping AR algorithm, five validation tests.  Key risk: the
+FixedPosFilter cancels ambiguities by construction — AR requires an
+undifferenced clock filter.
 
-**i226 TCXO PEROUT TDEV(1s) = 1.170 ±0.002 ns** (0.2% spread across
-all 4 runs).  The free-running TCXO is quieter than the F9T PPS at
-tau=1–5s.  The servo cannot improve the PHC at short tau.
+### Visualization tools
 
-**E810 EXTTS TDEV(1s) = 0.34 ns** — artifact of quantization flatness
-(77% identical adjacent timestamps).  The E810 sub-ns resolution can't
-distinguish the ~2.3 ns PPS jitter.  Not a real measurement of
-timing precision.
+- `tools/plot_oscillator_floor.py` — oscillator noise floors + EXTTS
+  measurement noise with shaded PHC noise region
+- `tools/plot_pps_corrections.py` — PPS→PPS+qErr→PPS+PPP TDEV
+  improvement plot
+- Updated `tools/plot_deviation.py` — fixed qErr sign, added MDEV
+  and detrending
 
-See `docs/ticc-baseline-2026-04-01.md`.
+### Other fixes
+
+- Lab timezones: all hosts set to America/Chicago
+- ocxo ptp_dev updated to /dev/ptp2 (Solarflare shifted E810)
+- Removed empty `scripts/phc_servo.py`
 
 ## Known issues
 
-### E810 ADJ_SETOFFSET residual
+### E810 PEROUT noise = F9T PPS noise
 
-`step_relative` reports +3281 ns but PPS truth shows -87192 ns.
-The readback from `clock_adjtime` doesn't reflect actual E810 PHC
-state.  Pre-existing but not previously characterized.
+E810 PEROUT TDEV(1s) = 2.78 ns via TICC, very close to the F9T PPS
+on the same host (3.01 ns).  The OCXO should be sub-ns.  Suggests
+the PEROUT path is coupled to the F9T PPS sawtooth internally —
+the PEROUT may be phase-locked to the PPS rather than running from
+the OCXO directly.
+
+### PPS+PPP appears worse than raw PPS in freerun
+
+In freerun, `source_error_ns` from PPS+PPP has higher TDEV than raw
+PPS.  This is because the PPP filter sees a drifting PHC and its
+correction includes reconvergence artifacts.  PPP improvement requires
+disciplined mode.
 
 ### ocxo E810 I2C qErr coverage
 
-Only 133/436 epochs (30%) had qErr in the ocxo freerun run.
-TIM-TP should arrive at 1 Hz even when RAWX is at 0.5 Hz.  May need
-to check TIM-TP configuration on the I2C port.
-
-### TimeHat "missing epochs" — not missing
-
-96 epochs in "300s" duration was actually 96 epochs in 95s of servo
-time — bootstrap consumed most of the 300s budget.  Use `--duration 600`
-for ~5 min of servo data.
+Only 30% of epochs had qErr on ocxo.  TIM-TP should arrive at 1 Hz
+even when RAWX is at 0.5 Hz.
 
 ### Position watchdog on ocxo
 
-Still trips after ~2.4 hours (from previous sessions).
+Still trips after ~2.4 hours.
 
 ## Commits pushed
 
-- 79a6f59: Fix TICC serial open: use HUPCL to prevent cross-process reboots
-- c088f2c: Add White Rabbit GM architecture research doc
 - 3a7f48c: Update Solarflare platform docs
 - 24e49b5: Add --freerun mode for PHC stability characterization
 - 340f838: Fix freerun issues: no-glide, drop flock, fix qErr sign
 - 0d825db: Add TICC baseline characterization: F9T PPS and i226 TCXO
+- c2bdf7f: Rewrite EXTTS resolution analysis: both i226 and E810 ~8 ns
+- 93a8da0: igc adjfine: test tmreg_lock patch (v2) per maintainer
+- 098a790: igc adjfine v3: disable TX timestamping around TIMINCA write
+- 6daca83: igc adjfine: clean-state diagnostic reveals true failure modes
+- ac1e604: Draft upstream reply with v3 patch and diagnostic findings
+- 187bcad: igc: add PTP GM scaling analysis to upstream reply
+- 8dfa678: Simplify PHC step: apply PPS error directly via ADJ_SETOFFSET
+- 1dcdf3e: Add oscillator noise floor and EXTTS measurement noise plots
+- 3a70be5: Show both hosts on oscillator noise floor plot
+- 3c19abc: Add PHC noise floor extraction to PPS measurement plot
+- 1cb3355: Add PPS corrections TDEV improvement plot
+- c0838a4: Add PPP-AR design: from float PPP to integer AR
 
 All on main, pushed to origin.
 
 ## Host state
 
-- TimeHat: idle, adjfine at ~101 ppb (base freq from bootstrap),
-  EXTTS enabled, PEROUT running, TICC #1 available
-- ocxo: idle, ptp_dev updated to /dev/ptp2 (Solarflare shifted E810),
-  Solarflare at ptp0 (upstream driver, no PPS), TICC #2/#3 available
-- PiPuss: not touched this session
+- TimeHat: idle, v3 igc patch deployed, adjfine at ~97 ppb,
+  TICC #1 available
+- ocxo: idle, ptp_dev=/dev/ptp2, Solarflare at ptp0 (no PPS),
+  TICC #2/#3 available
+- Data files: 2h TICC + freerun CSVs on both hosts and in repo data/
