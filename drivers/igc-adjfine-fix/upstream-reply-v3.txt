@@ -125,6 +125,35 @@ Three distinct failure modes
    only creates one brief (~1 µs) disable window per second.
 
 
+PTP GM scaling implications
+---------------------------
+
+With adjfine fixed at 1/s (realistic for any GPSDO), the adjfine race
+is not the scaling bottleneck.  The limit is the 4-slot TX timestamp
+queue (IGC_MAX_TX_TSTAMP_REGS).  We swept TX timestamp rates from
+128/s to 150k/s with 1 Hz adjfine and driver reload between each
+test (v3 patch):
+
+  TX   128/s + adj 1/s : clean 60s   (1 PTP client at 128 Hz)
+  TX  1024/s + adj 1/s : clean 60s   (~8 clients)
+  TX  8192/s + adj 1/s : clean 60s   (~64 clients)
+  TX 65536/s + adj 1/s : clean 60s   (~512 clients)
+  TX 100k/s  + adj 1/s : FAIL 17s    (12 TO, 9M skip — slot exhaustion)
+  TX 100k/s  + NO adj  : FAIL 17s    (12 TO, 10M skip — same without adj)
+
+The 100k/s failure is slot exhaustion (identical with and without
+adjfine), not the TIMINCA race.  The i225/i226 hardware can handle
+roughly 65k TX timestamps per second before the 4-slot queue becomes
+the bottleneck.  This limits the i226 to approximately 500 PTP
+clients at logSyncInterval -7 (128 Hz sync).
+
+The adjfine race itself has negligible probability at 1 Hz adjfine.
+The TSYNCTXCTL disable window in v3 is ~1 µs per second — a duty
+cycle of 10^-6.  Even at 65k TX timestamps/s, the probability of
+a capture starting during that window is ~0.065 per second, giving
+an estimated MTBF of many hours.
+
+
 Note on igc_ptp_tx_hang
 ------------------------
 
