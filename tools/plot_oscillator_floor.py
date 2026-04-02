@@ -140,16 +140,35 @@ def make_plots(ticc_timehat, ticc_ocxo, freerun_timehat, freerun_ocxo, output_di
         if chA is not None:
             chA_dt = detrend(chA)
             taus = log_taus(len(chA_dt))
-            traces_1.append(("TimeHat i226 TCXO", chA_dt, taus, "#1f77b4"))
+            traces_1.append(("TimeHat i226 TCXO (TICC)", chA_dt, taus,
+                             "#1f77b4", "solid"))
 
     if ticc_ocxo is not None:
         chA = load_ticc_channel(ticc_ocxo, "chA")
         if chA is not None:
             chA_dt = detrend(chA)
             taus = log_taus(len(chA_dt))
-            traces_1.append(("ocxo E810 OCXO", chA_dt, taus, "#d62728"))
+            traces_1.append(("ocxo E810 OCXO (TICC)", chA_dt, taus,
+                             "#d62728", "solid"))
 
-    for name, phase, taus, color in traces_1:
+    # Also show EXTTS-based PHC stability from freerun data
+    if freerun_timehat is not None:
+        pps = load_freerun_pps(freerun_timehat)
+        if len(pps) > 10:
+            pps_dt = detrend(pps)
+            taus = log_taus(len(pps_dt))
+            traces_1.append(("TimeHat i226 TCXO (EXTTS)", pps_dt, taus,
+                             "#1f77b4", "dot"))
+
+    if freerun_ocxo is not None:
+        pps = load_freerun_pps(freerun_ocxo)
+        if len(pps) > 10:
+            pps_dt = detrend(pps)
+            taus = log_taus(len(pps_dt))
+            traces_1.append(("ocxo E810 OCXO (EXTTS, quantization-limited*)",
+                             pps_dt, taus, "#d62728", "dot"))
+
+    for name, phase, taus, color, dash in traces_1:
         td = tdev(phase, taus)
         ad = adev(phase, taus)
         if td:
@@ -157,16 +176,16 @@ def make_plots(ticc_timehat, ticc_ocxo, freerun_timehat, freerun_ocxo, output_di
             fig1.add_trace(go.Scatter(
                 x=t_taus, y=[td[t] * 1e9 for t in t_taus],
                 mode='lines+markers', name=name,
-                line=dict(color=color, width=2), marker=dict(size=5),
-                legendgroup=name,
+                line=dict(color=color, dash=dash, width=2),
+                marker=dict(size=5), legendgroup=name,
             ), row=1, col=1)
         if ad:
             a_taus = sorted(ad.keys())
             fig1.add_trace(go.Scatter(
                 x=a_taus, y=[ad[t] for t in a_taus],
                 mode='lines+markers', name=name,
-                line=dict(color=color, width=2), marker=dict(size=5),
-                legendgroup=name, showlegend=False,
+                line=dict(color=color, dash=dash, width=2),
+                marker=dict(size=5), legendgroup=name, showlegend=False,
             ), row=2, col=1)
 
     fig1.update_xaxes(type="log", title_text="τ (seconds)", row=1, col=1)
@@ -175,7 +194,9 @@ def make_plots(ticc_timehat, ticc_ocxo, freerun_timehat, freerun_ocxo, output_di
     fig1.update_yaxes(type="log", title_text="ADEV (fractional)", row=2, col=1)
     fig1.update_layout(
         title="Best-Possible Disciplined Oscillator Noise Floors<br>"
-              "<sub>TICC measurement of free-running PHC PEROUT (chA)</sub>",
+              "<sub>Solid = TICC (60 ps, ground truth), Dotted = EXTTS (8 ns bins). "
+              "*E810 EXTTS is quantization-limited: ~8 ns bins match F9T's "
+              "125 MHz clock, producing falsely low TDEV.</sub>",
         height=900, width=1000,
     )
 
