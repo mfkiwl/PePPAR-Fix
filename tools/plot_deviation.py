@@ -119,6 +119,14 @@ def load_servo_csv(path):
     if not rows:
         return {}
 
+    # Warn if data is EXTTS-only (no TICC)
+    has_ticc = any(r.get('ticc_diff_ns', '') for r in rows[:20])
+    if not has_ticc:
+        print(f"  WARNING: {os.path.basename(path)} has no TICC data. "
+              f"TDEV from EXTTS alone is unreliable — both i226 and E810 "
+              f"have ~8 ns effective resolution that masks real timing noise.",
+              file=sys.stderr)
+
     # Determine rate from timestamp spacing
     gps_secs = [int(r['gps_second']) for r in rows]
     if len(gps_secs) > 1:

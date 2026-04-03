@@ -1120,6 +1120,13 @@ def _setup_servo(args, known_ecef, qerr_store):
         log.info("FREERUN MODE: PHC will not be steered. "
                  "Auto-stop at |pps_error| > %.0f ns",
                  args.freerun_max_error_ns or float('inf'))
+        if not args.ticc_port:
+            log.warning(
+                "WARNING: freerun without --ticc-port. EXTTS TDEV measurements "
+                "are unreliable — both i226 and E810 have ~8 ns effective "
+                "resolution that masks real timing noise. Use --ticc-port for "
+                "TDEV characterization, or pair with a separate TICC capture."
+            )
 
     # Import PTP constants for pin setup
     from peppar_fix.ptp_device import PTP_PF_EXTTS
