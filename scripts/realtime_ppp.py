@@ -537,8 +537,12 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     wl_f1 = SIG_WAVELENGTH[f1['sig_name']]
                     wl_f2 = SIG_WAVELENGTH[f2['sig_name']]
                     if ssr is not None and rinex_f1 and rinex_f2:
-                        pb_f1 = ssr.get_phase_bias(sv, rinex_f1[1])
-                        pb_f2 = ssr.get_phase_bias(sv, rinex_f2[1])
+                        # Phase biases are indexed by code signal identifier
+                        # in SSR (e.g., 'C1C' not 'L1C') — try both
+                        pb_f1 = (ssr.get_phase_bias(sv, rinex_f1[1]) or
+                                 ssr.get_phase_bias(sv, rinex_f1[0]))
+                        pb_f2 = (ssr.get_phase_bias(sv, rinex_f2[1]) or
+                                 ssr.get_phase_bias(sv, rinex_f2[0]))
                         if pb_f1 is not None:
                             cp_f1 -= pb_f1 / wl_f1  # meters → cycles
                         if pb_f2 is not None:
