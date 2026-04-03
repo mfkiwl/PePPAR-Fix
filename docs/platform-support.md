@@ -36,7 +36,7 @@ Working:
   - BeiDou `B1I + B2I`
 - E810 PPS timestamps are available from the PHC EXTS path
 
-Known issue — E810 AQ I2C bandwidth limit:
+E810 AQ I2C bandwidth limit (resolved with default rates):
 
 - `/dev/gnss0` is a kernel GNSS char device backed by the `ice` driver's
   I2C polling thread.  Each I2C read goes through the E810 Admin Queue
@@ -46,29 +46,25 @@ Known issue — E810 AQ I2C bandwidth limit:
 - Each AQ I2C command takes ~2.8 ms, giving a burst throughput of
   ~5.3 kB/s but an effective sustained rate of **~1.5-1.7 kB/s** after
   polling gaps and AQ overhead.
-- The F9T generates ~1.5 kB/s for RAWX+TIM-TP alone, and ~2.2 kB/s with
-  SFRBX+PVT+NAV-SAT.  With all messages enabled, the I2C bus is
-  oversubscribed by ~2x.  The F9T's internal I2C buffer overflows and
-  **~25-35% of RAWX epochs are lost**.
-- The observation queue falls persistently behind PPS, with
-  `epoch_offset` growing to 8-9 and `match_recv_dt` hitting the 11s
-  correlation window limit.
+- With all messages at 1 Hz, the F9T generates ~2.2 kB/s — oversubscribed
+  by ~2x.  This caused 25-35% RAWX epoch loss in early testing.
 
-Fix — minimal I2C message set:
+Current defaults (no epoch loss expected):
 
-- Disable SFRBX, NAV-PVT, and NAV-SAT on the I2C port (port 0).
-  Keep only RXM-RAWX and TIM-TP.  This reduces F9T I2C output to
-  ~1.0-1.4 kB/s, within the bus capacity.
+- The wrapper auto-detects kernel GNSS devices and defaults to
+  `measurement_rate_ms=2000` (0.5 Hz RAWX) and `sfrbx_rate=0`
+  (SFRBX/PVT/SAT disabled on I2C port).
+- At 0.5 Hz with minimal messages (RAWX + TIM-TP only), I2C output
+  is well within bus capacity.  Epoch delivery is ~100% at the
+  configured 0.5 Hz rate.
 - Broadcast ephemeris comes from NTRIP (BCEP00BKG0 mount), not SFRBX.
   See "SFRBX on E810" section below.
-- With the minimal message set on the **stock in-kernel ice driver**:
-  RAWX delivery is ~0.87 Hz (vs 0.60 Hz with all messages), epoch_offset
-  stays at 0-1, correlation window is comfortable, writes succeed.
+- Occasional I2C bus stalls (10-30s gaps) still occur, likely from
+  the kernel's AQ polling thread being delayed.  These are rare
+  (a few per hour) and the servo handles them via holdover.
 - **No custom driver patch is needed.**  The stock driver's page-batched
   delivery with 100 ms post-delivery delay is adequate when total I2C
-  output fits within bus capacity.  A streaming delivery patch
-  (`drivers/ice-gnss-streaming/`) is available for experimentation but
-  is not required or recommended for production use.
+  output fits within bus capacity.
 
 SFRBX on E810:
 
