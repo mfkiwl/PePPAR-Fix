@@ -1,145 +1,146 @@
-# Session Handoff — 2026-04-01/02 (overnight)
+# Session Handoff — 2026-04-02/03
 
 ## What was accomplished this session
 
-### igc adjfine TX timestamp race — full investigation
+### Disciplined TDEV comparison: PPS vs qErr vs PPP
 
-Tested three patches per kernel maintainer feedback:
-- v1 (ptp_tx_lock + EBUSY): works at realistic rates, starves adjfine
-  under extreme TX load
-- v2 (tmreg_lock only): does NOT fix bug — race is hardware, not
-  software register contention
-- v3 (tmreg_lock + TSYNCTXCTL disable/enable): works at realistic
-  rates, strands in-progress captures at extreme rates
+Six 15-minute disciplined runs on both platforms with `--no-qerr` and
+`--no-ppp` flags (new this session) to control source selection.
+Analysis of last 5 minutes (settled servo).
 
-Diagnostic testing with driver reload between each test revealed three
-distinct failure modes: TIMINCA corruption (the original bug), TX
-timestamp slot exhaustion (4-slot hardware limit at ~65k TX/s), and
-TSYNCTXCTL stranding (v3 side effect).
+**TimeHat i226 (TCXO):**
 
-PTP GM scaling: i226 handles ~500 PTP clients (65k TX timestamps/s)
-before slot exhaustion.  The adjfine race is negligible at 1 Hz.
+| tau | PPS only | PPS+qErr | PPS+PPP |
+|-----|----------|----------|---------|
+| 1s  | 1.84 ns  | 2.37 ns  | 2.92 ns |
+| 5s  | 0.76 ns  | 0.45 ns  | 0.77 ns |
+| 10s | 0.54 ns  | 0.36 ns  | 0.32 ns |
+| 30s | 1.21 ns  | 0.36 ns  | 0.28 ns |
+| 60s | 2.53 ns  | 0.34 ns  | 0.29 ns |
 
-Draft upstream reply with v3 patch at
-`drivers/igc-adjfine-fix/upstream-reply-v3.txt`.
+**ocxo E810 (OCXO):**
 
-### PHC bootstrap simplified — ADJ_SETOFFSET
+| tau | PPS only | PPS+qErr* | PPS+PPP |
+|-----|----------|-----------|---------|
+| 1s  | 0.37 ns  | 0.22 ns   | 0.19 ns |
+| 5s  | 0.11 ns  | 0.09 ns   | 0.07 ns |
+| 10s | 0.14 ns  | 0.07 ns   | 0.06 ns |
+| 30s | 0.36 ns  | 0.08 ns   | 0.04 ns |
+| 60s | 0.53 ns  | 0.08 ns   | **0.018 ns** |
 
-Removed the vestigial PTP_SYS_OFFSET readback and system clock
-extrapolation from the step path.  The PPS measurement already gives
-the exact phase error; `adj_setoffset(-phase_error_ns)` applies it
-directly.
+*qErr only 28% coverage on E810 I2C path.
 
-Results: E810 step residual went from -87192 ns to 0 ns.  TimeHat
-i226: -1968 ns (±2 µs).
+**Key finding**: correction hierarchy validated at all taus ≥5s:
+- PPS < PPS+qErr < PPS+PPP
+- Corrections compound with better oscillators
+- Best result: E810 OCXO + PPP = 18 ps TDEV at tau=60s
+- At tau<5s, the free-running oscillator is quieter than any
+  correction — servo should not steer at short tau
 
-### Overnight TICC + freerun characterization (2h captures)
+### TICC+qErr: 16.8x TDEV improvement
 
-Four parallel captures: TICC on TimeHat (existing), TICC on ocxo,
-freerun on TimeHat, freerun on ocxo.
+Simultaneous TICC chB + TIM-TP capture with host monotonic time
+correlation at 0.9s offset.  Match quality: mean dt=27 ms, std=5.5 ms.
+Raw TICC TDEV(1s) = 2.86 ns → corrected 0.17 ns (170 ps).
+This is the definitive qErr validation at the TICC's 60 ps resolution.
 
-**F9T PPS baseline** (TICC chB, 2h):
-- TimeHat: TDEV(1s) = 2.23 ns
-- ocxo: TDEV(1s) = 3.01 ns
-- Both converge at tau>10s (same underlying F9T behavior)
+### EXTTS resolution: both i226 and E810 have ~8 ns effective bins
 
-**PHC PEROUT stability** (TICC chA, 2h, free-running):
-- TimeHat i226 TCXO: TDEV(1s) = 1.17 ns (0.2% reproducible)
-- ocxo E810 OCXO: TDEV(1s) = 2.78 ns (surprisingly noisier)
-- E810 PEROUT noise tracks the F9T PPS (3.01 ns), suggesting internal
-  coupling between PPS and PEROUT paths
+E810 EXTTS: 77% identical adjacent timestamps.  Effective bin width
+~8 ns (125 MHz period), not the 1 ns format suggests.  Sub-ns
+capability is in the packet timestamp path, not GPIO.
 
-**PHC noise extraction** (EXTTS vs TICC, duration-matched 2h):
-- i226 EXTTS TDEV(1s) = 3.64 ns
-- i226 PHC capture noise = 2.88 ns RSS (36% of 8 ns tick)
-- i226 EXTTS + qErr TDEV(1s) = 2.23 ns = TICC ground truth
-- **qErr fully compensates the 8 ns quantization** at tau=1s (1.63x)
+i226 EXTTS adds ~2.9 ns RSS noise but tracks PPS movement (0%
+identical adjacent).  qErr fully compensates the quantization:
+EXTTS+qErr TDEV matches TICC ground truth (2.23 ns).
 
-**E810 EXTTS** quantization analysis:
-- Both i226 and E810 have ~8 ns effective EXTTS resolution
-- i226 adds noise (resolves PPS movement), E810 is flat (77% identical)
-- E810's sub-ns capability is in the packet timestamp path, not GPIO
+### PHC bootstrap simplified
 
-### EXTTS resolution analysis documented
+Removed PTP_SYS_OFFSET readback + system clock extrapolation.
+`adj_setoffset(-phase_error_ns)` directly.  E810 step residual:
+-87192 ns → 0 ns.
 
-Updated `docs/ticc-baseline-2026-04-01.md` with the 8 ns quantization
-analysis, PHC noise extraction method, qErr value assessment for each
-timestamper, and TICC vs EXTTS comparison.
+### igc adjfine v3 patch + diagnostic
+
+Tested tmreg_lock (v2, doesn't fix), TSYNCTXCTL disable (v3, works
+at realistic rates).  Three distinct failure modes documented.
+PTP GM scaling: ~500 clients at 128 Hz before slot exhaustion.
+Draft upstream reply at `drivers/igc-adjfine-fix/upstream-reply-v3.txt`.
+
+### Source selection flags
+
+`--no-qerr` and `--no-ppp` added to the engine for controlled A/B
+testing of correction sources.
 
 ### PPP-AR design document
 
-`docs/ppp-ar-design.md`: four-phase plan from float PPP to PPP-AR.
-Phase bias sources (Galileo HAS IDD, single-AC NTRIP), filter changes,
-bootstrapping AR algorithm, five validation tests.  Key risk: the
-FixedPosFilter cancels ambiguities by construction — AR requires an
-undifferenced clock filter.
+Four-phase plan: single-AC SSR source → phase bias application →
+integer ambiguity fixing → servo TDEV measurement.  Key risk:
+FixedPosFilter cancels ambiguities by construction.
 
-### Visualization tools
+### Visual stories specification
 
-- `tools/plot_oscillator_floor.py` — oscillator noise floors + EXTTS
-  measurement noise with shaded PHC noise region
-- `tools/plot_pps_corrections.py` — PPS→PPS+qErr→PPS+PPP TDEV
-  improvement plot
-- Updated `tools/plot_deviation.py` — fixed qErr sign, added MDEV
-  and detrending
+Five distinct TDEV plots defined in `docs/visual-stories.md`, each
+telling one story with consistent conventions (one-sigma shading,
+duration matching).
 
-### Other fixes
+### Galileo HAS IDD
 
-- Lab timezones: all hosts set to America/Chicago
-- ocxo ptp_dev updated to /dev/ptp2 (Solarflare shifted E810)
-- Removed empty `scripts/phc_servo.py`
+Registration process documented.  Separate GSC account required,
+human-reviewed approval (days to weeks).  Alternative: single-AC
+NTRIP mount (CAS/CNES) using existing BKG credentials.
+
+## Data files on lab hosts
+
+TimeHat (`/home/bob/peppar-fix/data/`):
+- `disc-pps-only-15m.csv` — disciplined PPS only
+- `disc-pps-qerr-15m.csv` — disciplined PPS+qErr
+- `disc-pps-ppp-15m.csv` — disciplined PPS+PPP
+- `ticc-qerr-v2-30m.csv` — TICC+qErr simultaneous capture
+- `freerun-timehat-2h.csv` — 2h freerun
+- `ticc-baseline-{30m,2h}-{1,2}.csv` — TICC baselines
+
+ocxo (`/home/bob/git/PePPAR-Fix/data/`):
+- `disc-pps-only-15m.csv` — disciplined PPS only
+- `disc-pps-qerr-15m.csv` — disciplined PPS+qErr (mostly PPS, 28% qErr)
+- `disc-pps-ppp-15m.csv` — disciplined PPS+PPP
+- `freerun-ocxo-2h.csv` — 2h freerun
+- `ticc-ocxo-2h.csv` — TICC baseline
 
 ## Known issues
 
-### E810 PEROUT noise = F9T PPS noise
+### ocxo qErr coverage
 
-E810 PEROUT TDEV(1s) = 2.78 ns via TICC, very close to the F9T PPS
-on the same host (3.01 ns).  The OCXO should be sub-ns.  Suggests
-the PEROUT path is coupled to the F9T PPS sawtooth internally —
-the PEROUT may be phase-locked to the PPS rather than running from
-the OCXO directly.
+Only 28% of epochs get qErr on the E810 I2C path.  TIM-TP messages
+are small but may be deprioritized by the I2C delivery thread.
+Needs investigation — full 1 Hz qErr would likely improve the
+already-impressive OCXO results further.
 
-### PPS+PPP appears worse than raw PPS in freerun
+### PPP in freerun shows worse TDEV
 
-In freerun, `source_error_ns` from PPS+PPP has higher TDEV than raw
-PPS.  This is because the PPP filter sees a drifting PHC and its
-correction includes reconvergence artifacts.  PPP improvement requires
-disciplined mode.
+In freerun mode, source_error_ns from PPP includes reconvergence
+noise against the drifting PHC.  PPP improvement is only visible
+in disciplined mode (confirmed this session).
 
-### ocxo E810 I2C qErr coverage
+### E810 PEROUT noise in freerun
 
-Only 30% of epochs had qErr on ocxo.  TIM-TP should arrive at 1 Hz
-even when RAWX is at 0.5 Hz.
-
-### Position watchdog on ocxo
-
-Still trips after ~2.4 hours.
+Freerun PEROUT TDEV(1s) = 2.78 ns was from bootstrap adjfine
+carrying PPS sawtooth.  Not hardware coupling — software artifact
+from the bootstrap frequency estimate.  Confirmed by the 0.19 ns
+disciplined result.
 
 ## Commits pushed
 
-- 3a7f48c: Update Solarflare platform docs
-- 24e49b5: Add --freerun mode for PHC stability characterization
-- 340f838: Fix freerun issues: no-glide, drop flock, fix qErr sign
-- 0d825db: Add TICC baseline characterization: F9T PPS and i226 TCXO
-- c2bdf7f: Rewrite EXTTS resolution analysis: both i226 and E810 ~8 ns
-- 93a8da0: igc adjfine: test tmreg_lock patch (v2) per maintainer
-- 098a790: igc adjfine v3: disable TX timestamping around TIMINCA write
-- 6daca83: igc adjfine: clean-state diagnostic reveals true failure modes
-- ac1e604: Draft upstream reply with v3 patch and diagnostic findings
-- 187bcad: igc: add PTP GM scaling analysis to upstream reply
-- 8dfa678: Simplify PHC step: apply PPS error directly via ADJ_SETOFFSET
-- 1dcdf3e: Add oscillator noise floor and EXTTS measurement noise plots
-- 3a70be5: Show both hosts on oscillator noise floor plot
-- 3c19abc: Add PHC noise floor extraction to PPS measurement plot
-- 1cb3355: Add PPS corrections TDEV improvement plot
-- c0838a4: Add PPP-AR design: from float PPP to integer AR
-
-All on main, pushed to origin.
+- 59934ab: Add --no-qerr and --no-ppp flags for source selection
+- 3e5c29a: Add visual stories spec
+- c0838a4: Add PPP-AR design doc
+- 3c19abc: Add PHC noise floor extraction
+- 2ede89d: TICC+qErr 16.8x improvement
+- c2bdf7f: EXTTS resolution analysis
+- 8dfa678: Simplify PHC step via ADJ_SETOFFSET
+- 6daca83+: igc adjfine v3 patch + diagnostics
 
 ## Host state
 
-- TimeHat: idle, v3 igc patch deployed, adjfine at ~97 ppb,
-  TICC #1 available
-- ocxo: idle, ptp_dev=/dev/ptp2, Solarflare at ptp0 (no PPS),
-  TICC #2/#3 available
-- Data files: 2h TICC + freerun CSVs on both hosts and in repo data/
+- TimeHat: idle, v3 igc patch, TICC #1 available
+- ocxo: idle, ptp_dev=/dev/ptp2, TICC #2 available
