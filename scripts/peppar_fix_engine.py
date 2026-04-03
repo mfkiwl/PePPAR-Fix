@@ -673,6 +673,23 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
                 f"n={n_used} amb={len(filt.sv_to_idx)} "
                 f"rms={rms:.3f}m [{elapsed:.0f}s]"
             )
+            # Log ambiguity integrality (PPP-AR diagnostic)
+            if len(filt.sv_to_idx) > 0 and n_epochs % 10 == 0:
+                N_BASE = 6  # from solve_ppp.py
+                fracs = []
+                for sv, idx in filt.sv_to_idx.items():
+                    si = N_BASE + idx
+                    if si < len(filt.x):
+                        N_float = filt.x[si]
+                        frac = N_float - round(N_float)
+                        sigma = np.sqrt(filt.P[si, si]) if si < filt.P.shape[0] else 999
+                        fracs.append(abs(frac))
+                        if n_epochs % 30 == 0:
+                            log.debug(f"    {sv}: N={N_float:.3f} σ={sigma:.3f} frac={frac:+.3f}")
+                if fracs:
+                    mean_frac = np.mean(fracs)
+                    log.info(f"    Ambiguity integrality: mean|frac|={mean_frac:.3f} "
+                             f"(n={len(fracs)}, <0.15 = ready for AR)")
 
         # Convergence check
         pos_stable = True
