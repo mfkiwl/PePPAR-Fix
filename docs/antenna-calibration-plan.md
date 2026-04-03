@@ -235,9 +235,28 @@ Know the total signal path delay (antenna → receiver PPS output)
 to ±1 ns.  This sets the accuracy of the PPS alignment to GPS
 time.  The components:
 - Cable delay: 3-5 ns/m × cable length
-- Receiver internal delay: ~20-50 ns (F9T, from TIM-TP calibration)
+- Receiver internal delay: ~28 ns (F9T, see reference below)
 - Antenna phase center: ~mm level, negligible at ns scale
 - Splitter: ~1 ns insertion delay (characterize from VNA S21)
+
+### Independent F9T delay reference
+
+Ricardo Piriz at GMV (Madrid) published F9T timing calibration
+measurements on LinkedIn (2019-2020):
+
+- **F9T device internal delay: ~28 ns**
+- Full chain (antenna 16 ns + cable 52 ns + device 28 ns): 95.9 ns
+- Day-to-day repeatability: 0.3 ns (1σ) over one week
+- PPS jitter: ±4 ns (larger than the older M8F's ±2 ns)
+- More rigorous calibration (April 2020): 93.9 ns total chain
+
+The ~28 ns internal delay is our benchmark.  Our zero-baseline
+experiment should produce a consistent value when we subtract the
+known cable and antenna delays.
+
+References:
+- [Testing the new ublox F9T (part 2)](https://www.linkedin.com/pulse/testing-new-ublox-f9t-part-2-ricardo-p%C3%ADriz) — Aug 2019
+- [Calibrating mass-market GNSS timing receivers](https://www.linkedin.com/pulse/calibrating-mass-market-gnss-timing-receivers-ricardo-p%C3%ADriz) — Apr 2020
 
 
 ## Data Products
