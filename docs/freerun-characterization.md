@@ -122,12 +122,16 @@ residual isolates:
 
 ### Requirements
 
+- Pass `--ticc-port /dev/ticcN --ticc-log data/ticc-run.csv` to
+  the engine.  The engine captures both TICC channels in-process,
+  with shared lifecycle and host monotonic timestamps.  Do NOT use
+  a separate TICC capture process — this causes cross-process
+  coordination issues and timing ambiguity.
 - TICC must be connected with one channel on the same PPS signal
   that feeds the PHC EXTTS input.  On TimeHat, TICC #1 chB carries
   the F9T PPS.  On ocxo, TICC #2 chB carries the F9T PPS.
-- The TICC and EXTTS timestamps must be correlated by epoch.  Since
-  both are triggered by the same PPS edge at 1 Hz, matching is by
-  sequence number (both produce one event per second).
+- The TICC and EXTTS timestamps share host monotonic time from the
+  same process, enabling direct epoch correlation.
 - The TICC-to-EXTTS time offset is arbitrary (different cable lengths,
   different capture latencies).  Only the variation matters, not the
   absolute offset.

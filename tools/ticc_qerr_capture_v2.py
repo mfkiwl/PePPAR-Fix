@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Capture TICC chB + TIM-TP qErr with monotonic-time correlation.
 
+NOTE: Prefer the engine's built-in TICC capture (--ticc-port + --ticc-log)
+over this standalone script.  The engine captures both TICC channels
+in-process alongside the servo, with shared lifecycle and no cross-process
+coordination issues.  This script is useful only when the engine is not
+running (e.g., raw F9T PPS + qErr characterization without PHC discipline).
+
 Correlates TICC PPS edges with TIM-TP qErr by host monotonic time,
 using the same 0.9s offset that peppar-fix uses (TIM-TP arrives
 ~900 ms before the PPS edge it describes).

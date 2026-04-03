@@ -208,38 +208,26 @@ class KernelGnssStream:
 
 
 def _open_serial_exclusive(device, baud):
-    """Open a serial port with advisory lock and optional TIOCEXCL."""
-    lock_fd, _lock_path = acquire_device_lock(device)
+    """Open a serial port with TIOCEXCL (kernel-enforced exclusive).
+
+    TIOCEXCL is automatically released when the fd closes, even on
+    crash or SIGKILL — no stale lock files.  Falls back to advisory
+    flock for drivers that don't support TIOCEXCL.
+    """
     import serial
     try:
-        try:
-            ser = serial.Serial(
-                device, baudrate=baud, timeout=1,
-                dsrdtr=False, rtscts=False,
-                exclusive=True,
-            )
-        except (serial.SerialException, ValueError):
-            # TIOCEXCL not supported on some cdc_acm drivers; fall back
-            log.debug("TIOCEXCL failed on %s — opening non-exclusive", device)
-            ser = serial.Serial(
-                device, baudrate=baud, timeout=1,
-                dsrdtr=False, rtscts=False,
-                exclusive=False,
-            )
-    except Exception:
-        release_device_lock(lock_fd)
-        raise
-
-    _lock_released = [False]  # mutable so closure can write it
-    _original_close = ser.close
-    def close_with_lock():
-        _original_close()
-        if not _lock_released[0]:
-            _lock_released[0] = True
-            release_device_lock(lock_fd)
-
-    ser.close = close_with_lock
-    ser._peppar_lock_fd = lock_fd
+        ser = serial.Serial(
+            device, baudrate=baud, timeout=1,
+            dsrdtr=False, rtscts=False,
+            exclusive=True,
+        )
+    except (serial.SerialException, ValueError):
+        log.debug("TIOCEXCL failed on %s — opening non-exclusive", device)
+        ser = serial.Serial(
+            device, baudrate=baud, timeout=1,
+            dsrdtr=False, rtscts=False,
+            exclusive=False,
+        )
     return ser
 
 
