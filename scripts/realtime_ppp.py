@@ -517,23 +517,34 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     cp_f1 = f1['cp']
                     cp_f2 = f2['cp']
 
-                    # Apply SSR code biases before IF combination
-                    # Note: SSRA00BKG0 provides C1C/C1P/C2W biases (L1+L2)
-                    # but not C5Q (L5). Biases only apply when both f1 and
-                    # f2 codes are available from the SSR stream.
-                    if ssr is not None:
-                        rinex_f1 = SIG_TO_RINEX.get(f1['sig_name'])
-                        rinex_f2 = SIG_TO_RINEX.get(f2['sig_name'])
-                        if rinex_f1 and rinex_f2:
-                            cb_f1 = ssr.get_code_bias(sv, rinex_f1[0])
-                            cb_f2 = ssr.get_code_bias(sv, rinex_f2[0])
-                            if cb_f1 is not None and cb_f2 is not None:
-                                pr_f1 -= cb_f1
-                                pr_f2 -= cb_f2
+                    # RINEX signal codes for SSR bias lookup
+                    rinex_f1 = SIG_TO_RINEX.get(f1['sig_name'])
+                    rinex_f2 = SIG_TO_RINEX.get(f2['sig_name'])
 
-                    pr_if = a1 * pr_f1 - a2 * pr_f2
+                    # Apply SSR code biases before IF combination
+                    if ssr is not None and rinex_f1 and rinex_f2:
+                        cb_f1 = ssr.get_code_bias(sv, rinex_f1[0])
+                        cb_f2 = ssr.get_code_bias(sv, rinex_f2[0])
+                        if cb_f1 is not None and cb_f2 is not None:
+                            pr_f1 -= cb_f1
+                            pr_f2 -= cb_f2
+
+                    # Apply SSR phase biases before IF combination.
+                    # Phase biases make float ambiguities integer-valued,
+                    # enabling PPP-AR.  Requires a single-AC SSR source
+                    # (e.g., CAS SSRA01CAS1).  Combined IGS streams have
+                    # no phase biases (bias = 0, no effect).
                     wl_f1 = SIG_WAVELENGTH[f1['sig_name']]
                     wl_f2 = SIG_WAVELENGTH[f2['sig_name']]
+                    if ssr is not None and rinex_f1 and rinex_f2:
+                        pb_f1 = ssr.get_phase_bias(sv, rinex_f1[1])
+                        pb_f2 = ssr.get_phase_bias(sv, rinex_f2[1])
+                        if pb_f1 is not None:
+                            cp_f1 -= pb_f1 / wl_f1  # meters → cycles
+                        if pb_f2 is not None:
+                            cp_f2 -= pb_f2 / wl_f2
+
+                    pr_if = a1 * pr_f1 - a2 * pr_f2
                     phi_if_m = a1 * wl_f1 * cp_f1 - a2 * wl_f2 * cp_f2
 
                     observations.append({
