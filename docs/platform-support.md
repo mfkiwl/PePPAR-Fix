@@ -59,9 +59,15 @@ Current defaults (no epoch loss expected):
   configured 0.5 Hz rate.
 - Broadcast ephemeris comes from NTRIP (BCEP00BKG0 mount), not SFRBX.
   See "SFRBX on E810" section below.
-- Occasional I2C bus stalls (10-30s gaps) still occur, likely from
-  the kernel's AQ polling thread being delayed.  These are rare
-  (a few per hour) and the servo handles them via holdover.
+- Occasional I2C delivery gaps (up to 33s observed) still occur
+  even at 0.5 Hz with minimal messages.  Root cause: the E810's
+  Admin Queue is shared between PTP operations (adjfine, EXTTS,
+  PEROUT) and GNSS I2C reads.  When multiple PTP commands queue
+  up in the same AQ, the I2C poll gets starved.  Port 0 shows
+  ~22 misc interrupts/s from PTP operations — each goes through
+  the AQ.  This is a hardware/driver architecture limitation, not
+  a configuration issue.  Possible mitigation: reduce PTP AQ
+  traffic (fewer adjfine calls, batch operations).
 - **No custom driver patch is needed.**  The stock driver's page-batched
   delivery with 100 ms post-delivery delay is adequate when total I2C
   output fits within bus capacity.
