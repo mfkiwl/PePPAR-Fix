@@ -1,146 +1,95 @@
-# Session Handoff — 2026-04-02/03
+# Session Handoff — 2026-04-02/03 (continued)
 
-## What was accomplished this session
+## Headline result — TICC-measured disciplined TDEV
 
-### Disciplined TDEV comparison: PPS vs qErr vs PPP
+All TDEV numbers below are from TICC chA (disciplined PEROUT),
+measured in-process alongside the servo via `--ticc-port --ticc-log`.
+Last 5 minutes of 15-minute runs (warm, settled servo).
 
-Six 15-minute disciplined runs on both platforms with `--no-qerr` and
-`--no-ppp` flags (new this session) to control source selection.
-Analysis of last 5 minutes (settled servo).
-
-**TimeHat i226 (TCXO):**
+**TimeHat i226 TCXO:**
 
 | tau | PPS only | PPS+qErr | PPS+PPP |
 |-----|----------|----------|---------|
-| 1s  | 1.84 ns  | 2.37 ns  | 2.92 ns |
-| 5s  | 0.76 ns  | 0.45 ns  | 0.77 ns |
-| 10s | 0.54 ns  | 0.36 ns  | 0.32 ns |
-| 30s | 1.21 ns  | 0.36 ns  | 0.28 ns |
-| 60s | 2.53 ns  | 0.34 ns  | 0.29 ns |
+| 1s  | 0.93 ns  | 1.00 ns  | 1.05 ns |
+| 5s  | 0.33 ns  | 0.25 ns  | 0.28 ns |
+| 10s | 0.41 ns  | 0.24 ns  | 0.25 ns |
+| 30s | 1.07 ns  | 0.20 ns  | 0.17 ns |
+| 60s | 2.24 ns  | 0.19 ns  | **0.15 ns** |
 
-**ocxo E810 (OCXO):**
+**ocxo E810 OCXO:**
 
-| tau | PPS only | PPS+qErr* | PPS+PPP |
-|-----|----------|-----------|---------|
-| 1s  | 0.37 ns  | 0.22 ns   | 0.19 ns |
-| 5s  | 0.11 ns  | 0.09 ns   | 0.07 ns |
-| 10s | 0.14 ns  | 0.07 ns   | 0.06 ns |
-| 30s | 0.36 ns  | 0.08 ns   | 0.04 ns |
-| 60s | 0.53 ns  | 0.08 ns   | **0.018 ns** |
+| tau | PPS only | PPS+PPP |
+|-----|----------|---------|
+| 1s  | 2.71 ns  | 2.64 ns |
+| 10s | 0.59 ns  | 0.50 ns |
+| 30s | 0.39 ns  | 0.25 ns |
+| 60s | 0.23 ns  | **0.13 ns** |
 
-*qErr only 28% coverage on E810 I2C path.
+Correction hierarchy validated:
+- tau<5s: oscillator wins (don't steer)
+- tau=5-10s: qErr wins on TimeHat (1.3-1.7x)
+- tau≥20s: PPP wins (up to 14.7x on TimeHat)
+- Best: 133-153 ps TDEV at tau=60s (genuine sub-200 ps)
 
-**Key finding**: correction hierarchy validated at all taus ≥5s:
-- PPS < PPS+qErr < PPS+PPP
-- Corrections compound with better oscillators
-- Best result: E810 OCXO + PPP = 18 ps TDEV at tau=60s
-- At tau<5s, the free-running oscillator is quieter than any
-  correction — servo should not steer at short tau
+## EXTTS TDEV is unreliable — documented restriction
 
-### TICC+qErr: 16.8x TDEV improvement
+Both i226 and E810 EXTTS have ~8 ns effective resolution. EXTTS-only
+TDEV measurements are unreliable:
+- E810 EXTTS reported 18 ps at tau=60s; TICC truth = 133 ps (7x understatement)
+- i226 EXTTS reported 288 ps; TICC truth = 153 ps (1.9x overstatement)
 
-Simultaneous TICC chB + TIM-TP capture with host monotonic time
-correlation at 0.9s offset.  Match quality: mean dt=27 ms, std=5.5 ms.
-Raw TICC TDEV(1s) = 2.86 ns → corrected 0.17 ns (170 ps).
-This is the definitive qErr validation at the TICC's 60 ps resolution.
+Restriction added to CLAUDE.md: never report TDEV from EXTTS alone.
+TICC required for all characterization.  Warnings added to engine
+(--freerun without --ticc-port) and plot_deviation.py.
 
-### EXTTS resolution: both i226 and E810 have ~8 ns effective bins
+## Stale locks fixed
 
-E810 EXTTS: 77% identical adjacent timestamps.  Effective bin width
-~8 ns (125 MHz period), not the 1 ns format suggests.  Sub-ns
-capability is in the packet timestamp path, not GPIO.
+exclusive_io.py: PID-validated flock — checks if owning PID is alive
+before blocking.  Stale locks from crashed processes are automatically
+reclaimed.  GNSS serial open uses TIOCEXCL directly (no flock wrapper).
+PtpDevice uses TIOCEXCL.  TICC uses TIOCEXCL + HUPCL.
 
-i226 EXTTS adds ~2.9 ns RSS noise but tracks PPS movement (0%
-identical adjacent).  qErr fully compensates the quantization:
-EXTTS+qErr TDEV matches TICC ground truth (2.23 ns).
+## E810 I2C gap root cause
 
-### PHC bootstrap simplified
+Multi-second gaps (up to 33s) on ocxo traced to AQ contention: the
+E810 Admin Queue is shared between PTP operations (~22 misc interrupts/s
+from adjfine, EXTTS, PEROUT) and GNSS I2C reads.  When PTP commands
+pile up, I2C polls get starved.  This is a hardware/driver architecture
+limitation, not I2C bandwidth oversubscription.
 
-Removed PTP_SYS_OFFSET readback + system clock extrapolation.
-`adj_setoffset(-phase_error_ns)` directly.  E810 step residual:
--87192 ns → 0 ns.
+## In-process TICC capture
 
-### igc adjfine v3 patch + diagnostic
+All TICC logging now uses the engine's built-in `--ticc-port --ticc-log`
+rather than separate capture processes.  Both channels logged with host
+monotonic timestamps, shared lifecycle with the servo.
 
-Tested tmreg_lock (v2, doesn't fix), TSYNCTXCTL disable (v3, works
-at realistic rates).  Three distinct failure modes documented.
-PTP GM scaling: ~500 clients at 128 Hz before slot exhaustion.
-Draft upstream reply at `drivers/igc-adjfine-fix/upstream-reply-v3.txt`.
+## Epoch delivery
 
-### Source selection flags
+- TimeHat: 100% delivery confirmed (736/736, 900/900). No missing
+  epochs with current code. March 28 issue (1911/3600) is resolved.
+- ocxo: ~100% of configured 0.5 Hz rate.  Large gaps from AQ
+  contention, not I2C oversubscription.
 
-`--no-qerr` and `--no-ppp` added to the engine for controlled A/B
-testing of correction sources.
+## Other changes this session
 
-### PPP-AR design document
+- `--no-qerr` and `--no-ppp` flags for controlled source selection
+- PPP-AR design doc (`docs/ppp-ar-design.md`)
+- Visual stories spec (`docs/visual-stories.md`)
+- Galileo HAS IDD registration process documented
+- Lab timezones: all hosts set to America/Chicago
+- Empty `scripts/phc_servo.py` removed
 
-Four-phase plan: single-AC SSR source → phase bias application →
-integer ambiguity fixing → servo TDEV measurement.  Key risk:
-FixedPosFilter cancels ambiguities by construction.
-
-### Visual stories specification
-
-Five distinct TDEV plots defined in `docs/visual-stories.md`, each
-telling one story with consistent conventions (one-sigma shading,
-duration matching).
-
-### Galileo HAS IDD
-
-Registration process documented.  Separate GSC account required,
-human-reviewed approval (days to weeks).  Alternative: single-AC
-NTRIP mount (CAS/CNES) using existing BKG credentials.
-
-## Data files on lab hosts
+## Data files
 
 TimeHat (`/home/bob/peppar-fix/data/`):
-- `disc-pps-only-15m.csv` — disciplined PPS only
-- `disc-pps-qerr-15m.csv` — disciplined PPS+qErr
-- `disc-pps-ppp-15m.csv` — disciplined PPS+PPP
-- `ticc-qerr-v2-30m.csv` — TICC+qErr simultaneous capture
-- `freerun-timehat-2h.csv` — 2h freerun
-- `ticc-baseline-{30m,2h}-{1,2}.csv` — TICC baselines
+- `disc-pps-{only,qerr,ppp}.csv` — disciplined servo CSVs (in-process TICC)
+- `ticc-pps-{only,qerr,ppp}.csv` — TICC chA+chB logs (in-process)
 
 ocxo (`/home/bob/git/PePPAR-Fix/data/`):
-- `disc-pps-only-15m.csv` — disciplined PPS only
-- `disc-pps-qerr-15m.csv` — disciplined PPS+qErr (mostly PPS, 28% qErr)
-- `disc-pps-ppp-15m.csv` — disciplined PPS+PPP
-- `freerun-ocxo-2h.csv` — 2h freerun
-- `ticc-ocxo-2h.csv` — TICC baseline
-
-## Known issues
-
-### ocxo qErr coverage
-
-Only 28% of epochs get qErr on the E810 I2C path.  TIM-TP messages
-are small but may be deprioritized by the I2C delivery thread.
-Needs investigation — full 1 Hz qErr would likely improve the
-already-impressive OCXO results further.
-
-### PPP in freerun shows worse TDEV
-
-In freerun mode, source_error_ns from PPP includes reconvergence
-noise against the drifting PHC.  PPP improvement is only visible
-in disciplined mode (confirmed this session).
-
-### E810 PEROUT noise in freerun
-
-Freerun PEROUT TDEV(1s) = 2.78 ns was from bootstrap adjfine
-carrying PPS sawtooth.  Not hardware coupling — software artifact
-from the bootstrap frequency estimate.  Confirmed by the 0.19 ns
-disciplined result.
-
-## Commits pushed
-
-- 59934ab: Add --no-qerr and --no-ppp flags for source selection
-- 3e5c29a: Add visual stories spec
-- c0838a4: Add PPP-AR design doc
-- 3c19abc: Add PHC noise floor extraction
-- 2ede89d: TICC+qErr 16.8x improvement
-- c2bdf7f: EXTTS resolution analysis
-- 8dfa678: Simplify PHC step via ADJ_SETOFFSET
-- 6daca83+: igc adjfine v3 patch + diagnostics
+- `disc-pps-{only,ppp}.csv` — disciplined servo CSVs
+- `ticc-pps-ppp.csv` — TICC chA+chB log (in-process, PPP run only)
 
 ## Host state
 
-- TimeHat: idle, v3 igc patch, TICC #1 available
-- ocxo: idle, ptp_dev=/dev/ptp2, TICC #2 available
+- TimeHat: idle, v3 igc patch, TICC #1 available, 100% epoch delivery
+- ocxo: idle, ptp_dev=/dev/ptp2, TICC #2 available, AQ gap issue noted
