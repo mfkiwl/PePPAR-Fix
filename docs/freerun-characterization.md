@@ -4,11 +4,24 @@
 
 `peppar-fix --freerun` runs the full pipeline without steering the PHC.
 The servo computes what it *would* do and logs everything to CSV, but
-never calls `adjfine()`.  This characterizes:
+never calls `adjfine()`.
 
-1. **EXTTS timestamping precision** — PPS error noise floor at tau=1s
-2. **Free-running oscillator stability** — ADEV/TDEV of phase drift
+**WARNING: freerun TDEV from EXTTS alone is unreliable.**  Both i226
+and E810 EXTTS have ~8 ns effective resolution that masks real timing
+noise.  Freerun EXTTS data shows what the quantized feedback path
+reports, not the oscillator's true stability.  Always pair freerun
+with a TICC capture for ground truth.  See CLAUDE.md "EXTTS TDEV
+measurements are unreliable."
+
+Freerun characterizes:
+
+1. **Free-running oscillator stability** — ADEV/TDEV of phase drift,
+   **measured by TICC** (not EXTTS)
+2. **EXTTS measurement noise** — by comparing EXTTS TDEV against
+   simultaneous TICC TDEV, the gap reveals PHC quantization error
 3. **Error source quality comparison** — PPS vs PPS+qErr vs PPS+PPP
+   correction quality (but not disciplined TDEV — that requires
+   a disciplined run measured on TICC)
 
 ## Engine behavior with --freerun
 

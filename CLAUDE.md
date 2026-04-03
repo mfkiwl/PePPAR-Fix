@@ -189,10 +189,35 @@ GPS+GAL and NTRIP broadcast ephemeris. The convergence requires:
 
 ### Free-running TCXO baseline
 
-TimeHAT v5 TCXO with heatsink: TDEV(1s) = 100-130 ps free-running.
-This is the discipline floor — the PHC cannot be quieter at tau=1s.
-The F9T PPS sawtooth is 1.6-1.7 ns TDEV(1s) during "jumpy" periods,
-0.7 ns during "smooth ramp" periods.
+TimeHAT v5 TCXO with heatsink: TDEV(1s) = 1.17 ns as measured by
+TICC (60 ps resolution, 2h capture, 0.2% reproducibility).
+F9T PPS TDEV(1s) = 2.3 ns (2h baseline, varies 1.0-1.4 ns on 30 min
+windows depending on sawtooth phase).
+
+### EXTTS TDEV measurements are unreliable — use TICC
+
+**Both i226 and E810 EXTTS have ~8 ns effective resolution.**  This
+matches the F9T's 125 MHz clock period.  EXTTS TDEV measurements
+underreport true timing noise because the quantization masks real
+PPS jitter:
+
+- **E810 EXTTS**: 77% identical adjacent timestamps.  Reports falsely
+  low TDEV (0.34 ns for a signal that's actually 2.3 ns).  The sub-ns
+  timestamp format does not reflect sub-ns measurement resolution for
+  GPIO/SMA events.
+- **i226 EXTTS**: adds ~2.9 ns RSS noise but at least tracks PPS
+  movement (0% identical adjacent).  Still underreports at short tau.
+
+**Never report TDEV from EXTTS alone.**  EXTTS-only TDEV makes results
+look better than they are.  Always use TICC (60 ps resolution) for
+TDEV characterization.  EXTTS data may be shown alongside TICC for
+contrast — shade the area between TICC and EXTTS to reveal the
+measurement error:
+- Area between TICC and E810 EXTTS = "actual TDEV unreported by E810"
+- Area between TICC and i226 EXTTS = "i226 measurement noise"
+
+See `docs/ticc-baseline-2026-04-01.md` for the full analysis and
+`docs/visual-stories.md` for plot specifications.
 
 ## Design Documentation
 

@@ -248,6 +248,26 @@ qErr correction is the path to sub-nanosecond discipline — the
 combination removes the F9T's 2.3 ns sawtooth while preserving the
 TICC's 60 ps measurement resolution.
 
+### EXTTS TDEV is unreliable — TICC is required for characterization
+
+**EXTTS TDEV measurements must never be reported alone.**  Both i226
+and E810 EXTTS have ~8 ns effective resolution that masks real timing
+noise.  EXTTS-only TDEV makes results look better than they are:
+
+- E810 EXTTS reports 0.34 ns TDEV(1s) for a signal with 2.3 ns true
+  jitter — a 6.8x understatement.
+- Disciplined E810 EXTTS reported 18 ps TDEV at tau=60s, but this
+  is what the quantized feedback path reports, not an independent
+  measurement of the disciplined PHC's actual stability.
+
+**All TDEV characterization must use TICC** (60 ps resolution) on
+the disciplined PEROUT (chA).  EXTTS data may be shown alongside
+TICC for contrast — with shaded regions between the curves to
+reveal the measurement error:
+
+- Between TICC and E810 EXTTS: "actual TDEV unreported by E810"
+- Between TICC and i226 EXTTS: "i226 EXTTS measurement noise"
+
 ### Platform choice
 
 For EXTTS-only operation (no TICC), the i226 and E810 are roughly
