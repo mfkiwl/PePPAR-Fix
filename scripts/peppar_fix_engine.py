@@ -2489,9 +2489,17 @@ Two-phase operation:
     if args.min_correlation_confidence is None:
         args.min_correlation_confidence = 0.5
     if getattr(args, 'measurement_rate_ms', None) is None:
-        args.measurement_rate_ms = 1000
+        _base = os.path.basename(args.serial)
+        if _base.startswith("gnss") and _base[4:].isdigit():
+            args.measurement_rate_ms = 2000  # kernel GNSS I2C: 0.5 Hz for lossless
+        else:
+            args.measurement_rate_ms = 1000
     if getattr(args, 'sfrbx_rate', None) is None:
-        args.sfrbx_rate = 1  # default: enabled on serial transport
+        _base = os.path.basename(args.serial)
+        if _base.startswith("gnss") and _base[4:].isdigit():
+            args.sfrbx_rate = 0  # kernel GNSS I2C: disable SFRBX
+        else:
+            args.sfrbx_rate = 1
     if args.track_restep_ns is None:
         args.track_restep_ns = 100_000.0
     if args.phase_step_bias_ns is None:
