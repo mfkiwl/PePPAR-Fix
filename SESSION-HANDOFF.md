@@ -1,95 +1,91 @@
-# Session Handoff — 2026-04-02/03 (continued)
+# Session Handoff — 2026-04-03
 
-## Headline result — TICC-measured disciplined TDEV
+## Headline: 2-hour TICC-measured disciplined TDEV
 
-All TDEV numbers below are from TICC chA (disciplined PEROUT),
-measured in-process alongside the servo via `--ticc-port --ticc-log`.
-Last 5 minutes of 15-minute runs (warm, settled servo).
+All numbers from TICC chA (60 ps), in-process via `--ticc-port`,
+10 min warmup skipped.
 
 **TimeHat i226 TCXO:**
 
 | tau | PPS only | PPS+qErr | PPS+PPP |
 |-----|----------|----------|---------|
-| 1s  | 0.93 ns  | 1.00 ns  | 1.05 ns |
-| 5s  | 0.33 ns  | 0.25 ns  | 0.28 ns |
-| 10s | 0.41 ns  | 0.24 ns  | 0.25 ns |
-| 30s | 1.07 ns  | 0.20 ns  | 0.17 ns |
-| 60s | 2.24 ns  | 0.19 ns  | **0.15 ns** |
+| 1s  | 1.00 ns  | **0.79 ns** | 1.18 ns |
+| 10s | 0.25 ns  | 0.25 ns  | 0.26 ns |
+| 30s | 0.33 ns  | 0.24 ns  | **0.22 ns** |
+| 60s | 0.55 ns  | 0.24 ns  | **0.18 ns** |
+| 100s| 0.73 ns  | 0.20 ns  | **0.14 ns** |
+| 300s| 0.38 ns  | 0.054 ns | **0.035 ns** |
+| 1000s| 0.11 ns | 0.015 ns | **0.013 ns** |
+| 2000s| 0.041 ns| 0.009 ns | **0.005 ns** |
 
-**ocxo E810 OCXO:**
+**ocxo E810 OCXO (0.5 Hz lossless):**
 
 | tau | PPS only | PPS+PPP |
 |-----|----------|---------|
-| 1s  | 2.71 ns  | 2.64 ns |
-| 10s | 0.59 ns  | 0.50 ns |
-| 30s | 0.39 ns  | 0.25 ns |
-| 60s | 0.23 ns  | **0.13 ns** |
+| 1s  | 2.62 ns  | 2.68 ns |
+| 60s | 0.20 ns  | 0.21 ns |
+| 300s| 0.13 ns  | 0.13 ns |
+| 1000s| 0.078 ns| 0.057 ns|
 
-Correction hierarchy validated:
-- tau<5s: oscillator wins (don't steer)
-- tau=5-10s: qErr wins on TimeHat (1.3-1.7x)
-- tau≥20s: PPP wins (up to 14.7x on TimeHat)
-- Best: 133-153 ps TDEV at tau=60s (genuine sub-200 ps)
+**Key findings:**
 
-## EXTTS TDEV is unreliable — documented restriction
+1. **TCXO+PPP beats OCXO at every tau.** The TCXO's lower short-tau
+   noise (0.79 ns vs 2.68 ns at tau=1s) gives it a head start,
+   and PPP compensates both equally at long tau.
+2. **qErr provides 1.3-8x improvement** on TCXO at tau=1-600s.
+3. **PPP provides 3-11x improvement** on TCXO at tau=30-300s.
+4. **5 ps TDEV at tau=2000s** on a $200 TCXO board with PPP.
+5. **OCXO benefit is at short tau only** (lower noise floor), but
+   the TCXO is already better there due to EXTTS path differences.
 
-Both i226 and E810 EXTTS have ~8 ns effective resolution. EXTTS-only
-TDEV measurements are unreliable:
-- E810 EXTTS reported 18 ps at tau=60s; TICC truth = 133 ps (7x understatement)
-- i226 EXTTS reported 288 ps; TICC truth = 153 ps (1.9x overstatement)
+## E810 lossless delivery confirmed
 
-Restriction added to CLAUDE.md: never report TDEV from EXTTS alone.
-TICC required for all characterization.  Warnings added to engine
-(--freerun without --ticc-port) and plot_deviation.py.
+Fixed measurement rate bug: bootstrap and engine were resetting
+E810 to 1 Hz, overriding the 2000 ms profile setting. Now all
+three code paths (wrapper, bootstrap, engine) auto-detect kernel
+GNSS and default to 0.5 Hz.
 
-## Stale locks fixed
+Result: 3887-3891 epochs in 7800s = 99.6% lossless at 0.5 Hz.
+Only 9-14 single-epoch skips per 2-hour run.
 
-exclusive_io.py: PID-validated flock — checks if owning PID is alive
-before blocking.  Stale locks from crashed processes are automatically
-reclaimed.  GNSS serial open uses TIOCEXCL directly (no flock wrapper).
-PtpDevice uses TIOCEXCL.  TICC uses TIOCEXCL + HUPCL.
+## CAS SSR mount confirmed — phase biases for PPP-AR
 
-## E810 I2C gap root cause
+`SSRA01CAS1` on the Australian mirror provides 159 phase biases.
+Existing BKG credentials work. No new registration needed.
 
-Multi-second gaps (up to 33s) on ocxo traced to AQ contention: the
-E810 Admin Queue is shared between PTP operations (~22 misc interrupts/s
-from adjfine, EXTTS, PEROUT) and GNSS I2C reads.  When PTP commands
-pile up, I2C polls get starved.  This is a hardware/driver architecture
-limitation, not I2C bandwidth oversubscription.
+Ready to begin PPP-AR Phase 2 (apply phase biases in filter).
 
-## In-process TICC capture
+## E810 I2C corruption recovery
 
-All TICC logging now uses the engine's built-in `--ticc-port --ticc-log`
-rather than separate capture processes.  Both channels logged with host
-monotonic timestamps, shared lifecycle with the servo.
+Process kills leave the E810 I2C bus corrupted (checksum errors on
+every read). Fix: `sudo rmmod irdma && sudo rmmod ice && sudo modprobe ice`.
+Wait 10s for GNSS reinitialization.
 
-## Epoch delivery
+## Stale lock fix
 
-- TimeHat: 100% delivery confirmed (736/736, 900/900). No missing
-  epochs with current code. March 28 issue (1911/3600) is resolved.
-- ocxo: ~100% of configured 0.5 Hz rate.  Large gaps from AQ
-  contention, not I2C oversubscription.
+exclusive_io.py: PID-validated flock. Checks if owning PID is alive
+before blocking — stale locks from crashed processes auto-reclaim.
 
-## Other changes this session
+## Plot 2 renamed
 
-- `--no-qerr` and `--no-ppp` flags for controlled source selection
-- PPP-AR design doc (`docs/ppp-ar-design.md`)
-- Visual stories spec (`docs/visual-stories.md`)
-- Galileo HAS IDD registration process documented
-- Lab timezones: all hosts set to America/Chicago
-- Empty `scripts/phc_servo.py` removed
+`phc-pps-in-time-error-tdev` — shows TICC ground truth vs EXTTS
+measurement error on both platforms. In `plots/` directory.
 
-## Data files
+## Overnight runs still in progress
 
-TimeHat (`/home/bob/peppar-fix/data/`):
-- `disc-pps-{only,qerr,ppp}.csv` — disciplined servo CSVs (in-process TICC)
-- `ticc-pps-{only,qerr,ppp}.csv` — TICC chA+chB logs (in-process)
+ocxo qErr run queued (after PPS-only and PPP complete).
 
-ocxo (`/home/bob/git/PePPAR-Fix/data/`):
-- `disc-pps-{only,ppp}.csv` — disciplined servo CSVs
-- `ticc-pps-ppp.csv` — TICC chA+chB log (in-process, PPP run only)
+## Commits
+
+- b08292d: Engine kernel GNSS rate detection
+- 321d509: Bootstrap kernel GNSS rate detection
+- 7020d68: Plot 2 renamed to PHC PPS IN
+- 7fec677: Stale lock fix, in-process TICC guidance
+- 57bc9fb: EXTTS TDEV warnings
+- 3568eb1: E810 epoch delivery clarification
+- a109665: E810 AQ contention root cause
 
 ## Host state
 
-- TimeHat: idle, v3 igc patch, TICC #1 available, 100% epoch delivery
-- ocxo: idle, ptp_dev=/dev/ptp2, TICC #2 available, AQ gap issue noted
+- TimeHat: idle after 3 × 2h10m runs, TICC #1 available
+- ocxo: qErr run may still be in progress, 0.5 Hz lossless confirmed
