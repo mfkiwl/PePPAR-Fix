@@ -439,8 +439,15 @@ def main():
     # Ensure receiver is producing dual-frequency observations.
     # Auto-detects active signals; reconfigures for L1+L5 if needed.
     systems = set(args.systems.split(","))
+    # Detect kernel GNSS device and use bandwidth-safe defaults
+    import os as _os
+    _base = _os.path.basename(args.serial)
+    _is_kernel_gnss = _base.startswith("gnss") and _base[4:].isdigit()
+    _sfrbx = 0 if _is_kernel_gnss else getattr(args, 'sfrbx_rate', 1)
+    _rate_ms = 2000 if _is_kernel_gnss else getattr(args, 'measurement_rate_ms', 1000)
     driver = ensure_receiver_ready(
-        args.serial, args.baud, port_type=args.port_type, systems=systems)
+        args.serial, args.baud, port_type=args.port_type, systems=systems,
+        sfrbx_rate=_sfrbx, measurement_rate_ms=_rate_ms)
     if driver is None:
         log.error("Receiver not producing dual-frequency observations — "
                   "cannot proceed. See docs/receiver-signals.md.")
