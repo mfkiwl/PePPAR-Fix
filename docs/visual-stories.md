@@ -30,7 +30,8 @@ servo + qErr + PPP corrections are competitive.
 commercial GPSDO likely shows only a nominal curve from the datasheet.
 
 **Data needed**:
-- [ ] Disciplined PePPAR Fix run on TimeHat, ~4 hours, TICC chA
+- [x] Disciplined PePPAR Fix run on TimeHat, TICC chA
+      (15 min runs collected 2026-04-02; need 2+ hour for long tau)
 - [ ] Published TDEV data from HP 58503B, Symmetricom SA.45s, or
       similar (digitize from datasheet or find tabulated data)
 
@@ -133,10 +134,12 @@ little beyond.
 improvement region between raw PPS and the best correction.
 
 **Data needed**:
-- [ ] TimeHat disciplined run, PPS-only, ~2 hours, TICC chA
-- [ ] TimeHat disciplined run, PPS+qErr, ~2 hours, TICC chA
-- [ ] TimeHat disciplined run, PPS+PPP, ~2 hours, TICC chA
-- [ ] Same three on ocxo (if TICC #2 chA carries PEROUT)
+- [x] TimeHat disciplined run, PPS-only, 15 min, TICC chA
+- [x] TimeHat disciplined run, PPS+qErr, 15 min, TICC chA
+- [x] TimeHat disciplined run, PPS+PPP, 15 min, TICC chA
+- [x] ocxo PPS-only + PPS+PPP, 15 min, TICC chA
+      (qErr not reliably delivered on E810 I2C — 28% coverage)
+- [ ] 2+ hour versions of the above for long-tau confidence
 
 **Note**: these are disciplined runs, not freerun.  The servo must
 be actively applying corrections.  The TICC chA measures the result
