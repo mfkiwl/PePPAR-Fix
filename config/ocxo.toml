@@ -1,6 +1,8 @@
 [peppar]
-serial = "/dev/gnss0"
-ubx_port = "UART"
+# External F9T-BOT on USB (bypasses internal E810 F9T and I2C limitations)
+serial = "/dev/ttyACM2"
+baud = 9600
+ubx_port = "USB"
 receiver = "f9t"
 ptp_profile = "e810"
 ptp_dev = "/dev/ptp2"
