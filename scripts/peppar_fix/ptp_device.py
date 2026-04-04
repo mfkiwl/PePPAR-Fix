@@ -130,24 +130,15 @@ class PtpDevice:
           u32 flags;
           ptp_clock_time on;      // {s64 sec, u32 nsec, u32 reserved}
 
-        The igc driver offsets the first pulse by period/2 from
-        the start time.  Compensate by setting start to an upcoming
-        PHC second minus period/2, so the first pulse lands on the
-        second boundary.
+        Start at an upcoming PHC second boundary (nsec=0).
+        The pulse should fire at integer seconds of the PHC.
         """
         period_s = period_ns // 1_000_000_000
         period_sub = period_ns % 1_000_000_000
-        # Compute start = (next PHC second) - period/2
         phc_ns, _sys_ns = self.read_phc_ns()
-        next_sec = phc_ns // 1_000_000_000 + 2
-        half_period_ns = period_ns // 2
-        start_sec = next_sec - half_period_ns // 1_000_000_000
-        start_nsec = 1_000_000_000 - (half_period_ns % 1_000_000_000)
-        if start_nsec >= 1_000_000_000:
-            start_nsec -= 1_000_000_000
-            start_sec += 1
+        start_sec = phc_ns // 1_000_000_000 + 2
         buf = struct.pack('<qII qII II qII',
-                          start_sec, start_nsec, 0,
+                          start_sec, 0, 0,
                           period_s, period_sub, 0,
                           channel, 0,
                           0, 0, 0)
