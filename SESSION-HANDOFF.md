@@ -1,91 +1,95 @@
-# Session Handoff — 2026-04-03
+# Session Handoff — 2026-04-03/04 (overnight)
 
-## Headline: 2-hour TICC-measured disciplined TDEV
+## Major architecture change: TICC replaces EXTTS
 
-All numbers from TICC chA (60 ps), in-process via `--ticc-port`,
-10 min warmup skipped.
+When `--ticc-port` is present, the TICC now completely replaces
+EXTTS as the PPS measurement source:
 
-**TimeHat i226 TCXO:**
+1. **Auto-enabled**: `--ticc-drive` activates automatically with
+   `--ticc-port` (no explicit flag needed)
+2. **TICC chB generates PpsEvent**: replaces EXTTS reader for the
+   correlation pipeline. Correlation uses host monotonic time.
+3. **EXTTS reader not started**: the EXTTS thread doesn't run in
+   TICC-drive mode. No EXTTS ioctl calls.
+4. **Servo feedback**: TICC differential (chA-chB) at 60 ps
+   resolution, vs EXTTS at 8 ns. 133x improvement.
 
-| tau | PPS only | PPS+qErr | PPS+PPP |
-|-----|----------|----------|---------|
-| 1s  | 1.00 ns  | **0.79 ns** | 1.18 ns |
-| 10s | 0.25 ns  | 0.25 ns  | 0.26 ns |
-| 30s | 0.33 ns  | 0.24 ns  | **0.22 ns** |
-| 60s | 0.55 ns  | 0.24 ns  | **0.18 ns** |
-| 100s| 0.73 ns  | 0.20 ns  | **0.14 ns** |
-| 300s| 0.38 ns  | 0.054 ns | **0.035 ns** |
-| 1000s| 0.11 ns | 0.015 ns | **0.013 ns** |
-| 2000s| 0.041 ns| 0.009 ns | **0.005 ns** |
+This enabled the E810 OCXO for the first time:
+- Bootstrap on stock driver (EXTTS works) → step PHC
+- Switch to out-of-tree driver (DPLL locks, OCXO active)
+- Run TICC-driven servo (no EXTTS needed)
 
-**ocxo E810 OCXO (0.5 Hz lossless):**
+## E810 with external F9T operational
 
-| tau | PPS only | PPS+PPP |
-|-----|----------|---------|
-| 1s  | 2.62 ns  | 2.68 ns |
-| 60s | 0.20 ns  | 0.21 ns |
-| 300s| 0.13 ns  | 0.13 ns |
-| 1000s| 0.078 ns| 0.057 ns|
+Host ocxo now has external F9T-BOT on USB (/dev/ttyACM2):
+- SMA1 (top bracket, pin 1, ch 1) = PEROUT → TICC #3 chA
+- SMA2 (bottom bracket, pin 2, ch 2) = EXTTS ← F9T-BOT PPS
+- TICC #3 chB = F9T-BOT PPS (ground truth, also feeds DPLL)
+- 1 Hz lossless via USB serial (no I2C limitations)
 
-**Key findings:**
+## DPLL/OCXO activated
 
-1. **TCXO+PPP beats OCXO at every tau.** The TCXO's lower short-tau
-   noise (0.79 ns vs 2.68 ns at tau=1s) gives it a head start,
-   and PPP compensates both equally at long tau.
-2. **qErr provides 1.3-8x improvement** on TCXO at tau=1-600s.
-3. **PPP provides 3-11x improvement** on TCXO at tau=30-300s.
-4. **5 ps TDEV at tau=2000s** on a $200 TCXO board with PPP.
-5. **OCXO benefit is at short tau only** (lower noise floor), but
-   the TCXO is already better there due to EXTTS path differences.
+Out-of-tree ice driver v2.4.5 (patched with GNSS pin +
+EXTTS-in-locked-mode bypass):
+- Both DPLLs lock to SMA2 (external F9T PPS)
+- OCXO disciplined by F9T PPS via CGU
+- adjfine works (timer stays in NANOSECONDS mode)
+- EXTTS not available (DPLL consumes the PPS signal)
+- TICC-driven servo bypasses EXTTS entirely
 
-## E810 lossless delivery confirmed
+Driver files:
+- Out-of-tree: `/tmp/ethernet-linux-ice/src/ice.ko`
+- Stock: `/lib/modules/.../kernel/.../ice/ice.ko.zst`
+- Switch: `rmmod ice; insmod /tmp/.../ice.ko` (out-of-tree)
+         or `rmmod ice; modprobe ice` (stock)
 
-Fixed measurement rate bug: bootstrap and engine were resetting
-E810 to 1 Hz, overriding the 2000 ms profile setting. Now all
-three code paths (wrapper, bootstrap, engine) auto-detect kernel
-GNSS and default to 0.5 Hz.
+## Overnight 8-hour runs in progress
 
-Result: 3887-3891 epochs in 7800s = 99.6% lossless at 0.5 Hz.
-Only 9-14 single-epoch skips per 2-hour run.
+**ocxo** (OCXO, TICC-driven, out-of-tree driver):
+- Engine running directly (not through wrapper — bootstrap was
+  done on stock driver, then switched)
+- `data/ocxo-ocxo-8h.csv` + `data/ocxo-ocxo-8h-ticc.csv`
+- Source: TICC, settled, adjfine ~4 ppb
+- First ever run on the actual OCXO
 
-## CAS SSR mount confirmed — phase biases for PPP-AR
+**TimeHat** (TCXO, TICC-driven, stock igc driver):
+- Running through wrapper (EXTTS available but not used)
+- `data/timehat-8h-ticc-drive.csv` + `data/timehat-8h-ticc-drive-ticc.csv`
+- Bootstrap in progress, servo should start within minutes
 
-`SSRA01CAS1` on the Australian mirror provides 159 phase biases.
-Existing BKG credentials work. No new registration needed.
+## PPP-AR status
 
-Ready to begin PPP-AR Phase 2 (apply phase biases in filter).
+- Phase bias application code committed and tested
+- CAS (SSRA01CAS1) provides phase biases but signal codes don't
+  match (C2W vs C2L for GPS, C5I vs C5Q for Galileo)
+- Requested products.igs-ip.net access for CNES/GFZ
+- Galileo HAS phase biases not until ~2028-2029
+- Ambiguity integrality on ocxo: mean|frac| = 0.15-0.32 (partial match)
 
-## E810 I2C corruption recovery
+## Other session work
 
-Process kills leave the E810 I2C bus corrupted (checksum errors on
-every read). Fix: `sudo rmmod irdma && sudo rmmod ice && sudo modprobe ice`.
-Wait 10s for GNSS reinitialization.
-
-## Stale lock fix
-
-exclusive_io.py: PID-validated flock. Checks if owning PID is alive
-before blocking — stale locks from crashed processes auto-reclaim.
-
-## Plot 2 renamed
-
-`phc-pps-in-time-error-tdev` — shows TICC ground truth vs EXTTS
-measurement error on both platforms. In `plots/` directory.
-
-## Overnight runs still in progress
-
-ocxo qErr run queued (after PPS-only and PPP complete).
+- E810 SMA pin mapping verified (SMA1=top=PEROUT, SMA2=bottom=EXTTS)
+- Antenna calibration plan documented (docs/antenna-calibration-plan.md)
+- F9T internal delay reference: ~28 ns (Piriz/GMV)
+- Local NTRIP casters documented (DuPage/ISTHA CORS)
+- Plot 2 renamed to phc-pps-in-time-error-tdev
+- ADEV subplot added to TimeHat disciplined plot
+- Ole's blog post reviewed for comparison (docs/ notes saved)
 
 ## Commits
 
-- b08292d: Engine kernel GNSS rate detection
-- 321d509: Bootstrap kernel GNSS rate detection
-- 7020d68: Plot 2 renamed to PHC PPS IN
-- 7fec677: Stale lock fix, in-process TICC guidance
-- 57bc9fb: EXTTS TDEV warnings
-- 3568eb1: E810 epoch delivery clarification
-- a109665: E810 AQ contention root cause
+- e88398e: TICC replaces EXTTS when --ticc-drive is active
+- f088178: Fix cleanup crash when EXTTS was never enabled
+- 5d34b4a: Fix crash when EXTTS unavailable: guard test_pps
+- bab5b59: Make EXTTS optional when TICC-driven servo active
+- d8671d9: Auto-enable TICC-driven servo with --ticc-port
+- fafeeea: Fix E810 SMA mapping
+- 94dbe0d: E810 profile for external F9T
+- 1dbba47: Antenna calibration plan
+- 444c547: PPP-AR signal code fix and L5 gap documentation
 
 ## Host state
 
-- TimeHat: idle after 3 × 2h10m runs, TICC #1 available
-- ocxo: qErr run may still be in progress, 0.5 Hz lossless confirmed
+- TimeHat: 8h TICC-driven run in progress (TCXO, stock igc)
+- ocxo: 8h TICC-driven run in progress (OCXO active, out-of-tree ice)
+- Both: TICC capturing in-process, 1 Hz, nohup
