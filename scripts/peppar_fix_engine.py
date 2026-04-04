@@ -1257,9 +1257,14 @@ def _setup_servo(args, known_ecef, qerr_store):
             if dropped:
                 log.debug("Dropped one stale PPS notification due to full queue")
 
-    t_extts = threading.Thread(target=extts_reader, daemon=True)
-    t_extts.start()
-    log.info("EXTTS reader started")
+    if not args.ticc_drive:
+        # EXTTS-driven: PPS events come from EXTTS hardware timestamps
+        t_extts = threading.Thread(target=extts_reader, daemon=True)
+        t_extts.start()
+        log.info("EXTTS reader started (PPS source for correlation)")
+    else:
+        t_extts = None
+        log.info("TICC-driven mode: TICC chB replaces EXTTS for PPS correlation")
 
     if args.ticc_port:
         ticc_tracker = TiccPairTracker(args.ticc_phc_channel, args.ticc_ref_channel)
@@ -1272,6 +1277,12 @@ def _setup_servo(args, known_ecef, qerr_store):
             ticc_log_f.flush()
 
         def ticc_reader():
+            # When TICC-driven, the reference channel (chB) also generates
+            # PpsEvent objects for the correlation gate — replacing EXTTS.
+            # We derive the GPS second from host monotonic time + the
+            # realtime-to-PHC offset known from bootstrap.
+            ticc_pps_estimator = TimebaseRelationEstimator()
+
             while not stop_ticc.is_set():
                 try:
                     with Ticc(args.ticc_port, args.ticc_baud, wait_for_boot=True) as ticc:
@@ -1289,6 +1300,38 @@ def _setup_servo(args, known_ecef, qerr_store):
                                 ])
                                 ticc_log_f.flush()
                             ticc_tracker.ingest(event)
+
+                            # In TICC-drive mode, chB (reference PPS) events
+                            # replace EXTTS as the PPS source for correlation.
+                            if args.ticc_drive and event.channel == args.ticc_ref_channel:
+                                # Derive approximate PHC second from realtime
+                                # (PPS fires at the GPS second boundary; recv_mono
+                                # is within ~100ms of true PPS time)
+                                rt_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
+                                rt_sec = rt_ns // 1_000_000_000
+                                # Apply TAI offset if PHC is in TAI timescale
+                                offset_s = 0
+                                if hasattr(args, 'phc_timescale'):
+                                    if args.phc_timescale == 'tai':
+                                        offset_s = getattr(args, 'leap', 18) + getattr(args, 'tai_minus_gps', 19)
+                                    elif args.phc_timescale == 'gps':
+                                        offset_s = getattr(args, 'tai_minus_gps', 19)
+                                phc_sec_approx = rt_sec + offset_s
+
+                                pps_event = PpsEvent(
+                                    phc_sec=phc_sec_approx,
+                                    phc_nsec=0,  # PPS is at the second boundary
+                                    index=-1,    # not from EXTTS
+                                    recv_mono=event.recv_mono,
+                                    queue_remains=event.queue_remains,
+                                    parse_age_s=event.parse_age_s,
+                                    correlation_confidence=event.correlation_confidence,
+                                    estimator_residual_s=event.estimator_residual_s,
+                                )
+                                with pps_history_lock:
+                                    pps_history.append(pps_event)
+                                _queue_put_drop_oldest(pps_queue, pps_event)
+
                 except Exception as exc:
                     if stop_ticc.is_set():
                         return
