@@ -67,8 +67,14 @@ note = "Intel i226 / igc timing core with explicit SDP pin mapping"
 
 [ptp.e810]
 device = "/dev/ptp1"
-pps_pin = 0
-extts_channel = 0
+# Pin/channel mapping for E810-XXVDA4T with external F9T on SMA:
+#   GNSS (pin 0, chan 0) = internal F9T PPS (default EXTTS, ignore when external)
+#   SMA1 (pin 1, chan 1) = PPS IN from external F9T → EXTTS
+#   SMA2 (pin 2, chan 2) = PPS OUT (disciplined PHC) → TICC chA
+# When using external F9T, set pps_pin=1 extts_channel=1.
+# When using internal F9T, set pps_pin=0 extts_channel=0 (default).
+pps_pin = 1                   # SMA1 = PPS IN from external F9T
+extts_channel = 1             # SMA1 is on EXTTS channel 1
 timescale = "tai"
 measurement_rate_ms = 2000    # 0.5 Hz — lossless on E810 AQ I2C (15 B/cmd, ~1.6 kB/s).
                               # Every servo epoch has full PPS+qErr+PPP stack.
@@ -81,8 +87,8 @@ phc_settime_lag_ns = 16000000 #   clock_settime lag (aim correction)
 phc_optimal_stop_limit_s = 5.0  #   optimal stop search budget
 phc_step_threshold_ns = 10000 # skip bootstrap if phase error already within this
                               # (was 2ms for clock_settime; now ±10µs with ADJ_SETOFFSET)
-pps_out_pin = 1               # SMA1 (upper bracket connector) → TICC #3 chA
-pps_out_channel = 1           # PEROUT channel 1 (channel 0 is GNSS/EXTTS)
+pps_out_pin = 2               # SMA2 (lower bracket connector) → TICC chA
+pps_out_channel = 2           # PEROUT channel 2 (SMA2 is on channel 2)
 # Servo tuning — OCXO with bootstrap glide.  The glide handles the
 # large initial phase error (±2 ms); the servo just needs enough Kp
 # to damp the resulting trajectory.
