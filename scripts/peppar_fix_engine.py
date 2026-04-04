@@ -208,6 +208,13 @@ class TiccPairTracker:
                 return None
             return self._latest
 
+    def latest_diff_ns(self):
+        """Return the most recent differential measurement in ns, or None."""
+        with self._lock:
+            if self._latest is None:
+                return None
+            return self._latest.diff_ns
+
     def health(self):
         with self._lock:
             return {
@@ -1402,6 +1409,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'pmc_announced': None,
         'ticc_prev_error_ns': None,
         'ticc_prev_error_mono': None,
+        'consecutive_outliers': 0,
         'ticc_settled_count': 0,
         'holdover': {
             'active': False,
@@ -1411,6 +1419,39 @@ def _setup_servo(args, known_ecef, qerr_store):
             'reasons': {},
         },
     }
+
+    # ── TICC sanity check ─────────────────────────────────────────── #
+    # When TICC-driven, wait for the first differential measurement
+    # and verify it's within a sane range.  A large offset (e.g., ±500 ms)
+    # indicates PEROUT misalignment or PHC not bootstrapped properly.
+    if args.ticc_drive and ticc_tracker is not None:
+        TICC_SANITY_TIMEOUT = 10  # seconds
+        TICC_SANITY_MAX_NS = 100_000_000  # 100 ms — beyond this, exit for re-bootstrap
+        log.info("Waiting for TICC sanity check (first differential measurement)...")
+        t0 = _time.monotonic()
+        first_diff = None
+        while _time.monotonic() - t0 < TICC_SANITY_TIMEOUT:
+            diff = ticc_tracker.latest_diff_ns()
+            if diff is not None:
+                first_diff = diff
+                break
+            _time.sleep(0.5)
+
+        if first_diff is None:
+            log.error("TICC sanity check: no differential measurement in %ds — "
+                      "check TICC wiring (chA=PEROUT, chB=PPS)", TICC_SANITY_TIMEOUT)
+            _cleanup_servo(ctx)
+            return 3  # retry
+        elif abs(first_diff) > TICC_SANITY_MAX_NS:
+            log.error("TICC sanity check FAILED: diff=%+.0f ns (limit ±%.0f ns). "
+                      "PEROUT may be misaligned or PHC not bootstrapped. "
+                      "Exiting for re-bootstrap (exit code 5).",
+                      first_diff, TICC_SANITY_MAX_NS)
+            ctx = ctx  # keep reference for cleanup
+            _cleanup_servo(ctx)
+            return 5  # PHC diverged — wrapper will re-bootstrap
+        else:
+            log.info("TICC sanity check passed: diff=%+.1f ns", first_diff)
 
 
 def _pps_fractional_error(phc_nsec):
@@ -1757,8 +1798,17 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         abs(best.error_ns) > TRACK_OUTLIER_NS and
         not scheduler._converging
     ):
-        log.warning(f"  Outlier: {best}, skipping")
+        ctx['consecutive_outliers'] += 1
+        if ctx['consecutive_outliers'] >= 30:
+            log.error("  %d consecutive outliers — servo has lost control. "
+                      "Exiting for re-bootstrap (exit code 5).",
+                      ctx['consecutive_outliers'])
+            ctx['phc_diverged'] = True
+            return "outlier"
+        log.warning(f"  Outlier: {best}, skipping ({ctx['consecutive_outliers']}/30)")
         return "outlier"
+    else:
+        ctx['consecutive_outliers'] = 0
 
     scheduler.accumulate(best.error_ns, best.confidence_ns, best.name)
     # Three-stage clockClass promotion: 248 (boot) → 52 (PHC bootstrapped,
