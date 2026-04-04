@@ -1149,6 +1149,7 @@ def _setup_servo(args, known_ecef, qerr_store):
     from peppar_fix.ptp_device import PTP_PF_EXTTS
 
     extts_channel = args.extts_channel
+    extts_ok = False
     if args.program_pin and caps['n_pins'] > 0:
         try:
             ptp.set_pin_function(args.pps_pin, PTP_PF_EXTTS, extts_channel)
@@ -1156,18 +1157,31 @@ def _setup_servo(args, known_ecef, qerr_store):
             log.info("Pin config not supported by driver")
     else:
         log.info("Skipping pin programming; using implicit EXTS mapping")
-    ptp.enable_extts(extts_channel, rising_edge=True)
-    log.info(f"EXTTS enabled: pin={args.pps_pin}, channel={extts_channel}")
+    try:
+        ptp.enable_extts(extts_channel, rising_edge=True)
+        log.info(f"EXTTS enabled: pin={args.pps_pin}, channel={extts_channel}")
+        extts_ok = True
+    except OSError as e:
+        if args.ticc_drive:
+            log.warning("EXTTS unavailable (%s) — TICC-driven servo does not require it", e)
+        else:
+            log.error("EXTTS failed: %s", e)
+            ptp.close()
+            return 1
 
     # Verify PPS is actually arriving before committing to the servo loop.
-    # Catches: broken wiring, driver state corruption, bootstrap failure.
-    test_pps = ptp.read_extts(timeout_ms=3000)
-    if test_pps is None:
-        log.error("No PPS event within 3s after enabling EXTTS — "
-                  "check PPS wiring, pin config, and PTP device")
-        ptp.disable_extts(extts_channel)
-        ptp.close()
-        return 3  # no PPS — wrapper should retry
+    if extts_ok:
+        test_pps = ptp.read_extts(timeout_ms=3000)
+        if test_pps is None and not args.ticc_drive:
+            log.error("No PPS event within 3s after enabling EXTTS — "
+                      "check PPS wiring, pin config, and PTP device")
+            ptp.disable_extts(extts_channel)
+            ptp.close()
+            return 3  # no PPS — wrapper should retry
+        elif test_pps is None:
+            log.warning("No PPS on EXTTS — TICC will provide servo feedback")
+    else:
+        test_pps = None
     phc_sec, phc_nsec = test_pps[0], test_pps[1]
     pps_err = phc_nsec if phc_nsec < 500_000_000 else phc_nsec - 1_000_000_000
     log.info("PPS verified: phc_sec=%d error=%+d ns", phc_sec, pps_err)
