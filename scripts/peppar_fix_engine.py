@@ -1929,7 +1929,10 @@ def _cleanup_servo(ctx):
             ptp.adjfine(0.0)
         except Exception:
             pass
-    ptp.disable_extts(ctx['extts_channel'])
+    try:
+        ptp.disable_extts(ctx['extts_channel'])
+    except OSError:
+        pass  # EXTTS may not have been enabled (TICC-only mode)
     ptp.close()
     if ctx['log_f']:
         ctx['log_f'].close()
