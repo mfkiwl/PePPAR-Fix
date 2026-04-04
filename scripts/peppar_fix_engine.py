@@ -1182,9 +1182,12 @@ def _setup_servo(args, known_ecef, qerr_store):
             log.warning("No PPS on EXTTS — TICC will provide servo feedback")
     else:
         test_pps = None
-    phc_sec, phc_nsec = test_pps[0], test_pps[1]
-    pps_err = phc_nsec if phc_nsec < 500_000_000 else phc_nsec - 1_000_000_000
-    log.info("PPS verified: phc_sec=%d error=%+d ns", phc_sec, pps_err)
+    if test_pps is not None:
+        phc_sec, phc_nsec = test_pps[0], test_pps[1]
+        pps_err = phc_nsec if phc_nsec < 500_000_000 else phc_nsec - 1_000_000_000
+        log.info("PPS verified: phc_sec=%d error=%+d ns", phc_sec, pps_err)
+    else:
+        log.info("PPS verification skipped — TICC provides servo feedback")
 
     servo = PIServo(args.track_kp, args.track_ki, max_ppb=caps['max_adj'],
                     initial_freq=current_adj)
