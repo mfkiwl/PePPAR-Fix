@@ -5,7 +5,7 @@
 
 ## Key finding: runtime register writes work
 
-The 8A34012 accepts runtime writes to the DPLL MODE register via I2C.
+The 8A34002 accepts runtime writes to the DPLL MODE register via I2C.
 Confirmed 2026-04-04: wrote pll_mode=2 (write_freq) to DPLL_2 on
 ptBoat, read back confirmed, restored original. This means we can
 reconfigure DPLLs at runtime without EEPROM reprogramming or Renesas
@@ -119,7 +119,7 @@ Resolution: 0.0874 / 327675 ≈ 0.27 ppt per M count — extraordinary.
   not CLK indices. We don't know which GPIO CLK5 maps to physically.
 
 **Blocking question (asked Timebeat 2026-04-05):**
-Which GPIO pin on the 8A34012 is the F9T PPS (CLK5) connected to on the
+Which GPIO pin on the 8A34002 is the F9T PPS (CLK5) connected to on the
 OTC SBC? Need this to set OUTPUT_TDC CTRL_3 TARGET_INDEX correctly.
 Once we know, write target=GPIOx to CTRL_3 and the TDC measures
 PPS vs DPLL_3 output in picoseconds at ~50 ps resolution — exactly
@@ -202,7 +202,7 @@ at long tau.
 
 ## Phase status register encoding (needs confirmation)
 
-Based on the 8A34002 datasheet (may differ for 8A34012):
+Based on the 8A34002 datasheet (may differ for 8A34002):
 
 **Coarse (DPLL_PHASE_STATUS, 8 bytes)**:
 - Signed value in ITDC_UIs
@@ -217,5 +217,5 @@ Based on the 8A34002 datasheet (may differ for 8A34012):
 The otcBob1 DPLL_0 phase status `E8 FF FF FF 0F 00 00 00` as a
 little-endian signed 64-bit: 0x0000000FFFFFFFE8 = 68,719,476,712.
 At 340 ps/ITDC_UI that would be ~23 seconds — clearly wrong. The
-encoding must be different for the 8A34012, or only some bytes are
+encoding must be different for the 8A34002, or only some bytes are
 the phase value. Needs Timebeat Go parser or datasheet.

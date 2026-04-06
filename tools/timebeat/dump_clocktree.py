@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""dump_clocktree.py — Dump Renesas 8A34012 ClockMatrix config and status.
+"""dump_clocktree.py — Dump Renesas 8A34002 ClockMatrix config and status.
 
 Reads DPLL configuration, status, input monitor, output, and TDC registers
-using 2-byte I2C addressing (i2c_rdwr). The 8A34012 does NOT use the 1B
+using 2-byte I2C addressing (i2c_rdwr). The 8A34002 does NOT use the 1B
 page register mode (0xFC) — that's the 8A34002.
 
 Usage:
@@ -28,7 +28,7 @@ except ImportError:
 
 CHIP_ADDR = 0x58
 
-# --- Register map from Timebeat Go source (8A34012) ---
+# --- Register map from Timebeat Go source (8A34002) ---
 
 # DPLL module bases
 MOD_DPLL = {0: 0xC3B0, 1: 0xC400, 2: 0xC438, 3: 0xC480}
@@ -93,8 +93,8 @@ LOCK_STATES = {
 }
 
 
-class ClockMatrix8A34012:
-    """I2C access to Renesas 8A34012 using 2-byte register addressing."""
+class ClockMatrix8A34002:
+    """I2C access to Renesas 8A34002 using 2-byte register addressing."""
 
     def __init__(self, bus_num, addr=CHIP_ADDR):
         self.bus = smbus2.SMBus(bus_num)
@@ -265,14 +265,14 @@ def dump_all(cm):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Dump Renesas 8A34012 ClockMatrix registers")
+        description="Dump Renesas 8A34002 ClockMatrix registers")
     ap.add_argument("--bus", type=int, required=True,
                     help="I2C bus number (15=otcBob1, 16=ptBoat)")
     ap.add_argument("--addr", type=lambda x: int(x, 0), default=CHIP_ADDR)
     ap.add_argument("-o", "--output", help="Save JSON to file")
     args = ap.parse_args()
 
-    cm = ClockMatrix8A34012(args.bus, args.addr)
+    cm = ClockMatrix8A34002(args.bus, args.addr)
     try:
         config = dump_all(cm)
         if args.output:

@@ -1,18 +1,18 @@
-# Renesas 8A34012 ClockMatrix Register Map
+# Renesas 8A34002 ClockMatrix Register Map
 
 **Date**: 2026-04-04
 **Status**: Confirmed via live I2C reads on ptBoat and otcBob1
 
-## Critical correction: the chip is an 8A34012, not 8A34002
+## Chip and register addressing
 
-All previous research assumed 8A34002. The Timebeat Go source uses
-`ClockGen8A34012`. The 8A34012 has a different register layout:
+The chip is a Renesas 8A34002 (confirmed by Timebeat). The 8A34xxx
+family shares a common register set (Linux kernel driver treats all
+variants identically). Key differences from earlier 8A34002 research
+docs that assumed page-register addressing:
 
-- **16-bit register addressing** via `i2c_rdwr`, NOT the 1B page register
-  mode (0xFC) that the 8A34002 uses
-- **All 4 DPLLs share page 0xC3/0xC4** at different base offsets, not
-  separate pages (0xC6-0xC9) as on the 8A34002
-- **Status module** at 0xC03C, not 0xC000
+- **16-bit register addressing** via `i2c_rdwr` (2-byte address prefix)
+- **All 4 DPLLs share page 0xC3/0xC4** at different base offsets
+- **Status module** at 0xC03C
 
 ## I2C access method
 
@@ -34,7 +34,7 @@ bus.i2c_rdwr(msg)
 ```
 
 Do NOT use `write_byte_data(addr, 0xFC, page)` — that's the 8A34002
-1B mode and produces garbage on the 8A34012.
+1B mode and produces garbage on the 8A34002.
 
 ## DPLL configuration registers
 
@@ -87,7 +87,7 @@ Bits [4:3] — State mode:
 | 2 | force_freerun | Force freerun (ignore refs) |
 | 3 | force_holdover | Force holdover (keep last freq) |
 
-**Runtime writes to MODE stick on the 8A34012.** Confirmed 2026-04-04:
+**Runtime writes to MODE stick on the 8A34002.** Confirmed 2026-04-04:
 wrote pll_mode=2 (write_freq) to DPLL_2, read back confirmed. No
 Timing Commander or EEPROM reprogramming needed.
 
