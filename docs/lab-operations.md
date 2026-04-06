@@ -1,0 +1,260 @@
+# Lab Operations Guide
+
+## Problem analysis: deployment stumbles (2026-04-04 to 2026-04-06)
+
+Every stumble from the ClockMatrix integration sessions, categorized:
+
+### 1. Missing dependencies on lab hosts
+
+| Host | Issue | Recovery time |
+|---|---|---|
+| otcBob1 | `pyubx2` not installed (user bob) | 1 min |
+| otcBob1 | `pyubx2` not installed (root/sudo) | 1 min |
+| ocxo | `pyubx2` not installed (root/sudo) | 1 min |
+
+**Root cause**: No venv on otcBob1/ocxo. TimeHat has a venv.
+Packages installed ad-hoc with `--break-system-packages`.
+
+**Fix**: Pre-flight check in `peppar-fix` wrapper that verifies
+imports before starting the pipeline. Or: standardized venv on
+every host.
+
+### 2. Missing directories
+
+| Host | Issue | Recovery time |
+|---|---|---|
+| ocxo | `data/` directory missing, position save failed | 2 min |
+| otcBob1 | No `~/peppar-fix` directory at all | 1 min |
+
+**Root cause**: rsync of scripts/ doesn't create data/. First-time
+deployment to a new host has no setup procedure.
+
+**Fix**: `peppar-fix` wrapper should `mkdir -p data/` at startup.
+Or: an install/setup script that creates the standard layout.
+
+### 3. Missing or wrong credentials
+
+| Host | Issue | Recovery time |
+|---|---|---|
+| otcBob1 | No `ntrip.conf` | 2 min (scp from TimeHat) |
+| ocxo | No `ntrip.conf` | 2 min (scp from TimeHat) |
+
+**Root cause**: Credentials not in repo (correctly). No provisioning
+step for new hosts.
+
+**Fix**: The `peppar-fix` wrapper already validates `--ntrip-conf`.
+Need a deploy checklist or setup script that copies credentials.
+
+### 4. Host config mismatches
+
+| Host | Issue | Recovery time |
+|---|---|---|
+| otcBob1 | No host config file existed | 5 min (created otcbob1.toml) |
+| otcBob1 | `ubx_port = "UART1"` invalid (should be "UART") | 3 min |
+| ocxo | `ptp_dev = /dev/ptp2` vs profile `device = /dev/ptp1` | 5 min (known issue) |
+
+**Root cause**: Host configs created ad-hoc. No validation that
+config values match what the hardware actually has.
+
+**Fix**: A `peppar-preflight` script that:
+- Verifies serial port exists and responds
+- Verifies PTP device exists and has EXTTS capability
+- Verifies TICC device exists (if configured)
+- Checks pyubx2/smbus2 imports
+- Checks ntrip.conf exists
+- Creates data/ directory
+
+### 5. Engine argparse restrictions
+
+| Issue | Recovery time |
+|---|---|
+| `--ptp-profile` had `choices=["i226", "e810"]` hardcoded | 3 min |
+| `--engine-arg "--ticc-port /dev/ticc1"` passed as single string | 10 min |
+
+**Root cause**: Hardcoded choices don't allow new profiles. The
+`--engine-arg` interface is fragile — arguments with values need
+TWO `--engine-arg` invocations.
+
+**Fix**: Remove `choices=` from argparse (done). Document the
+`--engine-arg` splitting requirement. Better: add `--ticc-port`
+and `--ticc-log` as first-class wrapper options.
+
+### 6. Stale processes from previous runs
+
+| Host | Issue | Recovery time |
+|---|---|---|
+| otcBob1 | Multiple crashed python3 processes from DPLL experiments | 2 min |
+| otcBob1 | Engine retry loop running from previous failed attempt | 3 min |
+| TimeHat | Wrapper piping to `tail -1` hid all output | 5 min |
+
+**Root cause**: SSH-launched background processes don't clean up on
+disconnect. The wrapper's retry loop keeps restarting the engine
+even when the error is permanent (wrong profile name).
+
+**Fix**: PID file management in the wrapper. `peppar-fix` should
+check for and kill stale processes before starting. Permanent
+errors (argparse failures) should not trigger retry.
+
+### 7. Device permission and driver issues
+
+| Host | Issue | Recovery time |
+|---|---|---|
+| otcBob1 | `/dev/ptp0` is root-only (0600) | 1 min (sudo) |
+| otcBob1 | TICC USB didn't enumerate (no power on USB port) | 5 min |
+| ocxo | E810 EXTTS `ioctl: Input/output error` (wrong pin/channel for out-of-tree driver) | 10 min (pre-existing, not resolved) |
+
+**Root cause**: No udev rules for PTP devices on otcBob1. TICC needs
+USB power that the OTC board doesn't provide. E810 out-of-tree driver
+uses different SDP pin mapping.
+
+**Fix**: Deploy 99-timelab.rules to all hosts. Document USB power
+requirement for TICC on OTC. Fix E810 pin mapping in e810 profile.
+
+### 8. Code deployment inconsistency
+
+| Issue | Recovery time |
+|---|---|
+| rsync of scripts/ only, missing config/ | 2 min |
+| rsync missed new files in peppar_fix/ subdirectory | 3 min |
+| Full rsync sends 100 MB due to data/ and .git/ | 1 min |
+| No git on lab hosts — can't `git pull` | ongoing |
+
+**Root cause**: No standard deployment method. Ad-hoc rsync with
+varying exclude lists. Some hosts have partial repos.
+
+**Fix**: Standardize on `git clone` + `git pull` on each host.
+Or: a `deploy.sh` script that does the right rsync with proper
+excludes.
+
+### 9. ClockMatrix-specific issues
+
+| Issue | Recovery time |
+|---|---|
+| Assumed 8A34002 register map (actually 8A34012) | 2 hours |
+| pll_mode bits[2:0] vs bits[5:3] confusion | 30 min |
+| Phase status interpreted as 64-bit (actually 32-bit + flags) | 20 min |
+| DPLL mode switch crashed host (cycled all 4 DPLLs) | 10 min (power cycle) |
+| FOD_FREQ saturation at ±8 ppb (wrong register for steering) | 30 min |
+| FCW didn't work (wrong pll_mode bits) | 20 min |
+| TDC Output targets don't include CLK inputs | 30 min |
+| DPLL phase status frozen when locked | 20 min |
+
+**Root cause**: Reverse engineering without full documentation.
+Many of these are one-time learning costs, now documented in
+`docs/timebeat-otc-register-map.md` and memory files.
+
+**Fix**: Already documented. Future sessions read the register
+map doc and memory before touching hardware.
+
+## Standard lab host layout
+
+Every peppar-fix lab host should have:
+
+```
+~/peppar-fix/
+├── scripts/          # peppar-fix code (from git)
+│   ├── peppar-fix    # orchestration wrapper
+│   ├── peppar_fix/   # Python package
+│   └── *.py          # component scripts
+├── config/           # host configs + profiles (from git)
+│   ├── receivers.toml
+│   └── <hostname>.toml
+├── data/             # runtime data (NOT in git)
+│   └── position.json
+├── ntrip.conf        # NTRIP credentials (NOT in git)
+├── venv/             # Python virtualenv (if not system python)
+└── drift.json        # frequency drift file (NOT in git)
+```
+
+## Deployment procedure
+
+### First-time setup on a new host
+
+```bash
+# 1. Clone the repo
+ssh <host>
+git clone <repo-url> ~/peppar-fix
+cd ~/peppar-fix
+
+# 2. Create venv and install deps
+python3 -m venv venv
+source venv/bin/activate
+pip install pyubx2 pyserial smbus2  # smbus2 only on I2C hosts
+
+# 3. Create runtime directories
+mkdir -p data
+
+# 4. Deploy credentials
+scp TimeHat:~/peppar-fix/ntrip.conf ~/peppar-fix/
+
+# 5. Create host config (if not already in repo)
+# Edit config/<hostname>.toml with correct serial port, PTP device, etc.
+
+# 6. Verify
+sudo scripts/peppar-fix --duration 60
+```
+
+### Updating code on a lab host
+
+```bash
+ssh <host>
+cd ~/peppar-fix
+git pull
+```
+
+Do NOT use rsync or scp for code updates — it creates inconsistency.
+
+### Pre-flight checklist (manual, until automated)
+
+Before starting a long run:
+- [ ] `ps aux | grep peppar` — no stale processes
+- [ ] Serial port exists and is accessible
+- [ ] PTP device exists: `ls /dev/ptp*`
+- [ ] TICC device exists (if using): `ls /dev/ticc*`
+- [ ] ntrip.conf present
+- [ ] data/ directory exists
+- [ ] `python3 -c "import pyubx2"` succeeds (in the right python)
+- [ ] Timebeat stopped (on OTC hosts): `systemctl is-active timebeat`
+
+## Future work
+
+### Near-term (reduces stumbling)
+
+1. **Pre-flight script** (`scripts/peppar-preflight`): automated version
+   of the checklist above. Run before `peppar-fix`, or integrated into
+   the wrapper.
+
+2. **Add --ticc-port and --ticc-log as wrapper options**: currently
+   passed via fragile `--engine-arg` splitting. Should be first-class.
+
+3. **mkdir -p data/ in wrapper**: trivial fix, prevents first-run failure.
+
+4. **Remove argparse choices on --ptp-profile**: allow any profile name.
+   Already done for the engine; check bootstrap too.
+
+5. **Stale process detection**: wrapper checks for and warns about
+   existing peppar-fix processes before starting.
+
+### Medium-term (production readiness)
+
+6. **systemd unit file** (`deploy/peppar-fix.service`): proper service
+   management with restart policy, logging to journald, and clean
+   shutdown. See `docs/ptp4l-supervision.md` for the supervision model.
+
+7. **Install script** (`scripts/peppar-install`): creates venv, installs
+   deps, creates directories, deploys udev rules, validates config.
+
+8. **Persistent TICC port config in host TOML**: add `ticc_port`,
+   `ticc_log`, `ticc_ref_channel`, `ticc_phc_channel` to the host
+   config. The wrapper reads them like other host config keys.
+
+9. **Drift file in standard location**: currently ad-hoc. Should be
+   `data/drift.json` on all hosts.
+
+### Long-term (multi-host fleet)
+
+10. **Ansible playbook for fleet deployment**: deploy code, configs,
+    credentials, udev rules, systemd units to all lab hosts.
+
+11. **Health monitoring dashboard**: watch all hosts via PTP or
+    peppar-fix status endpoint. Detect stuck servos, lost PPS, etc.

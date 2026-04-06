@@ -4,6 +4,23 @@ You are working on PePPAR Fix, a GNSS-disciplined precision clock system.
 This file contains hard-won operational knowledge. Read it before writing
 code or touching lab hardware.
 
+## Before running on a lab host — read this first
+
+**Read `docs/lab-operations.md`** for the deployment procedure,
+pre-flight checklist, and known stumbling points. The most common
+failures when running on a lab host:
+
+1. **Missing Python deps**: `sudo pip3 install --break-system-packages pyubx2 pyserial`
+2. **Missing directories**: `mkdir -p ~/peppar-fix/data`
+3. **Missing ntrip.conf**: `scp TimeHat:~/peppar-fix/ntrip.conf ~/peppar-fix/`
+4. **Stale processes**: `sudo pkill -f peppar` before starting
+5. **TICC args need splitting**: `--engine-arg --ticc-port --engine-arg /dev/ticc1`
+   (NOT `--engine-arg "--ticc-port /dev/ticc1"`)
+6. **Timebeat must be stopped on OTC hosts**: `sudo systemctl stop timebeat`
+
+Always use the `peppar-fix` orchestration wrapper, not individual scripts.
+Always use `git pull` to update code on lab hosts, not rsync/scp.
+
 ## Lab Test Protocol
 
 PePPAR Fix is implemented as component scripts that can be run directly from the CLI, but
@@ -254,6 +271,8 @@ here before changing anything in the areas they cover.
 | [wr-gm-research.md](docs/wr-gm-research.md) | White Rabbit GM architecture review: softpll internals (helper/main/external PLLs), how GM uses PPS vs 10 MHz, qErr injection points, PEROUT at 10 MHz, two integration paths (PHC PEROUT vs OCXO+ClockMatrix). |
 | [ticc-baseline-2026-04-01.md](docs/ticc-baseline-2026-04-01.md) | F9T PPS baseline TDEV(1s)=2.3 ns (2h runs); i226 TCXO PEROUT TDEV(1s)=1.170 ns (0.2% spread); servo bandwidth implications; EXTTS quantization analysis. |
 | [ppp-ar-design.md](docs/ppp-ar-design.md) | Design for PPP-AR: phase bias sources, filter changes, ambiguity resolution algorithm, 4-phase implementation plan, 5 validation tests. |
+| [clockmatrix-bootstrap-plan.md](docs/clockmatrix-bootstrap-plan.md) | ClockMatrix supplements PHC: bootstrap sequence, FCW handoff, hybrid architecture for Timebeat OTC. |
+| [lab-operations.md](docs/lab-operations.md) | **Read before running on any lab host.** Deployment procedure, pre-flight checklist, stumble analysis, standard host layout, future automation work. |
 
 ## Lab Documentation Pointers
 
