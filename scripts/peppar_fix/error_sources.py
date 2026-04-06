@@ -96,11 +96,99 @@ class PPPCalibration:
         return False
 
 
+class CarrierPhaseTracker:
+    """Track PHC phase error from PPP dt_rx and adjfine history.
+
+    Computes PHC phase error without requiring PPS EXTTS timestamps:
+
+        carrier_error = (dt_rx - dt_rx_ref) + cumulative_adjfine_ns
+
+    dt_rx_ref is the PPP clock offset when the PHC was last aligned to GPS
+    (at bootstrap).  cumulative_adjfine_ns is the running integral of
+    adjfine applied since then.  Together they reconstruct the PHC's phase
+    error from the TCXO-to-GPS relationship (PPP) and the servo's own
+    control history, bypassing the noisy PPS edge measurement entirely.
+
+    Sign convention: positive = PHC ahead of GPS (matches pps_error_ns).
+
+    Accumulator accuracy depends on adjfine being linear and symmetric.
+    If the PHC has nonlinear response to adjfine() or asymmetric step
+    behavior, cumulative_adjfine_ns will drift from reality, causing a
+    slow phase creep.  This is detectable by comparing carrier_error_ns
+    to pps_error_ns in the servo log — they should track closely.  A
+    monotonic divergence indicates accumulator bias.  PPS timestamps
+    should symmetrically bracket the second boundary; a growing offset
+    means the accumulator needs calibration or periodic reset from PPS.
+
+    Frequency tracking is not affected by accumulator drift.  The servo's
+    frequency input comes from PPP dt_rx — the TCXO-to-GPS relationship
+    measured independently by carrier-phase observations each epoch.
+    The accumulator only affects the phase reference (where in the
+    second the PHC thinks "zero" is), not the frequency lock to GPS.
+    """
+
+    def __init__(self, stable_threshold=5, max_jump_ns=5000.0):
+        self.dt_rx_ref_ns = None
+        self.cumulative_adjfine_ns = 0.0
+        self.initialized = False
+        self._prev_dt_rx_ns = None
+        self._stable_count = 0
+        self._stable_threshold = stable_threshold
+        self._max_jump_ns = max_jump_ns
+
+    def initialize(self, dt_rx_ns):
+        """Set the reference dt_rx (called when PHC is aligned to GPS)."""
+        self.dt_rx_ref_ns = dt_rx_ns
+        self.cumulative_adjfine_ns = 0.0
+        self.initialized = True
+        self._stable_count = 0
+
+    def try_auto_init(self, dt_rx_ns):
+        """Auto-initialize after dt_rx stabilizes (PPP filter convergence).
+
+        Returns True when initialization is complete.
+        """
+        if self.initialized:
+            return True
+        if self._prev_dt_rx_ns is not None:
+            if abs(dt_rx_ns - self._prev_dt_rx_ns) < self._max_jump_ns:
+                self._stable_count += 1
+            else:
+                self._stable_count = 0
+        self._prev_dt_rx_ns = dt_rx_ns
+        if self._stable_count >= self._stable_threshold:
+            self.initialize(dt_rx_ns)
+            return True
+        return False
+
+    def accumulate_adjfine(self, adjfine_ppb, dt_s=1.0):
+        """Accumulate one epoch of adjfine. Call every discipline epoch.
+
+        At 1 Hz, adjfine_ppb ≈ ns of PHC phase change per second.
+        """
+        self.cumulative_adjfine_ns += adjfine_ppb * dt_s
+
+    def compute_error(self, dt_rx_ns):
+        """Compute PHC phase error in nanoseconds.
+
+        Returns None if not initialized.
+        """
+        if not self.initialized:
+            return None
+        return (dt_rx_ns - self.dt_rx_ref_ns) + self.cumulative_adjfine_ns
+
+    def reset(self, dt_rx_ns):
+        """Reset after a PHC restep (phase was re-aligned to GPS)."""
+        self.dt_rx_ref_ns = dt_rx_ns
+        self.cumulative_adjfine_ns = 0.0
+
+
 def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
                           pps_confidence=20.0, qerr_confidence=3.0,
                           carrier_max_sigma=50.0,
                           ticc_error_ns=None, ticc_confidence=None,
-                          ppp_cal=None, tick_ns=8.0):
+                          ppp_cal=None, tick_ns=8.0,
+                          carrier_tracker=None):
     """Compute all available error sources and return sorted by confidence.
 
     Args:
@@ -113,6 +201,7 @@ def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
         carrier_max_sigma: max sigma to accept carrier-phase (ns)
         ppp_cal: PPPCalibration instance (None disables PPS+PPP)
         tick_ns: receiver clock tick period (ns)
+        carrier_tracker: CarrierPhaseTracker instance (None disables Carrier)
 
     Returns:
         List of ErrorSource, sorted by confidence (best first).
@@ -125,6 +214,14 @@ def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
         sources.append(ErrorSource('PPS+qErr',
                                    pps_error_ns + qerr_ns,
                                    qerr_confidence))
+
+    if (carrier_tracker is not None and carrier_tracker.initialized
+            and dt_rx_sigma_ns is not None
+            and dt_rx_sigma_ns < carrier_max_sigma):
+        carrier_error = carrier_tracker.compute_error(dt_rx_ns)
+        if carrier_error is not None:
+            sources.append(ErrorSource('Carrier', carrier_error,
+                                       dt_rx_sigma_ns))
 
     if (dt_rx_sigma_ns is not None and dt_rx_sigma_ns < carrier_max_sigma
             and ppp_cal is not None and ppp_cal.calibrated):

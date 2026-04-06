@@ -61,6 +61,7 @@ from peppar_fix import (
     StrictCorrelationGate,
     TimebaseRelationEstimator,
     PPPCalibration,
+    CarrierPhaseTracker,
     estimator_sample_weight,
     estimate_correlation_confidence,
     match_pps_event_from_history,
@@ -1424,6 +1425,7 @@ def _setup_servo(args, known_ecef, qerr_store):
             'ticc_confidence', 'pps_var_ns2',
             'pps_qerr_plus_var_ns2', 'pps_qerr_plus_ratio',
             'pps_qerr_minus_var_ns2', 'pps_qerr_minus_ratio',
+            'carrier_error_ns',
             'source', 'source_error_ns', 'source_confidence_ns',
             'adjfine_ppb', 'phase', 'n_meas', 'gain_scale',
             'discipline_interval', 'n_accumulated', 'watchdog_alarm',
@@ -1461,6 +1463,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'compute_error_sources': compute_error_sources,
         'ticc_only_error_source': ticc_only_error_source,
         'ppp_cal': PPPCalibration(tick_ns=8.0, min_samples=10),
+        'carrier_tracker': CarrierPhaseTracker(),
         'tracking_large_error_count': 0,
         'tracking_mode': 'pull_in',
         'pmc': _open_pmc(args),
@@ -1850,6 +1853,14 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     if qerr_ns is not None:
         qerr_alignment["pps_qerr_plus_var"].add(rate_compensated + qerr_ns)
         qerr_alignment["pps_qerr_minus_var"].add(rate_compensated - qerr_ns)
+    # Carrier phase tracker: auto-init and accumulate adjfine
+    carrier_tracker = ctx.get('carrier_tracker')
+    if carrier_tracker is not None and not getattr(args, 'no_carrier', False):
+        if dt_rx_ns is not None and dt_rx_sigma is not None:
+            carrier_tracker.try_auto_init(dt_rx_ns)
+        if carrier_tracker.initialized:
+            carrier_tracker.accumulate_adjfine(ctx['adjfine_ppb'])
+
     pps_var_ns2 = qerr_alignment["pps_var"].diff_variance()
     pps_qerr_plus_var_ns2 = qerr_alignment["pps_qerr_plus_var"].diff_variance()
     pps_qerr_minus_var_ns2 = qerr_alignment["pps_qerr_minus_var"].diff_variance()
@@ -1922,6 +1933,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             dt_rx_sigma,
             carrier_max_sigma=args.carrier_max_sigma_ns,
             ppp_cal=None if args.no_ppp else ppp_cal,
+            carrier_tracker=(None if getattr(args, 'no_carrier', False)
+                             else ctx.get('carrier_tracker')),
         )
     best = sources[0]
 
@@ -2091,6 +2104,9 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
 
     # PHC time at PPS edge (from EXTTS hardware timestamp).
     phc_gettime_ns = phc_sec * 1_000_000_000 + phc_nsec
+    carrier_error_ns = None
+    if carrier_tracker is not None and carrier_tracker.initialized:
+        carrier_error_ns = carrier_tracker.compute_error(dt_rx_ns)
     _log_servo(log_w, ctx['log_f'], ts_str, target_sec, phc_sec, phc_nsec,
                phc_rounded_sec, epoch_offset, timescale_error_ns,
                extts_index, pps_match_delta_s, pps_match_recv_dt_s, pps_queue_depth,
@@ -2098,7 +2114,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, qerr_offset_s,
                ticc_diff_ns, ticc_age_s, ticc_confidence,
                pps_var_ns2, pps_qerr_plus_var_ns2, qerr_plus_ratio,
-               pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
+               pps_qerr_minus_var_ns2, qerr_minus_ratio,
+               carrier_error_ns, best,
                ctx['adjfine_ppb'], ctx['phase'], n_used,
                ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns,
                ctx.get('tracking_mode'), mode_time_to_zero_s,
@@ -2113,7 +2130,8 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
                dt_rx_ns, dt_rx_sigma, pps_error_ns, qerr_ns, qerr_offset_s,
                ticc_diff_ns, ticc_age_s, ticc_confidence,
                pps_var_ns2, pps_qerr_plus_var_ns2, qerr_plus_ratio,
-               pps_qerr_minus_var_ns2, qerr_minus_ratio, best,
+               pps_qerr_minus_var_ns2, qerr_minus_ratio,
+               carrier_error_ns, best,
                adjfine_ppb, phase, n_used, gain_scale, scheduler,
                isb_gal_ns, isb_bds_ns, tracking_mode, time_to_zero_s,
                phc_gettime_ns=None):
@@ -2152,6 +2170,7 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
         f'{qerr_plus_ratio:.3f}' if qerr_plus_ratio is not None else '',
         f'{pps_qerr_minus_var_ns2:.3f}' if pps_qerr_minus_var_ns2 is not None else '',
         f'{qerr_minus_ratio:.3f}' if qerr_minus_ratio is not None else '',
+        f'{carrier_error_ns:.3f}' if carrier_error_ns is not None else '',
         best.name, f'{best.error_ns:.3f}', f'{best.confidence_ns:.3f}',
         f'{adjfine_ppb:.3f}', phase, n_used, f'{gain_scale:.3f}',
         scheduler.interval, scheduler.n_accumulated, 0,
@@ -2730,6 +2749,9 @@ Two-phase operation:
     servo.add_argument("--no-ppp", action="store_true",
                        help="Disable PPP carrier-phase correction "
                             "(PPS+qErr only, no PPS+PPP source)")
+    servo.add_argument("--no-carrier", action="store_true",
+                       help="Disable PPP Carrier Phase servo drive "
+                            "(Carrier source disabled, PPS+PPP still available)")
 
     ticc = ap.add_argument_group("TICC experimental input (optional)")
     ticc.add_argument("--ticc-port", default=None,

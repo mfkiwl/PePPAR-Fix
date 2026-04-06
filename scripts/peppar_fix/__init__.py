@@ -2,7 +2,7 @@
 
 from peppar_fix.ptp_device import PtpDevice
 from peppar_fix.servo import PIServo
-from peppar_fix.error_sources import ErrorSource, compute_error_sources, ticc_only_error_source, PPPCalibration, ppp_qerr
+from peppar_fix.error_sources import ErrorSource, compute_error_sources, ticc_only_error_source, PPPCalibration, CarrierPhaseTracker, ppp_qerr
 from peppar_fix.discipline import DisciplineScheduler
 from peppar_fix.watchdog import PositionWatchdog
 from peppar_fix.position import save_position, load_position
@@ -23,7 +23,7 @@ __all__ = [
     'PtpDevice',
     'PIServo',
     'ErrorSource', 'compute_error_sources', 'ticc_only_error_source',
-    'PPPCalibration', 'ppp_qerr',
+    'PPPCalibration', 'CarrierPhaseTracker', 'ppp_qerr',
     'DisciplineScheduler',
     'PositionWatchdog',
     'StrictCorrelationGate',
