@@ -192,7 +192,7 @@ class CarrierPhaseTracker:
 
     def _raw_error(self):
         """Uncompensated carrier error (before drift absorption)."""
-        if self.dt_rx_ref_ns is None:
+        if self.dt_rx_ref_ns is None or self._last_dt_rx is None:
             return None
         return ((self._last_dt_rx - self.dt_rx_ref_ns)
                 + self.cumulative_adjfine_ns)
