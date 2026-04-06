@@ -33,9 +33,8 @@
   │  PTP GM domain 40      │  │  PX1125T ← UFO   │ │ TICC3 /dev/ticc     │
   │  eth0: 10.168.13.16    │  │    (via GUS1)    │ │ TimeHAT v5 (i226)   │
   └────────────────────────┘  │  /dev/ttyUSB1    │ │ SatPulse daemon      │
-                              │  PPS → TICC2 chB │ │ eth1: PTP LAN       │
+                              │                  │ │ eth1: PTP LAN       │
                               │                  │ └─────────────────────┘
-                              │  TICC2 /ttyUSB0  │
                               │  /dev/ttyUSB2 →  │
                               │    FS switch     │
   ┌────────────────────────┐  │  eth0:           │
@@ -55,11 +54,15 @@
   │           PiPuss (Pi 5)                  │
   │                                          │
   │  F9T-BOT ← Patch3 (via GUS2)            │
-  │  /dev/gnss-bot, PPS → TICC chB          │
+  │  /dev/gnss-bot, PPS → TICC1 chB         │
   │                                          │
-  │  TICC chA: TimeHAT PHC PPS OUT (SDP0)   │
-  │  TICC chB: F9T-BOT PPS                  │
-  │  TICC ref: 10 MHz from Geppetto GPSDO   │
+  │  TICC1 chA: TimeHAT PHC PPS OUT (SDP0)  │
+  │  TICC1 chB: F9T-BOT PPS                 │
+  │  TICC1 ref: 10 MHz from Geppetto GPSDO  │
+  │                                          │
+  │  TICC2 chA: otcBob1 PPS OUT             │
+  │  TICC2 chB: (not connected)             │
+  │  TICC2 ref: 10 MHz from Geppetto GPSDO  │
   │                                          │
   │  eth0: 10.168.60.242                     │
   └──────────────────────────────────────────┘
@@ -127,12 +130,12 @@ NTS is used on Internet sources for MITM protection.
 | chA | TimeHAT PHC PPS OUT (SDP0, SMA1 J4) | PHC-disciplined |
 | chB | F9T-BOT PPS (PiPuss) | Patch3 |
 
-**TICC #2** (Onocoy, /dev/ttyUSB0)
+**TICC #2** (PiPuss, /dev/ticc2)
 
 | Channel | Source | PPS from |
 |---------|--------|----------|
-| chA | F10T PPS (ArduSimple) | Patch3 via GUS #2 |
-| chB | PX1125T PPS (SkyTraq) | UFO via GUS #1 |
+| chA | otcBob1 PPS OUT | ClockMatrix → i226 PEROUT (DPLL_3, OCXO) |
+| chB | (not connected) | |
 
 **TICC #3** (TimeHat, /dev/ticc)
 
@@ -145,7 +148,7 @@ NTS is used on Internet sources for MITM protection.
 
 ```
 [Geppetto GPSDO] ──10 MHz──→ [SV1AFN Dist Amp] ──10 MHz──→ [TICC #1 ref (PiPuss)]
-     (OCXO)                    (fan-out)       ──10 MHz──→ [TICC #2 ref (Onocoy)]
+     (OCXO)                    (fan-out)       ──10 MHz──→ [TICC #2 ref (PiPuss)]
                                                ──10 MHz──→ [TICC #3 ref (TimeHat)]
 ```
 
@@ -161,6 +164,17 @@ NTS is used on Internet sources for MITM protection.
 
 Record topology changes here so the history of what was connected when
 is preserved. Include date, what changed, and why.
+
+### 2026-04-04 — TICC #2 moved to PiPuss for otcBob1 ClockMatrix work
+
+- TICC #2 moved from Onocoy to PiPuss (/dev/ticc2)
+- TICC #2 chA wired to otcBob1 PPS OUT (ClockMatrix-derived via i226 PEROUT)
+- TICC #2 chB not connected
+- TICC #2 10 MHz ref from Geppetto GPSDO via SV1AFN dist amp (unchanged)
+- Purpose: independent verification of ClockMatrix frequency steering via
+  peppar-fix. DPLL_3 drives the 25 MHz → i226, we steer via FOD_FREQ I2C
+  writes, TICC measures resulting PPS against F9T PPS reference.
+- Onocoy no longer has a TICC
 
 ### 2026-03-20 — PiPuss zero-baseline: both F9Ts on Patch3 via GUS #2
 

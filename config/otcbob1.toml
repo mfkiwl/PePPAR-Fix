@@ -1,0 +1,12 @@
+[peppar]
+serial = "/dev/ttyAMA0"
+baud = 460800
+ubx_port = "UART"
+receiver = "f9t"
+ptp_profile = "otcBob1"
+ptp_dev = "/dev/ptp0"
+ntrip_conf = "ntrip.conf"
+eph_mount = "BCEP00BKG0"
+known_pos = "41.8430626,-88.1037190,201.671"
+position_file = "data/position.json"
+systems = "gps,gal"

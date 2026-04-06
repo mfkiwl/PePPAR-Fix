@@ -333,6 +333,18 @@ def apply_ptp_profile(args):
         args.measurement_rate_ms = profile.get("measurement_rate_ms", None)
     if getattr(args, 'sfrbx_rate', None) is None:
         args.sfrbx_rate = profile.get("sfrbx_rate", None)
+    # ClockMatrix I2C actuator (optional — only on OTC hardware)
+    if getattr(args, 'clockmatrix_bus', None) is None:
+        cm_bus = profile.get("clockmatrix_bus")
+        if cm_bus is not None:
+            args.clockmatrix_bus = cm_bus
+            args.clockmatrix_addr = profile.get("clockmatrix_addr", "0x58")
+            args.clockmatrix_dpll_actuator = profile.get(
+                "clockmatrix_dpll_actuator", 3)
+            args.clockmatrix_dpll_phase = profile.get(
+                "clockmatrix_dpll_phase", 2)
+            args.clockmatrix_pps_clk = profile.get(
+                "clockmatrix_pps_clk", 2)
 
 
 def apply_ticc_drive_defaults(args):
@@ -1137,9 +1149,57 @@ def _setup_servo(args, known_ecef, qerr_store):
     log.info(f"PHC: {args.servo}, max_adj={caps['max_adj']} ppb, "
              f"n_extts={caps['n_ext_ts']}, n_pins={caps['n_pins']}")
 
-    # Preserve adjfine from bootstrap — don't reset to 0.
-    current_adj = ptp.read_adjfine()
-    log.info("PHC adjfine at start: %.1f ppb", current_adj)
+    # Preserve adjfine from bootstrap — read before switching actuator.
+    bootstrap_adj = ptp.read_adjfine()
+    log.info("PHC adjfine from bootstrap: %.1f ppb", bootstrap_adj)
+
+    # Construct frequency actuator based on profile
+    from peppar_fix.phc_actuator import PhcAdjfineActuator
+    actuator = PhcAdjfineActuator(ptp)
+    if getattr(args, 'clockmatrix_bus', None) is not None:
+        try:
+            from peppar_fix.clockmatrix import ClockMatrixI2C
+            from peppar_fix.clockmatrix_actuator import ClockMatrixActuator
+            cm_i2c = ClockMatrixI2C(
+                bus_num=args.clockmatrix_bus,
+                addr=int(getattr(args, 'clockmatrix_addr', '0x58'), 0))
+            cm_dpll = getattr(args, 'clockmatrix_dpll_actuator', 3)
+            actuator = ClockMatrixActuator(cm_i2c, dpll_id=cm_dpll)
+            log.info("Using ClockMatrix actuator: bus=%d dpll=%d",
+                     args.clockmatrix_bus, cm_dpll)
+        except Exception as e:
+            log.error("ClockMatrix actuator init failed: %s — falling back to PHC adjfine", e)
+            actuator = PhcAdjfineActuator(ptp)
+    actuator.setup()
+
+    # For ClockMatrix: set up TDC phase source and seed FCW from bootstrap.
+    # The TDC PFD will measure the error and the servo will converge.
+    cm_phase_source = None
+    current_adj = actuator.read_frequency_ppb()
+    if getattr(args, 'clockmatrix_bus', None) is not None:
+        try:
+            from peppar_fix.clockmatrix_phase import ClockMatrixPhaseSource
+            cm_phase_dpll = getattr(args, 'clockmatrix_dpll_phase', 2)
+            cm_pps_clk = getattr(args, 'clockmatrix_pps_clk', 2)
+            cm_phase_source = ClockMatrixPhaseSource(
+                cm_i2c, dpll_id=cm_phase_dpll, pps_clk=cm_pps_clk)
+            cm_phase_source.setup()
+            log.info("Using ClockMatrix TDC phase source: DPLL_%d, CLK%d",
+                     cm_phase_dpll, cm_pps_clk)
+            # Seed FCW with bootstrap frequency estimate
+            if current_adj == 0 and abs(bootstrap_adj) > 1.0:
+                log.info("Seeding FCW with bootstrap freq %.1f ppb", bootstrap_adj)
+                actuator.adjust_frequency_ppb(bootstrap_adj)
+                ptp.adjfine(0.0)
+                current_adj = bootstrap_adj
+        except Exception as e:
+            log.error("ClockMatrix phase source failed: %s — using EXTTS", e)
+            cm_phase_source = None
+    elif current_adj == 0 and abs(bootstrap_adj) > 1.0:
+        # Non-ClockMatrix actuator: preserve bootstrap adjfine
+        current_adj = bootstrap_adj
+    log.info("Actuator freq at start: %.1f ppb (%s)", current_adj,
+             type(actuator).__name__)
     if args.freerun:
         log.info("FREERUN MODE: PHC will not be steered. "
                  "Auto-stop at |pps_error| > %.0f ns",
@@ -1378,6 +1438,8 @@ def _setup_servo(args, known_ecef, qerr_store):
 
     return {
         'ptp': ptp,
+        'actuator': actuator,
+        'cm_phase_source': cm_phase_source,
         'servo': servo,
         'scheduler': scheduler,
         'qerr_store': qerr_store,
@@ -1582,10 +1644,105 @@ def _match_pps_event_from_history(ctx, obs_event, target_sec,
         )
 
 
+def _cm_servo_epoch(ctx, args, n_epochs, dt_rx_ns, dt_rx_sigma):
+    """ClockMatrix-only servo epoch: TDC phase → PI → FCW.
+
+    Reads phase error from the ClockMatrix TDC (DPLL PFD measuring
+    PPS vs clock tree) and steers frequency via FCW. No EXTTS, no PHC,
+    no PPS correlation — everything is I2C.
+    """
+    cm_phase = ctx['cm_phase_source']
+    servo = ctx['servo']
+    scheduler = ctx['scheduler']
+    log_w = ctx.get('log_w')
+
+    phase_ns = cm_phase.read_phase_ns()
+    if phase_ns is None:
+        if n_epochs % 10 == 0:
+            log.info("  [%d] No ClockMatrix phase reading", n_epochs)
+        return "no_phase"
+
+    # The TDC PFD measures PPS vs DPLL output.
+    # Positive = output behind PPS = need to speed up.
+    # Use TDC as the sole error source with 50 ps confidence.
+    from peppar_fix.error_sources import ErrorSource
+    source = ErrorSource('CM_TDC', phase_ns, 0.050)
+
+    TRACK_OUTLIER_NS = args.track_outlier_ns
+    if TRACK_OUTLIER_NS is not None and abs(phase_ns) > TRACK_OUTLIER_NS:
+        ctx['consecutive_outliers'] = ctx.get('consecutive_outliers', 0) + 1
+        if ctx['consecutive_outliers'] >= 30:
+            log.error("  %d consecutive outliers — exiting (code 5)",
+                      ctx['consecutive_outliers'])
+            ctx['phc_diverged'] = True
+            return "outlier"
+        return "outlier"
+    else:
+        ctx['consecutive_outliers'] = 0
+
+    scheduler.accumulate(source.error_ns, source.confidence_ns, source.name)
+
+    if scheduler.should_correct():
+        avg_error, avg_confidence, n_samples = scheduler.flush()
+
+        BASE_KP = args.track_kp
+        BASE_KI = args.track_ki
+        GAIN_REF_SIGMA = args.gain_ref_sigma
+        GAIN_MIN_SCALE = args.gain_min_scale
+        GAIN_MAX_SCALE = args.gain_max_scale
+        gain_scale = max(GAIN_MIN_SCALE, min(GAIN_MAX_SCALE,
+                         GAIN_REF_SIGMA / avg_confidence))
+        servo.kp = BASE_KP * gain_scale
+        servo.ki = BASE_KI * gain_scale
+
+        # ClockMatrix FCW: positive error → positive freq (opposite of adjfine)
+        freq_ppb = servo.update(avg_error, dt=float(n_samples))
+
+        max_ppb = args.track_max_ppb or 244_000.0
+        if abs(freq_ppb) > max_ppb:
+            freq_ppb = math.copysign(max_ppb, freq_ppb)
+        if abs(freq_ppb) >= max_ppb * 0.95:
+            servo.integral = freq_ppb / servo.ki if servo.ki != 0 else 0
+            log.warning('  Anti-windup: freq=%+.0fppb at rail', freq_ppb)
+
+        if not args.freerun:
+            ctx['actuator'].adjust_frequency_ppb(freq_ppb)
+        ctx['adjfine_ppb'] = freq_ppb
+        ctx['gain_scale'] = gain_scale
+
+        scheduler.update_drift_rate(time.monotonic(), freq_ppb)
+        scheduler.compute_adaptive_interval(avg_confidence)
+
+        if n_epochs % 10 == 0:
+            log.info("  [%d] CM_TDC: err=%+.1fns (avg %d) freq=%+.1fppb "
+                     "gain=%.2fx interval=%d",
+                     n_epochs, avg_error, n_samples, freq_ppb,
+                     gain_scale, scheduler.interval)
+
+    if log_w is not None:
+        log_w.writerow({
+            'epoch': n_epochs,
+            'source': 'CM_TDC',
+            'source_error_ns': phase_ns,
+            'source_confidence_ns': 0.050,
+            'adjfine_ppb': ctx.get('adjfine_ppb', 0),
+            'gain_scale': ctx.get('gain_scale', 1.0),
+            'discipline_interval': scheduler.interval,
+        })
+
+    return "ok"
+
+
 def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                  dt_rx_ns, dt_rx_sigma, n_used, known_ecef,
                  resid_rms, isb_gal_ns, isb_bds_ns, pps_match=None):
     """Process one servo epoch: read PPS, compute error, steer PHC."""
+
+    # ClockMatrix TDC fast path: read phase directly via I2C, skip EXTTS/PPS
+    cm_phase = ctx.get('cm_phase_source')
+    if cm_phase is not None:
+        return _cm_servo_epoch(ctx, args, n_epochs, dt_rx_ns, dt_rx_sigma)
+
     ptp = ctx['ptp']
     servo = ctx['servo']
     scheduler = ctx['scheduler']
@@ -1906,7 +2063,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             servo.integral = -adjfine_ppb / servo.ki if servo.ki != 0 else 0
             log.warning(f'  Anti-windup: adj={adjfine_ppb:+.0f}ppb at rail, integral reset')
         if not args.freerun:
-            ptp.adjfine(adjfine_ppb)
+            ctx['actuator'].adjust_frequency_ppb(adjfine_ppb)
         ctx['adjfine_ppb'] = adjfine_ppb
         ctx['gain_scale'] = gain_scale
 
@@ -2019,7 +2176,17 @@ def _cleanup_servo(ctx):
     ptp = ctx['ptp']
     if not ctx.get('freerun'):
         try:
-            ptp.adjfine(0.0)
+            ctx['actuator'].adjust_frequency_ppb(0.0)
+        except Exception:
+            pass
+    try:
+        ctx['actuator'].teardown()
+    except Exception:
+        pass
+    cm_phase = ctx.get('cm_phase_source')
+    if cm_phase is not None:
+        try:
+            cm_phase.teardown()
         except Exception:
             pass
     try:
@@ -2467,7 +2634,7 @@ Two-phase operation:
 
     # PHC servo (optional)
     servo = ap.add_argument_group("PHC servo (optional)")
-    servo.add_argument("--ptp-profile", choices=["i226", "e810"],
+    servo.add_argument("--ptp-profile",
                        help="PTP NIC profile for default PHC/pin/channel settings")
     servo.add_argument("--device-config", default="config/receivers.toml",
                        help="Device/profile config TOML (default: config/receivers.toml)")
