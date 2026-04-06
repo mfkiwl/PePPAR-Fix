@@ -132,7 +132,7 @@ excludes.
 
 | Issue | Recovery time |
 |---|---|
-| Assumed 8A34002 register map (actually 8A34012) | 2 hours |
+| Assumed 8A34002 register map (actually 8A34002) | 2 hours |
 | pll_mode bits[2:0] vs bits[5:3] confusion | 30 min |
 | Phase status interpreted as 64-bit (actually 32-bit + flags) | 20 min |
 | DPLL mode switch crashed host (cycled all 4 DPLLs) | 10 min (power cycle) |

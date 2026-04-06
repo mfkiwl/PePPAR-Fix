@@ -1,7 +1,7 @@
-"""Low-level I2C access to Renesas 8A34012 ClockMatrix.
+"""Low-level I2C access to Renesas 8A34002 ClockMatrix.
 
 Uses 2-byte register addressing via smbus2.i2c_rdwr. Thread-safe.
-The 8A34012 does NOT use the 1B page register mode (0xFC) — that's
+The 8A34002 does NOT use the 1B page register mode (0xFC) — that's
 the 8A34002.
 
 See docs/timebeat-otc-register-map.md for the full register map.
@@ -16,7 +16,7 @@ except ImportError:
 
 
 class ClockMatrixI2C:
-    """Thread-safe I2C access to the Renesas 8A34012 ClockMatrix."""
+    """Thread-safe I2C access to the Renesas 8A34002 ClockMatrix."""
 
     def __init__(self, bus_num: int, addr: int = 0x58):
         if smbus2 is None:

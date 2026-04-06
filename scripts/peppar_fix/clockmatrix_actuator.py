@@ -1,4 +1,4 @@
-"""ClockMatrix frequency actuator — steers Renesas 8A34012 via FCW.
+"""ClockMatrix frequency actuator — steers Renesas 8A34002 via FCW.
 
 Writes a Frequency Control Word (FCW) to the DPLL_FREQ register in
 write_freq mode (pll_mode=2). The FCW provides direct, linear frequency
@@ -75,7 +75,7 @@ def fcw_to_ppb(fcw: int) -> float:
 
 
 class ClockMatrixActuator(FrequencyActuator):
-    """Frequency steering via Renesas 8A34012 DPLL FCW register.
+    """Frequency steering via Renesas 8A34002 DPLL FCW register.
 
     On setup(), switches the target DPLL to write_freq mode.
     On teardown(), restores the original DPLL mode.

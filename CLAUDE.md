@@ -249,9 +249,9 @@ here before changing anything in the areas they cover.
 | [full-data-flow.md](docs/full-data-flow.md) | Complete inventory of live data sources, their timescales, sink policies (freshest-only vs loss-free vs correlated-window), freshness requirements, and decimation effects. |
 | [platform-support.md](docs/platform-support.md) | Per-platform status for TimeHat (i226) and ocxo (E810). Documents device paths, PHC behavior, GNSS transport differences, and bring-up checklists. |
 | [time-and-platform-todo.md](docs/time-and-platform-todo.md) | Concrete work breakdown: remaining tasks for E810 GNSS, TimeHat PPS, correlation model, legacy cleanup, diagnostics. |
-| [timebeat-otc-research.md](docs/timebeat-otc-research.md) | Early ClockMatrix research (8A34002 addresses are WRONG — chip is 8A34012). See register-map doc. |
+| [timebeat-otc-research.md](docs/timebeat-otc-research.md) | Early ClockMatrix research (some addresses wrong). See register-map doc for confirmed addresses. |
 | [timebeat-otc-signal-routing.md](docs/timebeat-otc-signal-routing.md) | Signal flow sketch (DPLL mapping outdated — see register-map doc for confirmed configs). |
-| [timebeat-otc-register-map.md](docs/timebeat-otc-register-map.md) | **Authoritative** 8A34012 register map: correct I2C addressing, DPLL/status/TDC registers, confirmed on both hosts. |
+| [timebeat-otc-register-map.md](docs/timebeat-otc-register-map.md) | **Authoritative** 8A34002 register map: correct I2C addressing, DPLL/status/TDC registers, confirmed on both hosts. |
 | [timebeat-integration-paths.md](docs/timebeat-integration-paths.md) | Integration plan: ptBoat (easy, PHC-only or write_freq) vs otcBob1 (complex, live TDC). Runtime MODE writes confirmed working. |
 | [data-flow.md](docs/data-flow.md) | Original data flow sketch (superseded by full-data-flow.md for sink policy details). |
 | [position-convergence.md](docs/position-convergence.md) | PPP position bootstrap convergence analysis and tuning. |

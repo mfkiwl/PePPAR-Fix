@@ -2,6 +2,47 @@
 
 Each plot tells one story.  No overloading.
 
+
+## Servo Drive Taxonomy
+
+PePPAR Fix supports four progressively more precise ways to drive
+the discipline servo.  The first two require precise timestamps of
+physical PPS edges; the last two derive the TCXO-to-GPS relationship
+from carrier-phase observations and need no edge timestamps at all.
+
+| Servo Drive | Observation Source | Precision (1s) | Edge Timestamp Required |
+|---|---|---|---|
+| **PPS Phase** | PPS edge via EXTTS/TICC | ~2.3 ns (~2300 ppb) | Yes |
+| **PPS+qErr Phase** | PPS edge + firmware sawtooth correction | ~0.2 ns (~200 ppb) | Yes |
+| **PPP Carrier Phase** | Float PPP dt_rx from dual-frequency carrier-phase | ~0.1 ns (~0.1 ppb) | No |
+| **PPP-AR Carrier Phase** | Ambiguity-resolved PPP dt_rx | ~0.01 ns (~0.01 ppb) | No |
+
+**PPS Phase** and **PPS+qErr Phase** measure the phase error of a
+physical PPS edge.  The servo input is a phase measurement; the
+instrument (EXTTS, TDC, TICC) limits the achievable precision.
+qErr is literally a correction applied to the PPS edge — the
+F9T firmware reports the sub-cycle error between the ideal and
+quantised PPS edge.
+
+**PPP Carrier Phase** and **PPP-AR Carrier Phase** estimate the
+receiver clock offset (dt_rx) from GPS time using carrier-phase
+observations from multiple satellites.  This is an independent
+measurement of the TCXO-to-GPS relationship — no PPS edge
+timestamps are involved.  PPS edges are still needed for initial
+phase alignment (bootstrap), but the steady-state servo runs
+entirely on dt_rx.
+
+The "Carrier Phase" label reflects the GNSS measurement technique:
+dual-frequency carrier-phase observations provide sub-wavelength
+(sub-cm → sub-ns in time) precision.  PPP-AR further resolves
+integer cycle ambiguities for an additional ~10x improvement.
+
+On platforms with a ClockMatrix (Timebeat OTC), the servo steers
+the fractional output divider via FCW.  On PHC-only platforms
+(TimeHat, E810), the servo steers PHC adjfine.  The servo drive
+taxonomy is independent of the actuator.
+
+
 ## Plot 1: PePPAR Fix vs a Commercial GPSDO
 
 **Story**: At long tau, all GPSDOs converge to the same GNSS-derived
@@ -24,7 +65,7 @@ GNSS).
 
 **Key visual**: both curves converge at long tau (GNSS limit).  At
 short tau, PePPAR Fix should be comparable or better, proving the
-servo + qErr + PPP corrections are competitive.
+PPP Carrier Phase servo drive is competitive.
 
 **Shading**: one-sigma confidence band on PePPAR Fix trace.  The
 commercial GPSDO likely shows only a nominal curve from the datasheet.
@@ -112,17 +153,27 @@ Investigate whether the E810 PEROUT is phase-locked to the PPS
 rather than free-running from the OCXO.
 
 
-## Plot 4: Disciplined PPS OUT — PPS vs PPS+qErr vs PPS+PPP
+## Plot 4: Disciplined PPS OUT — Four Servo Drives
 
-**Story**: each correction layer improves the disciplined output.
-PPS+qErr should beat raw PPS.  PPS+PPP should beat PPS+qErr.
+**Story**: each servo drive type improves the disciplined output.
+The progression from PPS Phase through PPP-AR Carrier Phase shows
+orders-of-magnitude improvement in discipline precision.
+
+**Servo drive types** (see "Servo Drive Taxonomy" below for details):
+
+| Servo Drive | Observation Source | Precision (1s) | Edge Timestamp Required |
+|---|---|---|---|
+| PPS Phase | PPS edge via EXTTS/TICC | ~2300 ppb (2.3 ns) | Yes |
+| PPS+qErr Phase | PPS edge + firmware sawtooth correction | ~200 ppb | Yes |
+| PPP Carrier Phase | Float PPP dt_rx from carrier-phase observations | ~0.1 ppb | No |
+| PPP-AR Carrier Phase | Ambiguity-resolved PPP dt_rx | ~0.01 ppb | No |
 
 **One plot per host** (TimeHat and ocxo, if both have TICC on chA).
 
 **Traces** (all measured on TICC chA = disciplined PEROUT):
-- Disciplined with raw PPS only (servo source = PPS)
-- Disciplined with PPS + qErr (servo source = PPS+qErr)
-- Disciplined with PPS + PPP (servo source = PPS+PPP)
+- Disciplined with PPS Phase servo drive
+- Disciplined with PPS+qErr Phase servo drive
+- Disciplined with PPP Carrier Phase servo drive
 
 **All warm start** — after servo has settled (skip first 5-10 minutes
 of convergence).
@@ -131,13 +182,13 @@ of convergence).
 little beyond.
 
 **Shading**: one-sigma confidence band on each trace.  Shade the
-improvement region between raw PPS and the best correction.
+improvement region between PPS Phase and the best drive type.
 
 **Data needed**:
-- [x] TimeHat disciplined run, PPS-only, 15 min, TICC chA
-- [x] TimeHat disciplined run, PPS+qErr, 15 min, TICC chA
-- [x] TimeHat disciplined run, PPS+PPP, 15 min, TICC chA
-- [x] ocxo PPS-only + PPS+PPP, 15 min, TICC chA
+- [x] TimeHat disciplined run, PPS Phase, 15 min, TICC chA
+- [x] TimeHat disciplined run, PPS+qErr Phase, 15 min, TICC chA
+- [x] TimeHat disciplined run, PPP Carrier Phase, 15 min, TICC chA
+- [x] ocxo PPS Phase + PPP Carrier Phase, 15 min, TICC chA
       (qErr not reliably delivered on E810 I2C — 28% coverage)
 - [ ] 2+ hour versions of the above for long-tau confidence
 

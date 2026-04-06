@@ -1,21 +1,30 @@
 # ClockMatrix Bootstrap Plan for Timebeat OTC
 
-## Key insight: ClockMatrix supplements the PHC, doesn't replace it
+## Corrected architecture (2026-04-06)
 
-On Timebeat OTC hardware, the Renesas 8A34012 ClockMatrix drives the
-i226's 25 MHz PHY clock. The PHC counts these cycles for PTP
-timestamps. The ClockMatrix also produces a PPS output from the same
-clock tree.
+**DPLL_2 (Channel 0, hardware PLL)** drives the i226's 25 MHz PHY
+clock.  Timebeat wires F9T PPS to CLK14 and configures DPLL_2 as a
+closed PLL.  This handles PHC frequency automatically — we set
+`adjfine(0)` and only need to step PHC phase at bootstrap.
 
-This is a **hybrid architecture**:
-- The PHC provides time-of-day (seconds + nanoseconds) for PTP
-- The ClockMatrix provides frequency synthesis and a PPS output
-- Both must agree with GPS time independently
-- When both are correct, they naturally agree with each other
+**DPLL_3 (write_freq, FCW)** drives a separate PPS output.  FCW
+steering on DPLL_3 controls PPS output timing but has NO effect on
+the PHC (which is clocked by DPLL_2).  FCW changes are invisible to
+EXTTS; they are visible on the Input TDC and external TICC.
 
-The ClockMatrix gives us finer frequency control (0.111 fppb via FCW)
-than PHC adjfine (~1 ppb). The PHC gives us PTP timestamps that no
-ClockMatrix register can provide. We need both.
+When Timebeat is stopped, DPLL_2 goes to holdover/freerun and the
+25 MHz free-runs on the OCXO (~79 ppm on otcBob1).  In this state,
+peppar-fix must use `adjfine()` for PHC frequency (like TimeHat).
+
+## Two-tier control
+
+| Tier | What | DPLL | How steered | Measured by |
+|---|---|---|---|---|
+| 1 — PHC freq | 25 MHz → i226 | DPLL_2 (PLL) | Hardware PLL (or adjfine if PLL off) | EXTTS |
+| 2 — PPS OUT | High-quality PPS | DPLL_3 (FCW) | Software via PPP+qErr | Input TDC, TICC |
+
+Tier 1 gets us a GPS-locked PHC.  Tier 2 adds sub-ns PPS output
+steering using carrier-phase information the hardware PLL can't access.
 
 ## Two phase relationships
 

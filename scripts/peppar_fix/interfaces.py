@@ -2,7 +2,7 @@
 
 These ABCs decouple the servo loop from specific hardware. Current
 implementations: PhcAdjfineActuator (Linux PHC), ClockMatrixActuator
-(Renesas 8A34012 I2C). Future: White Rabbit, other timing chips.
+(Renesas 8A34002 I2C). Future: White Rabbit, other timing chips.
 """
 
 from abc import ABC, abstractmethod

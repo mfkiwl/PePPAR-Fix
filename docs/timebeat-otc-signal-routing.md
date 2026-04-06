@@ -71,31 +71,39 @@ cards. This open-loop DPLL does phase measurement only, no feedback.
 
 ## What peppar-fix needs to do
 
-To add value, we must **open DPLL A's loop** — switch it from hardware
-PLL mode (autonomous) to software-steered mode (we provide the
-corrections). This lets us replace the chip's internal loop filter with
-our EKF-based estimator, which can use carrier-phase PPP (sub-ns) rather
-than raw PPS (1.7 ns sawtooth) as the error signal.
+### Two-tier architecture (corrected 2026-04-06)
 
-### Steps
+peppar-fix operates alongside the ClockMatrix hardware PLL, not
+instead of it.  There are two independent control loops:
 
-1. **Map DPLL → output routing**: Confirm which DPLL feeds the 25 MHz
-   and PPS OUT that go to the i226. (Register dump captured in
-   `data/clocktree_ptboat.json`.)
+**Tier 1 — PHC frequency (Channel 0 / DPLL_2, hardware PLL):**
+Timebeat wires F9T PPS to CLK14 and configures DPLL_2 as a closed PLL
+that synthesises GPS-disciplined 25 MHz for the i226 PHY and PHC
+clocks.  This handles PHC frequency automatically.  peppar-fix sets
+`adjfine(0)` and only needs to step the PHC phase at bootstrap.
 
-2. **Open the loop**: Switch that DPLL from PLL mode (pll_mode=0) to
-   write_freq mode (pll_mode=1) or write_phase_set mode (pll_mode=3).
-   This may require EEPROM reprogramming via Renesas Timing Commander.
+- With Timebeat stopped, DPLL_2 goes to holdover/freerun and the
+  25 MHz free-runs on the OCXO (~79 ppm on otcBob1).  In this state
+  peppar-fix must use `adjfine()` to steer PHC frequency (like
+  TimeHat).  A future improvement: re-lock DPLL_2 to PPS ourselves
+  so Timebeat doesn't need to run.
+- The DPLL_2 loop bandwidth controls how much F9T PPS phase noise
+  (sawtooth, 1.7 ns RMS) leaks into the 25 MHz and therefore into
+  PHC timestamps.  Lower bandwidth = cleaner PHC, slower tracking.
 
-3. **Read phase error**: After opening the loop, the TDC phase
-   comparison between F9T PPS (CLK14) and OCXO feedback needs to be
-   triggered after each PPS edge. The phase error register
-   (DPLL_PHASE_STATUS) gives us the offset in ITDC_UIs.
+**Tier 2 — PPS OUT (Channel 3 / DPLL_3, software-steered via FCW):**
+A separate output channel produces a high-quality PPS that peppar-fix
+steers using carrier-phase PPP + qErr knowledge.  This PPS output is
+far more precise than what DPLL_2's hardware PLL can achieve from
+raw PPS alone.
 
-4. **Write corrections**: Steer the fractional divider via the DCO
-   frequency control word (WRITE_FREQUENCY, 42-bit, ±244 ppm,
-   0.11 fppb resolution) or phase offset (WRITE_PH, 32-bit, in
-   ITDC_UIs).
+- FCW on DPLL_3 controls PPS output timing, NOT PHC frequency.
+  Changing FCW is invisible to EXTTS (which timestamps using the PHC
+  clocked by DPLL_2's 25 MHz).
+- FCW steering is visible on: the Input TDC for DPLL_3, and an
+  external TICC measuring PPS OUT from that channel.
+- This is where the ClockMatrix's 0.111 fppb FCW resolution and
+  50 ps TDC resolution provide real value over the PHC-only approach.
 
 ### Why this matters
 
@@ -104,6 +112,9 @@ The i226 TCXO-based PHC on TimeHat gives TDEV(1s) = 100-130 ps
 and the ClockMatrix's TDC resolution is 2.7 ps (fine mode). This is
 a 5-50x improvement in the oscillator noise floor, which directly
 improves the discipline result at all taus.
+
+Tier 1 (DPLL_2 PLL) gets us a GPS-locked PHC with OCXO stability.
+Tier 2 (DPLL_3 FCW) adds sub-ns PPS output steering on top.
 
 ## Unconfirmed details
 

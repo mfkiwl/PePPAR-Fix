@@ -30,7 +30,7 @@ except ImportError:
     sys.exit("smbus2 not installed.  pip install smbus2")
 
 
-# 8A34012 register addresses (confirmed on otcBob1)
+# 8A34002 register addresses (confirmed on otcBob1)
 DPLL3_MODE = 0xC4B7
 DPLL3_FOD_FREQ = 0xC6D8
 DPLL0_PHASE_STATUS = 0xC03C + 0xDC  # = 0xC118

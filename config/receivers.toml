@@ -123,12 +123,15 @@ timescale = "tai"
 pps_pin = 0
 extts_channel = 0
 perout_channel = 0
-# ClockMatrix FCW steering via I2C
-clockmatrix_bus = 15
-clockmatrix_addr = "0x58"
-clockmatrix_dpll_actuator = 3
-clockmatrix_dpll_phase = 2
-clockmatrix_pps_clk = 2
+# ClockMatrix FCW steering via I2C — DISABLED: FCW controls DPLL_3
+# output (PPS) but NOT the 25 MHz PHY clock to i226.  PHC frequency
+# must use adjfine.  Re-enable once we identify which DPLL/FOD
+# drives the 25 MHz.
+#clockmatrix_bus = 15
+#clockmatrix_addr = "0x58"
+#clockmatrix_dpll_actuator = 3
+#clockmatrix_dpll_phase = 2
+#clockmatrix_pps_clk = 2
 # Servo tuning — OCXO has lower noise, can use tighter gains
 track_kp = 0.03
 track_ki = 0.001
@@ -151,4 +154,4 @@ require_ssr = false
 max_ssr_age_s = 30.0
 min_correlation_confidence = 0.5
 program_pin = false
-note = "Timebeat OTC SBC with Renesas 8A34012 ClockMatrix, OCXO, i226. FCW steering at 0.111 fppb resolution."
+note = "Timebeat OTC SBC with Renesas 8A34002 ClockMatrix, OCXO, i226. FCW steering at 0.111 fppb resolution."
