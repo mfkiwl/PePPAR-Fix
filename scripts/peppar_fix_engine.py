@@ -1859,7 +1859,11 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         if dt_rx_ns is not None and dt_rx_sigma is not None:
             carrier_tracker.try_auto_init(dt_rx_ns)
         if carrier_tracker.initialized:
-            carrier_tracker.accumulate_adjfine(ctx['adjfine_ppb'])
+            # ctx['adjfine_ppb'] = -servo.update(), so it's sign-inverted
+            # relative to the PHC's actual rate change.  Negate to get
+            # the true PHC phase accumulation: positive adjfine in the
+            # Linux PHC API means "run faster" = accumulate positive phase.
+            carrier_tracker.accumulate_adjfine(-ctx['adjfine_ppb'])
 
     pps_var_ns2 = qerr_alignment["pps_var"].diff_variance()
     pps_qerr_plus_var_ns2 = qerr_alignment["pps_qerr_plus_var"].diff_variance()
