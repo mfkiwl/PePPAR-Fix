@@ -1,5 +1,11 @@
 # Timebeat OTC Signal Routing and ClockMatrix Architecture
 
+**CORRECTION (2026-04-04)**: The chip is an 8A34012, not 8A34002.
+See `timebeat-otc-register-map.md` for the correct register map.
+Register addresses in this document are wrong. The DPLL mapping and
+signal routing analysis below is also outdated — see the register map
+doc for confirmed DPLL configurations on both hosts.
+
 **Status: Partially reverse-engineered. Some details unconfirmed.**
 
 ## Key insight: the OCXO is free-running

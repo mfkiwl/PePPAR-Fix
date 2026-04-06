@@ -1,9 +1,18 @@
 # peppar-fix on Timebeat OTC: Renesas ClockMatrix Integration Research
 
+## CORRECTION (2026-04-04): the chip is an 8A34012, not 8A34002
+
+All register addresses below this notice that reference the 8A34002 are
+**wrong**. See `timebeat-otc-register-map.md` for the correct 8A34012
+register map and `timebeat-integration-paths.md` for the current plan.
+
+Key differences: 16-bit I2C addressing via i2c_rdwr (not 1B page register),
+different DPLL base addresses, runtime MODE writes work (no EEPROM needed).
+
 ## Summary
 
 **Yes, this is feasible and potentially very valuable.** The Renesas
-8A34002 ClockMatrix on the OTC SBC exposes its DPLL, DCO, and TDC via
+8A34012 ClockMatrix on the OTC SBC exposes its DPLL, DCO, and TDC via
 I2C. We can open the DPLL loop, read phase error, and steer the
 oscillator independently. This gives us a much better measurement and
 control path than the i226 PHC alone.
