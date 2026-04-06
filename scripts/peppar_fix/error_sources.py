@@ -97,40 +97,44 @@ class PPPCalibration:
 
 
 class CarrierPhaseTracker:
-    """Track PHC phase error from PPP dt_rx and adjfine history.
+    """Complementary-filtered PHC phase error from PPP and PPS.
 
-    Computes PHC phase error without requiring PPS EXTTS timestamps:
+    Combines two measurements with complementary strengths:
+    - PPP carrier-phase (dt_rx): high precision (~0.1 ns), but measures
+      the receiver's TCXO, not the PHC's oscillator.  On systems where
+      these are different crystals, a raw accumulator drifts.
+    - PPS edge timestamps: noisy (~2.3 ns) but directly measure the
+      PHC phase relative to GPS.  Unbiased over time.
 
-        carrier_error = (dt_rx - dt_rx_ref) + cumulative_adjfine_ns
+    The complementary filter uses PPP for short-term precision and PPS
+    for long-term phase truth:
 
-    dt_rx_ref is the PPP clock offset when the PHC was last aligned to GPS
-    (at bootstrap).  cumulative_adjfine_ns is the running integral of
-    adjfine applied since then.  Together they reconstruct the PHC's phase
-    error from the TCXO-to-GPS relationship (PPP) and the servo's own
-    control history, bypassing the noisy PPS edge measurement entirely.
+        carrier_raw = (dt_rx - dt_rx_ref) + cumulative_adjfine_ns
+        drift_comp += alpha * (pps_error - carrier_raw - drift_comp)
+        carrier_error = carrier_raw + drift_comp
+
+    At short timescales (< 1/alpha seconds), the Carrier error follows
+    PPP with 0.1 ns precision.  At long timescales, it tracks PPS,
+    absorbing any inter-oscillator drift automatically.
+
+    The alpha parameter sets the crossover: alpha=0.01 at 1 Hz gives
+    ~100s time constant.  PPS noise is filtered at tau < 100s; inter-
+    oscillator drift is absorbed at tau > 100s.
 
     Sign convention: positive = PHC ahead of GPS (matches pps_error_ns).
 
-    Accumulator accuracy depends on adjfine being linear and symmetric.
-    If the PHC has nonlinear response to adjfine() or asymmetric step
-    behavior, cumulative_adjfine_ns will drift from reality, causing a
-    slow phase creep.  This is detectable by comparing carrier_error_ns
-    to pps_error_ns in the servo log — they should track closely.  A
-    monotonic divergence indicates accumulator bias.  PPS timestamps
-    should symmetrically bracket the second boundary; a growing offset
-    means the accumulator needs calibration or periodic reset from PPS.
-
-    Frequency tracking is not affected by accumulator drift.  The servo's
-    frequency input comes from PPP dt_rx — the TCXO-to-GPS relationship
-    measured independently by carrier-phase observations each epoch.
-    The accumulator only affects the phase reference (where in the
-    second the PHC thinks "zero" is), not the frequency lock to GPS.
+    Frequency tracking is always anchored to GPS via PPP dt_rx.  The
+    complementary filter only affects the phase reference.  The long-
+    term mean of (carrier_error - pps_error) converges to zero.
     """
 
-    def __init__(self, stable_threshold=5, max_jump_ns=5000.0):
+    def __init__(self, stable_threshold=5, max_jump_ns=5000.0, alpha=0.01):
         self.dt_rx_ref_ns = None
         self.cumulative_adjfine_ns = 0.0
+        self.drift_compensation_ns = 0.0
+        self._last_dt_rx = None
         self.initialized = False
+        self.alpha = alpha
         self._prev_dt_rx_ns = None
         self._stable_count = 0
         self._stable_threshold = stable_threshold
@@ -140,6 +144,7 @@ class CarrierPhaseTracker:
         """Set the reference dt_rx (called when PHC is aligned to GPS)."""
         self.dt_rx_ref_ns = dt_rx_ns
         self.cumulative_adjfine_ns = 0.0
+        self.drift_compensation_ns = 0.0
         self.initialized = True
         self._stable_count = 0
 
@@ -168,19 +173,46 @@ class CarrierPhaseTracker:
         """
         self.cumulative_adjfine_ns += adjfine_ppb * dt_s
 
+    def absorb_pps(self, pps_error_ns):
+        """Update drift compensation from a PPS phase measurement.
+
+        Call every epoch with the current pps_error_ns.  The
+        complementary filter slowly steers the Carrier phase reference
+        toward the PPS measurement, absorbing inter-oscillator drift.
+        """
+        if not self.initialized:
+            return
+        carrier_raw = self._raw_error()
+        if carrier_raw is None:
+            return
+        # IIR low-pass on (pps - carrier_raw): absorbs the DC offset
+        # between the two oscillators while rejecting PPS jitter
+        residual = pps_error_ns - carrier_raw - self.drift_compensation_ns
+        self.drift_compensation_ns += self.alpha * residual
+
+    def _raw_error(self):
+        """Uncompensated carrier error (before drift absorption)."""
+        if self.dt_rx_ref_ns is None:
+            return None
+        return ((self._last_dt_rx - self.dt_rx_ref_ns)
+                + self.cumulative_adjfine_ns)
+
     def compute_error(self, dt_rx_ns):
-        """Compute PHC phase error in nanoseconds.
+        """Compute complementary-filtered PHC phase error in nanoseconds.
 
         Returns None if not initialized.
         """
         if not self.initialized:
             return None
-        return (dt_rx_ns - self.dt_rx_ref_ns) + self.cumulative_adjfine_ns
+        self._last_dt_rx = dt_rx_ns
+        raw = (dt_rx_ns - self.dt_rx_ref_ns) + self.cumulative_adjfine_ns
+        return raw + self.drift_compensation_ns
 
     def reset(self, dt_rx_ns):
         """Reset after a PHC restep (phase was re-aligned to GPS)."""
         self.dt_rx_ref_ns = dt_rx_ns
         self.cumulative_adjfine_ns = 0.0
+        self.drift_compensation_ns = 0.0
 
 
 def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,

@@ -1860,6 +1860,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             carrier_tracker.try_auto_init(dt_rx_ns)
         if carrier_tracker.initialized:
             carrier_tracker.accumulate_adjfine(ctx['adjfine_ppb'])
+            carrier_tracker.absorb_pps(pps_error_ns)
 
     pps_var_ns2 = qerr_alignment["pps_var"].diff_variance()
     pps_qerr_plus_var_ns2 = qerr_alignment["pps_qerr_plus_var"].diff_variance()
