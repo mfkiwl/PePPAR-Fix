@@ -313,6 +313,14 @@ def _apply_bootstrap_profile(args):
     if args.phc_optimal_stop_limit_s == 1.0:
         args.phc_optimal_stop_limit_s = profile.get("phc_optimal_stop_limit_s", args.phc_optimal_stop_limit_s)
 
+    # ClockMatrix I2C parameters (optional — only on OTC hardware)
+    cm_bus = profile.get("clockmatrix_bus")
+    if cm_bus is not None:
+        args.clockmatrix_bus = cm_bus
+        args.clockmatrix_addr = profile.get("clockmatrix_addr", "0x58")
+        args.clockmatrix_dpll_actuator = profile.get(
+            "clockmatrix_dpll_actuator", 3)
+
     log.info("  phc_settime_lag_ns=%d phc_step_threshold_ns=%d phc_optimal_stop_limit=%.1fs",
              args.phc_settime_lag_ns, args.phc_step_threshold_ns, args.phc_optimal_stop_limit_s)
     log.info("  track_kp=%.4f track_ki=%.4f glide_zeta=%.2f track_max=%.0f ppb",
@@ -753,6 +761,87 @@ def main():
                  zeta, omega_n, phi_0, glide_offset, t_cross)
 
     target_freq = base_freq + glide_offset
+
+    # ── ClockMatrix handoff ──────────────────────────────────────── #
+    #
+    # On Timebeat OTC hardware, the ClockMatrix drives the i226's 25 MHz.
+    # The PHC counts these cycles. We set the PHC phase above (step) and
+    # now transfer the frequency correction from PHC adjfine to the
+    # ClockMatrix FCW, so the engine can steer the clock tree directly.
+    #
+    # 1. Read the ClockMatrix's current frequency state (FOD_FREQ)
+    #    to account for any existing offset from EEPROM or Timebeat
+    # 2. Zero adjfine — PHC runs at raw 25 MHz rate
+    # 3. Set DPLL_3 to write_freq mode with FCW = measured offset + glide
+    #
+    # If ClockMatrix is not configured (no clockmatrix_bus), fall through
+    # to the normal adjfine path.
+
+    cm_bus = getattr(args, 'clockmatrix_bus', None)
+    if cm_bus is not None:
+        try:
+            from peppar_fix.clockmatrix import ClockMatrixI2C
+            from peppar_fix.clockmatrix_actuator import ClockMatrixActuator, ppb_to_fcw
+
+            cm_addr = int(getattr(args, 'clockmatrix_addr', '0x58'), 0)
+            cm_dpll = getattr(args, 'clockmatrix_dpll_actuator', 3)
+            cm_i2c = ClockMatrixI2C(cm_bus, cm_addr)
+
+            # Read current DPLL_3 state to account for existing frequency offset
+            dpll_bases = {0: 0xC3B0, 1: 0xC400, 2: 0xC438, 3: 0xC480}
+            dpll_freq_bases = {0: 0xC838, 1: 0xC840, 2: 0xC848, 3: 0xC850}
+            mode_reg = dpll_bases[cm_dpll] + 0x37
+            freq_reg = dpll_freq_bases[cm_dpll]
+
+            cm_mode = cm_i2c.read(mode_reg, 1)[0]
+            cm_pll_mode = (cm_mode >> 3) & 0x07
+            cm_fcw_data = cm_i2c.read(freq_reg, 6)
+            cm_fcw_raw = int.from_bytes(cm_fcw_data, 'little')
+            cm_fcw_val = cm_fcw_raw & 0x3FFFFFFFFFF
+            if cm_fcw_val & (1 << 41):
+                cm_fcw_val -= (1 << 42)
+
+            log.info("ClockMatrix DPLL_%d: MODE=0x%02X (pll_mode=%d), "
+                     "current FCW=%d",
+                     cm_dpll, cm_mode, cm_pll_mode, cm_fcw_val)
+
+            # The measured frequency offset (base_freq) captures the TOTAL
+            # offset as seen by EXTTS: OCXO natural drift + any existing
+            # ClockMatrix correction. We apply the full measured offset
+            # as the FCW, regardless of what was there before.
+
+            # Set adjfine to 0 — all frequency steering goes through FCW
+            log.info("Zeroing PHC adjfine (frequency goes to ClockMatrix FCW)")
+            ptp.adjfine(0.0)
+
+            # Switch DPLL to write_freq mode and set FCW
+            actuator = ClockMatrixActuator(cm_i2c, dpll_id=cm_dpll)
+            actuator.setup()
+            actuator.adjust_frequency_ppb(target_freq)
+
+            log.info("ClockMatrix FCW set: %.1f ppb (base=%.1f + glide=%.1f)",
+                     target_freq, base_freq, glide_offset)
+
+            # Save base frequency to drift file
+            save_drift(args.drift_file, base_freq, args.ptp_dev)
+            log.info("Drift file updated: %s (base=%.1f ppb)",
+                     args.drift_file, base_freq)
+
+            # Don't close cm_i2c — the engine will reopen its own handle.
+            # Don't teardown actuator — engine inherits write_freq mode.
+            cm_i2c.close()
+
+            _enable_pps_out(ptp, args)
+            ptp.close()
+            log.info("PHC bootstrap complete (ClockMatrix) — servo may start")
+            return 0
+
+        except ImportError:
+            log.warning("smbus2 not available — falling back to PHC adjfine")
+        except Exception as e:
+            log.error("ClockMatrix handoff failed: %s — falling back to PHC adjfine", e)
+
+    # Normal PHC-only path (TimeHat, E810, or ClockMatrix fallback)
     log.info("Setting adjfine: %.1f ppb (base=%.1f + glide=%.1f)",
              target_freq, base_freq, glide_offset)
     ptp.adjfine(target_freq)

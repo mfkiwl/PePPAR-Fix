@@ -1172,10 +1172,15 @@ def _setup_servo(args, known_ecef, qerr_store):
             actuator = PhcAdjfineActuator(ptp)
     actuator.setup()
 
-    # For ClockMatrix: set up TDC phase source and seed FCW from bootstrap.
-    # The TDC PFD will measure the error and the servo will converge.
+    # For ClockMatrix: set up TDC phase source.
+    # Bootstrap already set the FCW and zeroed adjfine — the actuator's
+    # setup() inherits the FCW value. No transfer needed.
     cm_phase_source = None
     current_adj = actuator.read_frequency_ppb()
+    if current_adj == 0 and abs(bootstrap_adj) > 1.0:
+        # Actuator doesn't have a frequency set — use bootstrap's value.
+        # This happens with PhcAdjfineActuator (normal PHC path).
+        current_adj = bootstrap_adj
     if getattr(args, 'clockmatrix_bus', None) is not None:
         try:
             from peppar_fix.clockmatrix_phase import ClockMatrixPhaseSource
@@ -1186,18 +1191,9 @@ def _setup_servo(args, known_ecef, qerr_store):
             cm_phase_source.setup()
             log.info("Using ClockMatrix TDC phase source: DPLL_%d, CLK%d",
                      cm_phase_dpll, cm_pps_clk)
-            # Seed FCW with bootstrap frequency estimate
-            if current_adj == 0 and abs(bootstrap_adj) > 1.0:
-                log.info("Seeding FCW with bootstrap freq %.1f ppb", bootstrap_adj)
-                actuator.adjust_frequency_ppb(bootstrap_adj)
-                ptp.adjfine(0.0)
-                current_adj = bootstrap_adj
         except Exception as e:
             log.error("ClockMatrix phase source failed: %s — using EXTTS", e)
             cm_phase_source = None
-    elif current_adj == 0 and abs(bootstrap_adj) > 1.0:
-        # Non-ClockMatrix actuator: preserve bootstrap adjfine
-        current_adj = bootstrap_adj
     log.info("Actuator freq at start: %.1f ppb (%s)", current_adj,
              type(actuator).__name__)
     if args.freerun:

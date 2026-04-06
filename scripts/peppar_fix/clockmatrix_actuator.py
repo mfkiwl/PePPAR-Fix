@@ -94,11 +94,27 @@ class ClockMatrixActuator(FrequencyActuator):
         self._current_ppb = 0.0
 
     def setup(self) -> None:
-        """Switch DPLL to write_freq mode. Preserves original mode for teardown."""
-        self._original_mode = self._i2c.read(self._mode_reg, 1)[0]
-        orig_pll = (self._original_mode >> _PLL_MODE_SHIFT) & 0x07
+        """Switch DPLL to write_freq mode. Preserves original mode for teardown.
+
+        If the DPLL is already in write_freq mode (e.g., bootstrap set it up),
+        we preserve the existing FCW and just record the original mode for
+        teardown. This avoids zeroing the bootstrap frequency.
+        """
+        current_mode = self._i2c.read(self._mode_reg, 1)[0]
+        current_pll = (current_mode >> _PLL_MODE_SHIFT) & 0x07
+
+        if current_pll == _PLL_MODE_WRITE_FREQ:
+            # Bootstrap already set write_freq mode — inherit its FCW
+            self._original_mode = current_mode & ~_PLL_MODE_MASK  # PLL mode for teardown
+            self._current_ppb = self.read_frequency_ppb()
+            log.info("ClockMatrix DPLL_%d: already in write_freq mode, "
+                     "inheriting FCW=%.1f ppb",
+                     self._dpll_id, self._current_ppb)
+            return
+
+        self._original_mode = current_mode
         log.info("ClockMatrix DPLL_%d: original MODE=0x%02X (pll_mode=%d)",
-                 self._dpll_id, self._original_mode, orig_pll)
+                 self._dpll_id, self._original_mode, current_pll)
 
         # Write FCW=0 before mode switch to avoid frequency jump
         self._write_fcw_raw(0)
