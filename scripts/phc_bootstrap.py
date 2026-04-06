@@ -805,27 +805,130 @@ def main():
                      "current FCW=%d",
                      cm_dpll, cm_mode, cm_pll_mode, cm_fcw_val)
 
-            # The measured frequency offset (base_freq) captures the TOTAL
-            # offset as seen by EXTTS: OCXO natural drift + any existing
-            # ClockMatrix correction. We apply the full measured offset
-            # as the FCW, regardless of what was there before.
+            # The base_freq from the PHC adjfine domain doesn't map directly
+            # to the FCW domain.  In PLL mode, the DPLL synthesises 25 MHz
+            # from the OCXO; the FCW baseline in write_freq mode is the
+            # VCO's free-running centre, NOT the PLL-locked frequency.
+            #
+            # Correct approach (bootstrap plan Step 3):
+            #   1. Zero adjfine — PHC runs at the raw ClockMatrix 25 MHz
+            #   2. Switch DPLL to write_freq with FCW=0
+            #   3. Measure the ACTUAL frequency offset via PPS intervals
+            #   4. Set FCW = measured offset (+ glide)
 
-            # Set adjfine to 0 — all frequency steering goes through FCW
+            # CM-1: Zero adjfine + switch to write_freq
             log.info("Zeroing PHC adjfine (frequency goes to ClockMatrix FCW)")
             ptp.adjfine(0.0)
-
-            # Switch DPLL to write_freq mode and set FCW
             actuator = ClockMatrixActuator(cm_i2c, dpll_id=cm_dpll)
             actuator.setup()
-            actuator.adjust_frequency_ppb(target_freq)
+            # Ensure FCW=0 even if we inherited a stale value
+            actuator.adjust_frequency_ppb(0.0)
 
+            # CM-2: Measure actual frequency offset from PPS.
+            # Wait 3 seconds for the DPLL output to settle after
+            # the PLL→write_freq mode switch before measuring.
+            log.info("Waiting 3s for DPLL output to settle...")
+            time.sleep(3)
+            log.info("Measuring ClockMatrix frequency offset from PPS "
+                     "(adjfine=0, FCW=0)...")
+            cm_freq_ppb, cm_freq_sigma, cm_freq_n = measure_pps_frequency(
+                ptp, args.extts_channel, n_samples=15, timeout_s=20)
+
+            if cm_freq_ppb is not None and cm_freq_n >= 5:
+                cm_freq_unc = cm_freq_sigma / max(1, cm_freq_n ** 0.5)
+                log.info("ClockMatrix freq offset: %.1f ±%.1f ppb "
+                         "(σ=%.1f, n=%d)",
+                         cm_freq_ppb, cm_freq_unc, cm_freq_sigma, cm_freq_n)
+                cm_base_freq = -cm_freq_ppb  # negate: PPS drift → correction
+            else:
+                log.warning("PPS frequency measurement failed (n=%d) — "
+                            "using drift file value %.1f ppb",
+                            cm_freq_n if cm_freq_ppb is not None else 0,
+                            base_freq)
+                cm_base_freq = base_freq
+
+            # CM-3: Set FCW to measured frequency (no glide yet)
+            actuator.adjust_frequency_ppb(cm_base_freq)
+            log.info("ClockMatrix FCW set to base: %.1f ppb", cm_base_freq)
+
+            # CM-4: Step PHC and refine FCW frequency.
+            # After setting the initial FCW, the residual frequency error
+            # shows up as steady-state phase drift.  We step the PHC, then
+            # measure drift across 2 consecutive PPS events to get the
+            # frequency residual, and add it to the FCW.  Then step once
+            # more to verify.
+            step_ok_ns = 20_000  # 20 µs — well below outlier threshold
+            ptp.enable_extts(args.extts_channel, rising_edge=True)
+            cm_phi_0 = 0
+            prev_phi = None
+            for step_try in range(8):
+                # Drain stale events, get fresh PPS
+                while ptp.read_extts(timeout_ms=100) is not None:
+                    pass
+                evt = ptp.read_extts(timeout_ms=2000)
+                if evt is None:
+                    log.warning("No PPS — cannot step PHC")
+                    break
+                rt_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
+                e_sec, e_nsec = evt[0], evt[1]
+                e_rounded = e_sec if e_nsec < 500_000_000 else e_sec + 1
+                e_target = round(rt_ns / 1_000_000_000) + offset_s
+                e_epoch_off = e_rounded - e_target
+                e_sub_ns = (e_nsec if e_nsec < 500_000_000
+                            else e_nsec - 1_000_000_000)
+                cm_phi_0 = e_epoch_off * 1_000_000_000 + e_sub_ns
+                log.info("CM step %d: phase=%+.0f ns (epoch_off=%d)",
+                         step_try + 1, cm_phi_0, e_epoch_off)
+
+                # After step 2+, we know the per-second drift (= freq error).
+                # If it's significant, adjust the FCW to compensate.
+                if prev_phi is not None and step_try >= 2:
+                    drift_ppb = cm_phi_0  # drift in 1 second = ppb
+                    if abs(drift_ppb) > 1000:  # > 1 µs/s residual
+                        freq_adj = -drift_ppb
+                        cm_base_freq += freq_adj
+                        actuator.adjust_frequency_ppb(cm_base_freq)
+                        log.info("FCW refined: %+.0f ppb correction "
+                                 "→ base=%.1f ppb", freq_adj, cm_base_freq)
+                        prev_phi = None  # reset for next measurement pair
+                        # Step to zero phase after freq adjustment
+                        if abs(cm_phi_0) > 1000:
+                            ptp.adj_setoffset(-cm_phi_0)
+                        continue
+
+                if abs(cm_phi_0) <= step_ok_ns:
+                    log.info("Phase within ±%d ns — step complete",
+                             step_ok_ns)
+                    break
+                log.info("Stepping PHC by %+.0f ns", -cm_phi_0)
+                ptp.adj_setoffset(-cm_phi_0)
+                prev_phi = cm_phi_0
+            ptp.disable_extts(args.extts_channel)
+
+            # Apply glide
+            cm_glide = 0.0
+            if not args.no_glide and args.track_ki > 0 and abs(cm_phi_0) > 100:
+                omega_n = math.sqrt(args.track_ki)
+                zeta = args.glide_zeta
+                cm_glide = -zeta * omega_n * cm_phi_0
+                max_glide = args.track_max_ppb - abs(cm_base_freq)
+                if abs(cm_glide) > max_glide:
+                    cm_glide = math.copysign(max_glide, cm_glide)
+                t_cross = (abs(cm_phi_0 / cm_glide) if cm_glide
+                           else float('inf'))
+                log.info("ClockMatrix glide: phi_0=%+.0f ns, "
+                         "offset=%+.1f ppb, zero-crossing ~%.0fs",
+                         cm_phi_0, cm_glide, t_cross)
+
+            cm_target = cm_base_freq + cm_glide
+            actuator.adjust_frequency_ppb(cm_target)
             log.info("ClockMatrix FCW set: %.1f ppb (base=%.1f + glide=%.1f)",
-                     target_freq, base_freq, glide_offset)
+                     cm_target, cm_base_freq, cm_glide)
 
-            # Save base frequency to drift file
-            save_drift(args.drift_file, base_freq, args.ptp_dev)
+            # Save measured base frequency to drift file (FCW domain)
+            save_drift(args.drift_file, cm_base_freq, args.ptp_dev)
             log.info("Drift file updated: %s (base=%.1f ppb)",
-                     args.drift_file, base_freq)
+                     args.drift_file, cm_base_freq)
 
             # Don't close cm_i2c — the engine will reopen its own handle.
             # Don't teardown actuator — engine inherits write_freq mode.
