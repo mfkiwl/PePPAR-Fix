@@ -10,7 +10,9 @@ code or touching lab hardware.
 pre-flight checklist, and known stumbling points. The most common
 failures when running on a lab host:
 
-1. **Missing Python deps**: `sudo pip3 install --break-system-packages pyubx2 pyserial`
+1. **Missing Python deps**: set up the venv first:
+   `cd ~/peppar-fix && python3 -m venv venv && venv/bin/pip install pyubx2 pyserial`
+   (add `smbus2` on I2C hosts). Never use `--break-system-packages`.
 2. **Missing directories**: `mkdir -p ~/peppar-fix/data`
 3. **Missing ntrip.conf**: `scp TimeHat:~/peppar-fix/ntrip.conf ~/peppar-fix/`
 4. **Stale processes**: `sudo pkill -f peppar` before starting

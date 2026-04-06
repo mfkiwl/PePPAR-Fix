@@ -13,11 +13,13 @@ Every stumble from the ClockMatrix integration sessions, categorized:
 | ocxo | `pyubx2` not installed (root/sudo) | 1 min |
 
 **Root cause**: No venv on otcBob1/ocxo. TimeHat has a venv.
-Packages installed ad-hoc with `--break-system-packages`.
+Packages installed ad-hoc with `--break-system-packages` — this
+is wrong and creates fragile, non-reproducible environments.
 
-**Fix**: Pre-flight check in `peppar-fix` wrapper that verifies
-imports before starting the pipeline. Or: standardized venv on
-every host.
+**Fix**: Every host gets a venv. The `peppar-fix` wrapper already
+discovers venvs at `$REPO_ROOT/venv/`. PTP ioctls need root, so
+`sudo` must use the venv's python — the wrapper handles this via
+`$PYTHON_BIN`. Never install into system python.
 
 ### 2. Missing directories
 
@@ -179,7 +181,8 @@ cd ~/peppar-fix
 # 2. Create venv and install deps
 python3 -m venv venv
 source venv/bin/activate
-pip install pyubx2 pyserial smbus2  # smbus2 only on I2C hosts
+pip install pyubx2 pyserial
+pip install smbus2  # only on hosts with I2C (otcBob1, ptBoat)
 
 # 3. Create runtime directories
 mkdir -p data
@@ -193,6 +196,19 @@ scp TimeHat:~/peppar-fix/ntrip.conf ~/peppar-fix/
 # 6. Verify
 sudo scripts/peppar-fix --duration 60
 ```
+
+**Why venv, not system python?** The `peppar-fix` wrapper already
+auto-discovers `$REPO_ROOT/venv/bin/python` and uses it for all
+subprocesses including sudo. This keeps dependencies isolated and
+makes the host reproducible. `--break-system-packages` is a last
+resort that should never be needed if the venv is set up correctly.
+
+**Sudo and the venv**: `sudo scripts/peppar-fix` works because the
+wrapper sets `PYTHON_BIN` to the venv's python before calling sudo.
+The sudo'd subprocesses inherit this. PTP ioctls need root, but
+Python packages come from the venv. For future production use, a
+systemd unit with `AmbientCapabilities=CAP_SYS_TIME CAP_NET_RAW`
+would eliminate sudo entirely (see `docs/ptp4l-supervision.md`).
 
 ### Updating code on a lab host
 
