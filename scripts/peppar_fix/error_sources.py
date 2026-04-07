@@ -149,6 +149,11 @@ class CarrierPhaseTracker:
         # Phase anchor: ensures Carrier zero-point matches PPS truth
         self.phase_anchor_ns = 0.0
         self._anchored = False
+        # Anchor residual: running mean of (pps_error - carrier_error).
+        # Diagnostic only — shows how much a re-anchor would shift things.
+        self._residual_sum = 0.0
+        self._residual_n = 0
+        self.anchor_residual_ns = 0.0
 
     def initialize(self, dt_rx_ns):
         """Set the reference dt_rx (called when PHC is aligned to GPS)."""
@@ -164,6 +169,9 @@ class CarrierPhaseTracker:
         self.drift_rate_ppb = 0.0
         self.phase_anchor_ns = 0.0
         self._anchored = False
+        self._residual_sum = 0.0
+        self._residual_n = 0
+        self.anchor_residual_ns = 0.0
         self.initialized = True
         self._stable_count = 0
 
@@ -196,9 +204,21 @@ class CarrierPhaseTracker:
         Call every epoch with current dt_rx, pps_error, and adjfine.
         Computes per-epoch rates for both oscillators and accumulates
         their difference for a running mean estimate of D.
+
+        Also updates anchor_residual_ns: the running mean of
+        (pps_error - carrier_error).  This is the bias we'd correct
+        if we re-anchored to PPS right now.  Diagnostic only.
         """
         if not self.initialized:
             return
+        # Update anchor residual: running mean of (pps - current carrier)
+        carrier = self.compute_error(dt_rx_ns)
+        if carrier is not None:
+            residual = pps_error_ns - carrier
+            self._residual_sum += residual
+            self._residual_n += 1
+            self.anchor_residual_ns = self._residual_sum / self._residual_n
+
         if (self._prev_dt_rx_for_rate is not None
                 and self._prev_pps_error is not None):
             # R_tcxo: F9T TCXO drift rate (ppb) from PPP

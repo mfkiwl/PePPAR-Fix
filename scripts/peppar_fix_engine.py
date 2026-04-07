@@ -2153,6 +2153,10 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             if args.ticc_drive and best.name == 'TICC':
                 ttz = f"{mode_time_to_zero_s:.1f}s" if mode_time_to_zero_s is not None else 'na'
                 mode_suffix = f" mode={ctx.get('tracking_mode')} t0={ttz}"
+            ct = ctx.get('carrier_tracker')
+            if (ct is not None and ct.initialized
+                    and best.name == 'Carrier' and n_epochs % 60 == 0):
+                mode_suffix += (f" anchor_resid={ct.anchor_residual_ns:+.1f}ns")
             log.info(f"  [{n_epochs}] {best.name}: "
                      f"err={avg_error:+.1f}ns (avg {n_samples}) "
                      f"adj={adjfine_ppb:+.1f}ppb "
