@@ -11,26 +11,34 @@ carrier-phase corrections.
 ## Stability target
 
 The goal is to faithfully transfer the **long-term stability of GPS
-time** to a local oscillator while preserving that oscillator's
-**superior short-term stability**.
+time** to the **Disciplined Oscillator** (DO) — the crystal at the
+servo's actuator (e.g., the i226 TCXO, or the OCXO on Timebeat OTC
+hardware via the ClockMatrix) — while preserving the DO's **superior
+short-term stability**.
 
-At every tau, the disciplined output should be as stable as the
-*better* of (GPS time, the local oscillator).  At short tau the
-oscillator's noise floor should shine through unmolested by the
-discipline loop.  At long tau the output should track GNSS to within
-the receiver's measurement precision.  The discipline loop should
-guide the transition ever so gently — no servo-induced noise, no
-overshoot, no loop bandwidth artifacts.
+Two oscillators bound the achievable result:
 
-The ideal short-tau target is the **local oscillator's free-running
-noise floor** (e.g., the i226 TCXO, the OCXO on Timebeat OTC, or
-whichever crystal clocks the PHC).  Beating PPS or PPS+qErr alone is
-not enough — those measurements are limited by the F9T's resolution,
-not by what a good oscillator can actually deliver.
+1. **The DO** — the servo can't make it more stable than its own
+   free-running noise floor.  It can only steer the DO's frequency,
+   not eliminate its phase noise.
 
-The "moonshot" is short-tau stability bounded only by the F9T TCXO's
-own instability, with the disciplined output tracking GPS time as
-faithfully as possible.
+2. **The GNSS receiver's oscillator (RX TCXO)** — every carrier-phase
+   observation is tainted by the receiver's clock noise.  Servo inputs
+   derived from the receiver (PPP dt_rx, PPS edges with qErr) inherit
+   this floor.  We can't pull the DO below the RX TCXO's stability
+   using GNSS-based inputs.
+
+The **moonshot target**: at every tau, the DO output is as stable as
+the *best* of (DO free-running noise floor, RX TCXO noise floor).  At
+short tau the better oscillator's noise floor should shine through
+unmolested by the discipline loop.  At long tau the DO should track
+GPS time as faithfully as the receiver allows.  The discipline loop
+should guide the transition ever so gently — no servo-induced noise,
+no overshoot, no loop-bandwidth artifacts.
+
+Beating PPS or PPS+qErr alone is not the goal — those measurements are
+limited by the F9T's resolution, not by what either oscillator can
+actually deliver.
 
 We are searching for:
 
@@ -41,8 +49,8 @@ We are searching for:
 
 Along the way we characterize and illustrate each obstacle:
 measurement noise floors, quantization errors, oscillator drift,
-two-oscillator differentials, loop dynamics.  Visual stories live
-in `docs/visual-stories.md`.
+two-oscillator differentials, loop dynamics.  Visual stories live in
+`docs/visual-stories.md`.
 
 ## System structure
 

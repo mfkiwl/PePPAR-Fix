@@ -7,34 +7,47 @@ code or touching lab hardware.
 ## Project goal
 
 PePPAR Fix aims to faithfully transfer the **long-term stability of GPS
-time** to a local oscillator while preserving that oscillator's
-**superior short-term stability**.
+time** to the **Disciplined Oscillator** (DO) — the crystal at the
+servo's actuator (e.g., the i226 TCXO, the Timebeat OTC's OCXO via
+ClockMatrix) — while preserving the DO's **superior short-term
+stability**.
 
-The "moonshot" target: at every tau, the disciplined output should be
-as stable as the better of (GPS time, the local oscillator).  At short
-tau, the oscillator's noise floor should shine through unmolested by
-the discipline loop.  At long tau, the output should track GNSS to
-within the receiver's measurement precision.  The discipline loop
-should guide the transition between these regimes ever so gently — no
-servo-induced noise, no overshoot, no loop bandwidth artifacts.
+Two oscillators bound the achievable result:
 
-The ideal short-tau stability target is **the local oscillator's free-
-running noise floor** (e.g., the i226 TCXO, the OCXO on Timebeat OTC,
-or whatever crystal clocks the PHC).  Beating PPS or PPS+qErr is not
-enough — those are limited by the F9T's measurement floor, not by
-what a good oscillator can deliver.
+1. **The Disciplined Oscillator (DO)** — the servo can't make it more
+   stable than its own free-running noise floor.  It can only steer
+   the DO's frequency, not eliminate its phase noise.
+
+2. **The GNSS receiver's oscillator (RX TCXO)** — every carrier-phase
+   observation is tainted by the receiver's clock noise.  Servo inputs
+   derived from the receiver (PPP dt_rx, PPS edges with qErr) inherit
+   this floor.  We can't pull the DO below the RX TCXO's stability
+   using GNSS-based inputs.
+
+The **moonshot target**: at every tau, the DO output is as stable as
+the *best* of (DO free-running noise floor, RX TCXO noise floor).  At
+short tau the better oscillator's noise floor should shine through
+unmolested by the discipline loop.  At long tau the DO should track
+GPS time as faithfully as the GNSS receiver allows.  The discipline
+loop should guide the transition ever so gently — no servo-induced
+noise, no overshoot, no loop-bandwidth artifacts.
+
+Beating PPS or PPS+qErr alone is not the goal — those are limited by
+the F9T's measurement resolution, not by what either oscillator can
+actually deliver.
 
 We are searching for:
-- The best **servo input** (PPS, PPS+qErr, PPP carrier phase, PPP-AR)
-- The best **servo tuning** (loop bandwidth, gain scheduling, anti-windup)
-- The right **bootstrap initialization** (drift file, frequency seed)
-- The right **measurement chain** (TICC, EXTTS, internal TDC) to
+
+- The best **servo input** — PPS, PPS+qErr, PPP carrier phase, PPP-AR
+- The best **servo tuning** — loop bandwidth, gain scheduling, anti-windup
+- The right **bootstrap initialization** — drift file, frequency seed
+- The right **measurement chain** — TICC, EXTTS, on-chip TDC — to
   characterize each component without contaminating the result
 
-Along the way we document and illustrate the challenges: measurement
+Along the way we document and illustrate the obstacles: measurement
 noise floors, quantization errors at every stage, oscillator drift
-sources, two-oscillator differentials, loop dynamics.  Each of these
-gets a story in `docs/visual-stories.md`.
+sources, two-oscillator differentials, loop dynamics.  Each gets a
+story in `docs/visual-stories.md`.
 
 ## Before running on a lab host — read this first
 
