@@ -399,6 +399,8 @@ if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]] && [[ -z "$FREERUN" ]] \
         --servo-log "$char_csv"
         --watchdog-threshold 1000
         --freerun-max-error-ns 100000000
+        --track-outlier-ns 100000000
+        --track-restep-ns 100000000
     )
     if [[ -n "$BAUD" ]]; then
         char_args+=(--baud "$BAUD")
