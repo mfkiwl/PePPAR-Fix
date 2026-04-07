@@ -92,6 +92,50 @@ A two-driver workflow (boot with in-kernel for bootstrap, switch to
 OOT for run) was tried around 2026-03-29 and rejected as not
 production-viable.
 
+### Can the DPLL subsystem replace EXTTS?
+
+Short answer: no — but it gives us useful supervisory telemetry.
+
+Linux kernel 6.7+ exposes a `dpll` genl family (and Intel ships a
+legacy sysfs view for the same data).  On `ocxo` today:
+
+```
+/sys/class/net/enp1s0f0np0/device/dpll_1_offset = -241   # picoseconds
+/sys/class/net/enp1s0f0np0/device/dpll_1_state  = 4      # LOCKED_HO_ACQ
+```
+
+What's exposed: `DPLL_A_PHASE_OFFSET` / `DPLL_A_PIN_PHASE_OFFSET`
+(signed ps, phase of an input pin vs. DPLL output), `DPLL_A_LOCK_STATUS`,
+`DPLL_A_PIN_PHASE_ADJUST` (writable steering), and a 2024 addition
+that monitors *all* PPS inputs with notifications.
+
+Why it is not a servo input substitute for EXTTS:
+
+1. **It's a phase scalar, not a timestamped edge event.** No way to
+   align it to other event streams (TICC chB, PPP epochs, the engine's
+   1 Hz schedule).
+2. **It's already inside the ZL30795's loop filter.** Servoing on it
+   would cascade our PI loop on top of the chip's loop with unknown
+   inner-loop dynamics — and we have no access to the raw TDC.
+3. **linuxptp/ts2phc agree**: they consume the dpll family only for
+   clockClass / lock-state supervision in the BC's Announce, never as
+   a servo error term.  Servo input remains EXTTS.
+
+What it *is* good for, and what we should do with it:
+
+- **Lock supervision and holdover detection** — drive PTP clockClass
+  reporting from `DPLL_A_LOCK_STATUS` rather than from PPS-loss
+  heuristics.
+- **Telemetry** — log `dpll_1_offset` alongside TICC and `pps_error_ns`
+  in the servo CSV.  When the OOT driver is loaded and the DPLL is
+  actually disciplining the OCXO, this is the only number we have
+  that reflects the OCXO's residual against the F9T PPS reference.
+- **Holdover transitions** — notifications on lock state change let
+  the engine react immediately rather than after the next 1 Hz tick.
+
+Worth doing on the in-kernel driver too — `dpll_1_offset` is already
+populated even though the DPLL isn't actively disciplining the PHC.
+
 ## EXTTS quantization: why E810 looks "noisier" than i226
 
 Both ends of the PPS measurement happen to live on ~125 MHz clocks,
