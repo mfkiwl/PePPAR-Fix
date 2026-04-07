@@ -62,19 +62,48 @@ PHC's internal clock being steered by software `adjfine`, the same
 way we steer the i226 TCXO — just with a different, noisier underlying
 oscillator than the OCXO we thought we were using.
 
-**To actually run on the OCXO** requires the out-of-tree Intel ice
-driver with DPLL support.  In that mode the DPLL locks to the internal
-F9T PPS, the OCXO drives the DPLL output, and the PHC follows the
-DPLL — no `adjfine` needed.  Historically switching to the out-of-tree
-driver broke EXTTS pin mapping; with the sysfs fallback (2c76229) and
-index-based pin lookup (408f452) that should no longer be a blocker,
-but it has not been re-tested end-to-end.
+**To actually run on the OCXO** requires the Intel out-of-tree ice
+driver (v2.4.5) which exposes DPLL control.  In that mode the DPLL
+locks to the internal F9T PPS, the OCXO drives the DPLL output, and
+the PHC follows the DPLL — no `adjfine` needed.
+
+**What we give up to get there**: the Intel out-of-tree driver does
+not implement `PTP_EXTTS_REQUEST` / `PTP_PIN_SETFUNC` on the SDP
+pins — it manages SDP pins through the DPLL subsystem instead.  That
+means no userspace PPS capture through the PHC at all, so the engine
+cannot use EXTTS for bootstrap phase verification or for any servo
+source that depends on PPS edge timestamps (PPS Phase, PPS+qErr,
+PPS+PPP).  See `drivers/ice-gnss-streaming/README.md:104-110`.
+
+Access to the onboard F9T at `/dev/gnss0` is *not* lost — both
+drivers read the F9T over the same I2C path.  (With the Intel OOT
+driver you additionally want our streaming patch `0001-...-delivery`
+for low-latency reads, but EXTTS stays broken with it.)
+
+The only servo sources that can run under the OOT driver are
+therefore ones that don't need PHC EXTTS at all:
+- **TICC-drive**: PPS edge capture happens on a TICC, not the PHC.
+  Bootstrap phase verification also needs a non-EXTTS path — which
+  currently does not exist in `phc_bootstrap.py`.
+- **Carrier Phase**: in principle doesn't need PPS edges after
+  init, but the bootstrap step still does.
+
+A two-driver workflow (boot with in-kernel for bootstrap, switch to
+OOT for run) was tried around 2026-03-29 and rejected as not
+production-viable.
 
 ## EXTTS quantization: why E810 looks "noisier" than i226
 
-Both E810 and i226 EXTTS have the same **~8 ns quantization** driven
-by the F9T PPS source's 125 MHz clock period.  The difference is how
-much measurement noise each NIC adds on top:
+Both ends of the PPS measurement happen to live on ~125 MHz clocks,
+but they are *independent* clocks — nothing about the F9T drives the
+NIC.  The F9T generates its PPS edge from its internal ~125/128 MHz
+TCXO (~8 ns step), and the NIC's PHC captures that edge against its
+own ~125 MHz PHY/PHC clock (also ~8 ns step).  So the EXTTS reading
+is quantized to ~8 ns at *both* the source and the receiver, by
+coincidence of two independent design choices.
+
+The difference between i226 and E810 is how much measurement noise
+each NIC adds on top of that quantum:
 
 - **i226**: ~1.7 ns RSS noise dithers samples across quantization
   bin boundaries.  Averaging reveals sub-bin motion; 0% identical
@@ -137,7 +166,8 @@ what's blocking and what would be needed.
 | Driver | Source | EXTTS | DPLL/OCXO discipline | Status |
 |---|---|---|---|---|
 | **stock ice (in-kernel)** | Linux 6.8 | works after sysfs pin program (2c76229); 8 ns quantized, ~77% identical-adjacent | not exposed — PHC free-runs on internal osc, NOT on OCXO | currently loaded |
-| **out-of-tree ice** | Intel github + patches | unknown / partially working | DPLL locks, OCXO drives PHC | tried in past |
+| **patched in-kernel ice** | Ubuntu source + `0002` streaming patch | works | not exposed | recommended for stock-driver use; fast F9T reads |
+| **Intel out-of-tree ice v2.4.5** + `0001` patch | Intel github | **not supported** (no EXTTS/PIN ioctls on SDP pins) | DPLL exposed, OCXO can drive PHC | required for OCXO discipline; F9T still works |
 
 The fundamental tradeoff: stock driver gives no DPLL control but at
 least runs reliably; out-of-tree driver enables OCXO discipline but
