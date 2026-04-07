@@ -50,6 +50,49 @@ stable, just offset by a constant.  Could be characterized once and
 compensated via `phase_step_bias_ns` (which is currently a stub
 field that is parsed but not used by the engine).
 
+## Critical caveat: the PHC is NOT on the OCXO
+
+With the stock in-kernel ice driver, the E810 PHC free-runs on its
+own internal oscillator (not the onboard OCXO).  The ZL30795 DPLL is
+present and the OCXO is present, but the stock driver does not expose
+DPLL control at all — so the DPLL is in whatever state the firmware
+left it in, and the OCXO is not steering the PHC.  Everything we
+measured above (17.5 ns σ, 207 µs offset, 2 µs EXTTS noise) is the
+PHC's internal clock being steered by software `adjfine`, the same
+way we steer the i226 TCXO — just with a different, noisier underlying
+oscillator than the OCXO we thought we were using.
+
+**To actually run on the OCXO** requires the out-of-tree Intel ice
+driver with DPLL support.  In that mode the DPLL locks to the internal
+F9T PPS, the OCXO drives the DPLL output, and the PHC follows the
+DPLL — no `adjfine` needed.  Historically switching to the out-of-tree
+driver broke EXTTS pin mapping; with the sysfs fallback (2c76229) and
+index-based pin lookup (408f452) that should no longer be a blocker,
+but it has not been re-tested end-to-end.
+
+## EXTTS quantization: why E810 looks "noisier" than i226
+
+Both E810 and i226 EXTTS have the same **~8 ns quantization** driven
+by the F9T PPS source's 125 MHz clock period.  The difference is how
+much measurement noise each NIC adds on top:
+
+- **i226**: ~1.7 ns RSS noise dithers samples across quantization
+  bin boundaries.  Averaging reveals sub-bin motion; 0% identical
+  adjacent timestamps.  Looks "clean" because noise hides quantization.
+- **E810**: near-zero capture noise.  Samples snap to the same 8 ns
+  bin over and over — **77% of adjacent EXTTS reads return the same
+  value**.  The 2 µs σ the engine sees is *quantization dominated*,
+  not hardware phase noise: the capture circuit is actually more
+  precise than i226, but you can see the grid.
+
+Counterintuitively this means the i226's noisier EXTTS gives the
+servo *better* short-term feedback than the E810's quieter one.  To
+get below the E810 quantization floor we need a different measurement
+chain — TICC (60 ps), or once we're on the out-of-tree driver, the
+DPLL's own phase detector.
+
+See `docs/ticc-baseline-2026-04-01.md` for the empirical analysis.
+
 ## Next ocxo improvements
 
 In rough priority order:
@@ -93,7 +136,7 @@ what's blocking and what would be needed.
 
 | Driver | Source | EXTTS | DPLL/OCXO discipline | Status |
 |---|---|---|---|---|
-| **stock ice (in-kernel)** | Linux 6.8 | **broken** (returns same value across PPS events) | not exposed | currently loaded |
+| **stock ice (in-kernel)** | Linux 6.8 | works after sysfs pin program (2c76229); 8 ns quantized, ~77% identical-adjacent | not exposed — PHC free-runs on internal osc, NOT on OCXO | currently loaded |
 | **out-of-tree ice** | Intel github + patches | unknown / partially working | DPLL locks, OCXO drives PHC | tried in past |
 
 The fundamental tradeoff: stock driver gives no DPLL control but at
