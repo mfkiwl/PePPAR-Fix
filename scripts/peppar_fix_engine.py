@@ -1126,6 +1126,62 @@ def _set_clock_class(ctx, state):
         ctx['pmc_announced'] = state
 
 
+def _save_osc_freq_corr(ctx, args):
+    """Save refined oscillator frequency corrections on clean shutdown."""
+    drift_path = getattr(args, 'drift_file', None) or 'data/drift.json'
+    adjfine = ctx.get('adjfine_ppb', 0.0)
+    carrier_tracker = ctx.get('carrier_tracker')
+    try:
+        import json, os
+        data = {}
+        # Load existing to preserve fields we don't update
+        try:
+            with open(drift_path) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        data['adjfine_ppb'] = adjfine
+        data['phc'] = getattr(args, 'servo', '/dev/ptp0')
+        data['timestamp'] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        # Save refined TCXO correction from carrier tracker if available
+        if (carrier_tracker is not None and carrier_tracker._n_d > 0
+                and carrier_tracker.drift_rate_ppb != 0):
+            # D = phc_corr - tcxo_corr → tcxo_corr = phc_corr - D
+            data['tcxo_freq_corr_ppb'] = adjfine - carrier_tracker.drift_rate_ppb
+        os.makedirs(os.path.dirname(drift_path) or '.', exist_ok=True)
+        with open(drift_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        log.info("Saved osc freq corrections: adjfine=%.1f ppb, %s",
+                 adjfine, drift_path)
+    except Exception as e:
+        log.warning("Failed to save osc freq corrections: %s", e)
+
+
+def _init_carrier_tracker(args):
+    """Create CarrierPhaseTracker, seeding D from drift file if available.
+
+    D = phc_freq_corr - tcxo_freq_corr, computed from two independently
+    measured oscillator frequency corrections stored in the drift file.
+    """
+    tracker = CarrierPhaseTracker()
+    drift_path = getattr(args, 'drift_file', None) or 'data/drift.json'
+    try:
+        import json
+        with open(drift_path) as f:
+            drift = json.load(f)
+        phc_corr = drift.get('adjfine_ppb')
+        tcxo_corr = drift.get('tcxo_freq_corr_ppb')
+        if phc_corr is not None and tcxo_corr is not None:
+            d = phc_corr - tcxo_corr
+            tracker.drift_rate_ppb = d
+            log.info("Carrier tracker: D=%.1f ppb "
+                     "(phc_corr=%.1f - tcxo_corr=%.1f) from %s",
+                     d, phc_corr, tcxo_corr, drift_path)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return tracker
+
+
 def _setup_servo(args, known_ecef, qerr_store):
     """Set up PHC servo.
 
@@ -1463,7 +1519,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'compute_error_sources': compute_error_sources,
         'ticc_only_error_source': ticc_only_error_source,
         'ppp_cal': PPPCalibration(tick_ns=8.0, min_samples=10),
-        'carrier_tracker': CarrierPhaseTracker(),
+        'carrier_tracker': _init_carrier_tracker(args),
         'tracking_large_error_count': 0,
         'tracking_mode': 'pull_in',
         'pmc': _open_pmc(args),
@@ -2218,6 +2274,8 @@ def _cleanup_servo(ctx):
     pmc = ctx.get('pmc')
     if pmc is not None:
         pmc.close()
+    # Save refined oscillator corrections for next bootstrap
+    _save_osc_freq_corr(ctx, args)
     log.info("PHC servo cleaned up")
 
 

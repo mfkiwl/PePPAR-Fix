@@ -60,12 +60,14 @@ def load_drift(path):
         return None
 
 
-def save_drift(path, adjfine_ppb, phc_dev):
+def save_drift(path, adjfine_ppb, phc_dev, tcxo_freq_corr_ppb=None):
     data = {
         "adjfine_ppb": adjfine_ppb,
         "phc": phc_dev,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if tcxo_freq_corr_ppb is not None:
+        data["tcxo_freq_corr_ppb"] = tcxo_freq_corr_ppb
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
@@ -545,6 +547,7 @@ def main():
     dt_rx_sigma_ns = None
 
     log.info("Running PPP clock solution for %d epochs...", args.epochs)
+    dt_rx_series = []  # collect for inter-oscillator drift estimation
     for _ in range(args.epochs * 3):  # allow some dropped epochs
         try:
             gps_time, observations = obs_queue.get(timeout=5)
@@ -567,6 +570,7 @@ def main():
         dt_rx_ns = filt.x[filt.IDX_CLK] / C * 1e9
         p_clk = filt.P[filt.IDX_CLK, filt.IDX_CLK]
         dt_rx_sigma_ns = math.sqrt(max(0, p_clk)) / C * 1e9
+        dt_rx_series.append(dt_rx_ns)
         n_epochs += 1
 
         if n_epochs % 5 == 0 or n_epochs == args.epochs:
@@ -692,6 +696,29 @@ def main():
     else:
         base_freq = current_adj
         log.info("Frequency sane: base_freq = %.1f ppb", base_freq)
+
+    # ── Measure F9T TCXO frequency correction ────────────────────── #
+    #
+    # The PHC and F9T use different oscillators.  We measure both rates
+    # independently against GPS time and store them separately:
+    #   phc_freq_corr = base_freq (the adjfine that keeps PHC on GPS rate)
+    #   tcxo_freq_corr = slope of dt_rx series (F9T TCXO offset from GPS)
+    #
+    # The engine combines them: D = phc_freq_corr - tcxo_freq_corr
+    # to correct the Carrier Phase servo for the oscillator differential.
+    tcxo_freq_corr_ppb = None
+    if len(dt_rx_series) >= 3:
+        # Linear regression on dt_rx series → TCXO rate in ppb
+        n_dt = len(dt_rx_series)
+        sx = sum(range(n_dt))
+        sy = sum(dt_rx_series)
+        sxy = sum(i * v for i, v in enumerate(dt_rx_series))
+        sxx = sum(i * i for i in range(n_dt))
+        denom = n_dt * sxx - sx * sx
+        if denom != 0:
+            tcxo_freq_corr_ppb = (n_dt * sxy - sx * sy) / denom  # ns/epoch = ppb
+            log.info("F9T TCXO freq correction: %.1f ppb (from %d dt_rx samples)",
+                     tcxo_freq_corr_ppb, n_dt)
 
     phi_0 = phase_error_ns
 
@@ -823,7 +850,7 @@ def main():
                      target_freq, base_freq, glide_offset)
 
             # Save base frequency to drift file
-            save_drift(args.drift_file, base_freq, args.ptp_dev)
+            save_drift(args.drift_file, base_freq, args.ptp_dev, tcxo_freq_corr_ppb)
             log.info("Drift file updated: %s (base=%.1f ppb)",
                      args.drift_file, base_freq)
 
@@ -847,7 +874,7 @@ def main():
     ptp.adjfine(target_freq)
 
     # Save base frequency to drift file (not the transient glide offset)
-    save_drift(args.drift_file, base_freq, args.ptp_dev)
+    save_drift(args.drift_file, base_freq, args.ptp_dev, tcxo_freq_corr_ppb)
     log.info("Drift file updated: %s (base=%.1f ppb)", args.drift_file, base_freq)
 
     _enable_pps_out(ptp, args)
