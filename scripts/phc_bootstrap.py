@@ -415,13 +415,25 @@ def main():
     caps = ptp.get_caps()
     log.info("PHC: %s, max_adj=%d ppb", args.ptp_dev, caps["max_adj"])
 
-    if args.program_pin and args.pps_pin is not None:
+    if args.pps_pin is not None:
         from peppar_fix.ptp_device import PTP_PF_EXTTS
-        try:
-            ptp.set_pin_function(args.pps_pin, PTP_PF_EXTTS, args.extts_channel)
-            log.info("Pin %d programmed for EXTTS channel %d", args.pps_pin, args.extts_channel)
-        except OSError as e:
-            log.warning("Failed to program pin %d for EXTTS: %s", args.pps_pin, e)
+        # Try ioctl first (i226), fall back to sysfs (E810 ice driver
+        # rejects PTP_PIN_SETFUNC ioctl but accepts sysfs writes).
+        pin_set = False
+        if args.program_pin:
+            try:
+                ptp.set_pin_function(args.pps_pin, PTP_PF_EXTTS, args.extts_channel)
+                log.info("Pin %d programmed for EXTTS channel %d via ioctl",
+                         args.pps_pin, args.extts_channel)
+                pin_set = True
+            except OSError as e:
+                log.warning("EXTTS ioctl failed: %s", e)
+        if not pin_set:
+            pin_name = _E810_PIN_NAMES.get(args.pps_pin, str(args.pps_pin))
+            if _set_pin_function_sysfs(args.ptp_dev, pin_name,
+                                       PTP_PF_EXTTS, args.extts_channel):
+                log.info("Pin %s programmed for EXTTS channel %d via sysfs",
+                         pin_name, args.extts_channel)
 
     # Read current PHC time
     try:

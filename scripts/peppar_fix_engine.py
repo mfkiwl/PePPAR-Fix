@@ -1308,12 +1308,27 @@ def _setup_servo(args, known_ecef, qerr_store):
 
     extts_channel = args.extts_channel
     extts_ok = False
+    # Try ioctl pin programming first (i226), fall back to sysfs
+    # (E810 ice driver rejects PTP_PIN_SETFUNC ioctl but accepts
+    # sysfs writes). This makes EXTTS Just Work on both platforms.
+    pin_set = False
     if args.program_pin and caps['n_pins'] > 0:
         try:
             ptp.set_pin_function(args.pps_pin, PTP_PF_EXTTS, extts_channel)
+            pin_set = True
+            log.info("Pin %d programmed for EXTTS channel %d via ioctl",
+                     args.pps_pin, extts_channel)
         except OSError:
-            log.info("Pin config not supported by driver")
-    else:
+            log.info("Pin config ioctl not supported; trying sysfs")
+    if not pin_set and caps['n_pins'] > 0 and args.pps_pin is not None:
+        from phc_bootstrap import _set_pin_function_sysfs, _E810_PIN_NAMES
+        pin_name = _E810_PIN_NAMES.get(args.pps_pin, str(args.pps_pin))
+        if _set_pin_function_sysfs(args.servo, pin_name,
+                                   PTP_PF_EXTTS, extts_channel):
+            pin_set = True
+            log.info("Pin %s programmed for EXTTS channel %d via sysfs",
+                     pin_name, extts_channel)
+    if not pin_set:
         log.info("Skipping pin programming; using implicit EXTS mapping")
     try:
         ptp.enable_extts(extts_channel, rising_edge=True)
