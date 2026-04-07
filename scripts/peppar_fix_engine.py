@@ -2861,10 +2861,10 @@ Two-phase operation:
 
     args = ap.parse_args()
     apply_ptp_profile(args)
-    # When TICC is connected, use it as the servo source (60 ps resolution
-    # vs 8 ns EXTTS).
-    if args.ticc_port and not args.ticc_drive:
-        args.ticc_drive = True
+    # --ticc-port enables passive TICC measurement/logging.  --ticc-drive
+    # additionally promotes TICC to the servo input.  Keep them separate
+    # so a TICC can monitor a servo driven by other sources (PPS, PPP
+    # Carrier Phase, etc.) for independent stability analysis.
     apply_ticc_drive_defaults(args)
     if args.pps_pin is None:
         args.pps_pin = 1
