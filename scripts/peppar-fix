@@ -374,6 +374,51 @@ fi
 
 # ── Step 3: Run servo with retry logic ──────────────────────────────────── #
 
+# ── Step 2c: One-time DO characterization ──────────────────────────────── #
+# Run a 30-minute --freerun once per host to capture the DO's noise
+# floor and the PSDs of every error source.  Stored in
+# data/do_characterization.json.  Skipped if the file already exists.
+# The engine reads this file at startup and prints recommended loop
+# bandwidths for each candidate servo input.
+
+DO_CHAR_FILE="${PEPPAR_DO_CHAR_FILE:-data/do_characterization.json}"
+DO_CHAR_DURATION="${PEPPAR_DO_CHAR_DURATION:-1800}"
+
+if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]] && [[ -z "$FREERUN" ]] \
+        && [[ ! -f "$DO_CHAR_FILE" ]]; then
+    echo "=== peppar-fix: Step 2c — One-time DO characterization (${DO_CHAR_DURATION}s freerun) ==="
+    echo "  Building $DO_CHAR_FILE"
+    char_csv="data/freerun_char.csv"
+    char_args=(
+        --serial "$SERIAL"
+        --port-type "$UBX_PORT"
+        --known-pos "${KNOWN_POS:-$(cat "$POSITION_FILE" 2>/dev/null | grep -oE '[0-9.-]+,[0-9.-]+,[0-9.-]+' | head -1)}"
+        --servo "$PTP_DEV"
+        --freerun
+        --duration "$DO_CHAR_DURATION"
+        --servo-log "$char_csv"
+    )
+    if [[ -n "$BAUD" ]]; then
+        char_args+=(--baud "$BAUD")
+    fi
+    if [[ -n "$PTP_PROFILE" ]]; then
+        char_args+=(--ptp-profile "$PTP_PROFILE")
+    fi
+    # shellcheck disable=SC2046
+    char_args+=($(ntrip_args))
+    if "$PYTHON_BIN" "$SCRIPT_DIR/peppar_fix_engine.py" "${char_args[@]}"; then
+        do_label="${PEPPAR_DO_LABEL:-${PTP_PROFILE:-unknown}}"
+        "$PYTHON_BIN" "$SCRIPT_DIR/../tools/build_do_characterization.py" \
+            --input "$char_csv" \
+            --output "$DO_CHAR_FILE" \
+            --do-label "$do_label" \
+            --phc "$PTP_DEV" || \
+            echo "  WARNING: characterization build failed; continuing without file" >&2
+    else
+        echo "  WARNING: freerun characterization failed (rc=$?); continuing without file" >&2
+    fi
+fi
+
 echo "=== peppar-fix: Step 3 — Unified engine ==="
 
 servo_backoff=5
@@ -463,6 +508,17 @@ while true; do
     case $rc in
         0)
             echo "peppar-fix: clean shutdown"
+            # If this was an explicit --freerun, build the DO
+            # characterization file from the resulting servo log.
+            if [[ -n "$FREERUN" ]] && [[ -n "$LOG_FILE" ]] && [[ -f "$LOG_FILE" ]]; then
+                do_label="${PEPPAR_DO_LABEL:-${PTP_PROFILE:-unknown}}"
+                echo "=== Building DO characterization from $LOG_FILE ==="
+                "$PYTHON_BIN" "$SCRIPT_DIR/../tools/build_do_characterization.py" \
+                    --input "$LOG_FILE" \
+                    --output "$DO_CHAR_FILE" \
+                    --do-label "$do_label" \
+                    --phc "$PTP_DEV" || true
+            fi
             exit 0
             ;;
         2)

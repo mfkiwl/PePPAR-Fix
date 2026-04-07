@@ -1154,6 +1154,45 @@ def _save_osc_freq_corr(ctx):
         log.warning("Failed to save osc freq corrections: %s", e)
 
 
+def _log_do_characterization(args):
+    """Read data/do_characterization.json and log inform-mode summary.
+
+    Reports DO noise floor, dominant noise types, source crossovers,
+    and a recommended loop bandwidth for the active servo input
+    (informational only — does not auto-tune).
+    """
+    char_path = getattr(args, 'do_char_file', None) or 'data/do_characterization.json'
+    try:
+        import json
+        with open(char_path) as f:
+            char = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        log.info("DO characterization: no file at %s "
+                 "(run with --freerun to create one)", char_path)
+        return
+
+    log.info("DO characterization: %s @ %s (captured %s)",
+             char.get('do_label', 'unknown'),
+             char.get('host', 'unknown'),
+             char.get('captured', 'unknown'))
+    for name, src in char.get('sources', {}).items():
+        slope = src.get('slope')
+        slope_str = f"{slope:+.2f}" if slope is not None else "n/a"
+        units = src.get('units', '?')
+        log.info("  %-22s ASD@0.1Hz=%.4f %s/√Hz  slope=%s (%s)",
+                 name,
+                 src.get('asd_at_0.1Hz', 0.0),
+                 units,
+                 slope_str,
+                 src.get('noise_type', 'unknown'))
+    crossovers = char.get('crossovers', {})
+    if crossovers:
+        log.info("DO characterization crossovers:")
+        for pair, hz in crossovers.items():
+            log.info("  %s: %.4f Hz (~%.0fs timescale)",
+                     pair, hz, 1.0 / hz if hz > 0 else 0)
+
+
 def _init_carrier_tracker(args):
     """Create CarrierPhaseTracker, seeding D from drift file if available.
 
@@ -1202,6 +1241,8 @@ def _setup_servo(args, known_ecef, qerr_store):
     caps = ptp.get_caps()
     log.info(f"PHC: {args.servo}, max_adj={caps['max_adj']} ppb, "
              f"n_extts={caps['n_ext_ts']}, n_pins={caps['n_pins']}")
+
+    _log_do_characterization(args)
 
     # Preserve adjfine from bootstrap — read before switching actuator.
     bootstrap_adj = ptp.read_adjfine()
@@ -2825,6 +2866,8 @@ Two-phase operation:
     servo.add_argument("--no-carrier", action="store_true",
                        help="Disable PPP Carrier Phase servo drive "
                             "(Carrier source disabled, PPS+PPP still available)")
+    servo.add_argument("--do-char-file", default="data/do_characterization.json",
+                       help="Path to DO characterization JSON (read at startup)")
 
     ticc = ap.add_argument_group("TICC experimental input (optional)")
     ticc.add_argument("--ticc-port", default=None,
