@@ -107,6 +107,42 @@ rejecting it.  This is the "pick the wrong loop bandwidth and the
 output gets worse than the reference" failure mode that motivates
 the PSD-based tuning approach.
 
+## Update 2026-04-07 afternoon: PEROUT fix unmasks Carrier performance
+
+A 30-minute Carrier-driven servo run on TimeHat with the PEROUT
+duty-cycle fix (commit `01a401c`) showed dramatically better numbers
+than the TICC-driven overnight runs:
+
+| Metric | TICC-driven (overnight) | Carrier-driven (PEROUT fixed) | Improvement |
+|---|---|---|---|
+| adjfine σ | 46 ppb | **1.8 ppb** | 25× |
+| TICC diff σ | 380 ns | **113 ns** | 3.4× |
+| adjfine ASD@0.1Hz | 50 ppb/√Hz | **0.044 ppb/√Hz** | ~1000× |
+| Carrier vs PPS RMS | (not measured) | **2.4 ns** | — |
+
+The Carrier source is now tracking PPS truth within 2.4 ns RMS with
+essentially zero drift (-0.25 ns per 1000 epochs).  The 32 ns mean
+offset is the static phase anchor.  The ~100 ns σ on the closed-loop
+output is the actual TimeHat (i226 + PHC servo) performance bound.
+
+The earlier "1.5 µs Carrier bias" investigation was a red herring:
+that bias was the PEROUT 500ms misalignment masquerading as a Carrier
+source defect.  Once PEROUT was firing on the second boundary, the
+Carrier source's anchor and drift correction were exactly correct.
+
+### Implication for future tuning
+
+The PSD analysis tells us the Carrier source is operating well within
+its intended regime: the loop bandwidth (~0.005 Hz with current i226
+gains) is below the dt_rx-vs-qErr crossover (~0.01-0.03 Hz), so the
+loop is benefiting from PPP precision at every frequency it cares
+about.  Pushing the bandwidth higher would only help if the actuator
+quantization (1 ppb adjfine on i226) allowed it.
+
+For the moonshot — better than 100 ns RMS on TimeHat — we'd need
+higher actuator resolution (ClockMatrix FCW at 0.111 fppb) or a
+better DO (OCXO).  The Carrier source itself is not the bottleneck.
+
 ## Strategy: per-host characterization via `--freerun`
 
 Noise floors are physical properties of the oscillator and electronics.
