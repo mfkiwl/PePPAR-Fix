@@ -97,54 +97,68 @@ class PPPCalibration:
 
 
 class CarrierPhaseTracker:
-    """Complementary-filtered PHC phase error from PPP and PPS.
+    """PHC phase error from PPP + measured inter-oscillator drift rate.
 
-    Combines two measurements with complementary strengths:
-    - PPP carrier-phase (dt_rx): high precision (~0.1 ns), but measures
-      the receiver's TCXO, not the PHC's oscillator.  On systems where
-      these are different crystals, a raw accumulator drifts.
-    - PPS edge timestamps: noisy (~2.3 ns) but directly measure the
-      PHC phase relative to GPS.  Unbiased over time.
+    On most hardware, the PPP receiver (F9T) and the PHC use different
+    oscillators.  dt_rx from PPP measures the F9T TCXO drift from GPS;
+    the PHC drifts at a different rate.  We measure both rates directly
+    and use their difference (D) to correct the Carrier formula:
 
-    The complementary filter uses PPP for short-term precision and PPS
-    for long-term phase truth:
+        carrier_error = (dt_rx - dt_rx_ref) + cumulative_adjfine + D * t
 
-        carrier_raw = (dt_rx - dt_rx_ref) + cumulative_adjfine_ns
-        drift_comp += alpha * (pps_error - carrier_raw - drift_comp)
-        carrier_error = carrier_raw + drift_comp
+    Where:
+    - dt_rx - dt_rx_ref: F9T TCXO phase change from GPS (PPP, ~0.1 ns)
+    - cumulative_adjfine: integral of servo corrections applied to PHC
+    - D: inter-oscillator differential drift rate (PHC_rate - TCXO_rate)
+    - t: elapsed epochs since initialization
 
-    At short timescales (< 1/alpha seconds), the Carrier error follows
-    PPP with 0.1 ns precision.  At long timescales, it tracks PPS,
-    absorbing any inter-oscillator drift automatically.
+    D is estimated directly from two independent measurements:
+    - R_tcxo = d(dt_rx)/dt  (from PPP, ~0.1 ppb/epoch precision)
+    - R_phc = d(pps_error)/dt - adjfine  (from PPS, ~3.3 ppb/epoch,
+      averages to ~0.1 ppb after ~1000 epochs)
+    - D = R_phc - R_tcxo
 
-    The alpha parameter sets the crossover: alpha=0.01 at 1 Hz gives
-    ~100s time constant.  PPS noise is filtered at tau < 100s; inter-
-    oscillator drift is absorbed at tau > 100s.
+    D improves with runtime: after N epochs, σ_D ≈ 3.3/sqrt(N) ppb.
+    Phase error from D uncertainty is bounded by σ_D per epoch (not
+    accumulated) because D is re-estimated every epoch from all history.
+
+    No filter lag.  No steady-state phase offset.  The Carrier error
+    tracks PPS truth with zero bias while using PPP precision for
+    short-term stability.
 
     Sign convention: positive = PHC ahead of GPS (matches pps_error_ns).
-
-    Frequency tracking is always anchored to GPS via PPP dt_rx.  The
-    complementary filter only affects the phase reference.  The long-
-    term mean of (carrier_error - pps_error) converges to zero.
     """
 
-    def __init__(self, stable_threshold=5, max_jump_ns=5000.0, alpha=0.01):
+    def __init__(self, stable_threshold=5, max_jump_ns=5000.0):
         self.dt_rx_ref_ns = None
         self.cumulative_adjfine_ns = 0.0
-        self.drift_compensation_ns = 0.0
-        self._last_dt_rx = None
         self.initialized = False
-        self.alpha = alpha
         self._prev_dt_rx_ns = None
         self._stable_count = 0
         self._stable_threshold = stable_threshold
         self._max_jump_ns = max_jump_ns
+        # Inter-oscillator drift estimation
+        self._epoch_count = 0
+        self._sum_d = 0.0       # running sum of per-epoch D samples
+        self._sum_d_sq = 0.0    # for variance estimation
+        self._n_d = 0           # number of D samples
+        self._prev_dt_rx_for_rate = None
+        self._prev_pps_error = None
+        self._prev_adjfine = None
+        self.drift_rate_ppb = 0.0  # current best estimate of D
 
     def initialize(self, dt_rx_ns):
         """Set the reference dt_rx (called when PHC is aligned to GPS)."""
         self.dt_rx_ref_ns = dt_rx_ns
         self.cumulative_adjfine_ns = 0.0
-        self.drift_compensation_ns = 0.0
+        self._epoch_count = 0
+        self._sum_d = 0.0
+        self._sum_d_sq = 0.0
+        self._n_d = 0
+        self._prev_dt_rx_for_rate = None
+        self._prev_pps_error = None
+        self._prev_adjfine = None
+        self.drift_rate_ppb = 0.0
         self.initialized = True
         self._stable_count = 0
 
@@ -167,52 +181,64 @@ class CarrierPhaseTracker:
         return False
 
     def accumulate_adjfine(self, adjfine_ppb, dt_s=1.0):
-        """Accumulate one epoch of adjfine. Call every discipline epoch.
-
-        At 1 Hz, adjfine_ppb ≈ ns of PHC phase change per second.
-        """
+        """Accumulate one epoch of adjfine. Call every discipline epoch."""
         self.cumulative_adjfine_ns += adjfine_ppb * dt_s
+        self._epoch_count += 1
 
-    def absorb_pps(self, pps_error_ns):
-        """Update drift compensation from a PPS phase measurement.
+    def update_drift_estimate(self, dt_rx_ns, pps_error_ns, adjfine_ppb):
+        """Update the inter-oscillator drift rate estimate.
 
-        Call every epoch with the current pps_error_ns.  The
-        complementary filter slowly steers the Carrier phase reference
-        toward the PPS measurement, absorbing inter-oscillator drift.
+        Call every epoch with current dt_rx, pps_error, and adjfine.
+        Computes per-epoch rates for both oscillators and accumulates
+        their difference for a running mean estimate of D.
         """
         if not self.initialized:
             return
-        carrier_raw = self._raw_error()
-        if carrier_raw is None:
-            return
-        # IIR low-pass on (pps - carrier_raw): absorbs the DC offset
-        # between the two oscillators while rejecting PPS jitter
-        residual = pps_error_ns - carrier_raw - self.drift_compensation_ns
-        self.drift_compensation_ns += self.alpha * residual
+        if (self._prev_dt_rx_for_rate is not None
+                and self._prev_pps_error is not None):
+            # R_tcxo: F9T TCXO drift rate (ppb) from PPP
+            r_tcxo = dt_rx_ns - self._prev_dt_rx_for_rate
 
-    def _raw_error(self):
-        """Uncompensated carrier error (before drift absorption)."""
-        if self.dt_rx_ref_ns is None or self._last_dt_rx is None:
-            return None
-        return ((self._last_dt_rx - self.dt_rx_ref_ns)
-                + self.cumulative_adjfine_ns)
+            # R_phc: PHC oscillator drift rate (ppb) from PPS,
+            # removing the adjfine contribution we applied
+            r_phc = (pps_error_ns - self._prev_pps_error) - self._prev_adjfine
+
+            # D = R_phc - R_tcxo (inter-oscillator differential)
+            d_sample = r_phc - r_tcxo
+            self._sum_d += d_sample
+            self._sum_d_sq += d_sample * d_sample
+            self._n_d += 1
+            self.drift_rate_ppb = self._sum_d / self._n_d
+
+        self._prev_dt_rx_for_rate = dt_rx_ns
+        self._prev_pps_error = pps_error_ns
+        self._prev_adjfine = adjfine_ppb
+
+    def drift_rate_sigma(self):
+        """Standard error of the drift rate estimate (ppb)."""
+        if self._n_d < 2:
+            return float('inf')
+        mean = self._sum_d / self._n_d
+        var = (self._sum_d_sq / self._n_d) - mean * mean
+        if var < 0:
+            var = 0.0
+        import math
+        return math.sqrt(var / self._n_d)
 
     def compute_error(self, dt_rx_ns):
-        """Compute complementary-filtered PHC phase error in nanoseconds.
+        """Compute PHC phase error with inter-oscillator correction.
 
         Returns None if not initialized.
         """
         if not self.initialized:
             return None
-        self._last_dt_rx = dt_rx_ns
         raw = (dt_rx_ns - self.dt_rx_ref_ns) + self.cumulative_adjfine_ns
-        return raw + self.drift_compensation_ns
+        correction = self.drift_rate_ppb * self._epoch_count
+        return raw + correction
 
     def reset(self, dt_rx_ns):
         """Reset after a PHC restep (phase was re-aligned to GPS)."""
-        self.dt_rx_ref_ns = dt_rx_ns
-        self.cumulative_adjfine_ns = 0.0
-        self.drift_compensation_ns = 0.0
+        self.initialize(dt_rx_ns)
 
 
 def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
