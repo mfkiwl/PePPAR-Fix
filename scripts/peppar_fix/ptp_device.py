@@ -149,11 +149,16 @@ class PtpDevice:
         if start_nsec >= 1_000_000_000:
             start_nsec -= 1_000_000_000
             start_sec += 1
+        # Explicit short ON time (1 ms) with PTP_PEROUT_DUTY_CYCLE flag.
+        # Without the flag the `on` field is reserved and the kernel
+        # picks period/2 = 500 ms wide pulse.  A 500 ms wide pulse plus
+        # any edge ambiguity downstream produces a 500 ms offset.
+        PTP_PEROUT_DUTY_CYCLE = 1 << 1
         buf = struct.pack('<qII qII II qII',
                           start_sec, start_nsec, 0,
                           period_s, period_sub, 0,
-                          channel, 0,
-                          0, 0, 0)
+                          channel, PTP_PEROUT_DUTY_CYCLE,
+                          0, 1_000_000, 0)
         fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST, buf)
 
     def disable_perout(self, channel):
