@@ -385,14 +385,14 @@ DO_CHAR_FILE="${PEPPAR_DO_CHAR_FILE:-data/do_characterization.json}"
 DO_CHAR_DURATION="${PEPPAR_DO_CHAR_DURATION:-1800}"
 
 if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]] && [[ -z "$FREERUN" ]] \
-        && [[ ! -f "$DO_CHAR_FILE" ]]; then
+        && [[ ! -f "$DO_CHAR_FILE" ]] && [[ -n "$KNOWN_POS" ]]; then
     echo "=== peppar-fix: Step 2c — One-time DO characterization (${DO_CHAR_DURATION}s freerun) ==="
     echo "  Building $DO_CHAR_FILE"
     char_csv="data/freerun_char.csv"
     char_args=(
         --serial "$SERIAL"
         --port-type "$UBX_PORT"
-        --known-pos "${KNOWN_POS:-$(cat "$POSITION_FILE" 2>/dev/null | grep -oE '[0-9.-]+,[0-9.-]+,[0-9.-]+' | head -1)}"
+        --known-pos "$KNOWN_POS"
         --servo "$PTP_DEV"
         --freerun
         --duration "$DO_CHAR_DURATION"
