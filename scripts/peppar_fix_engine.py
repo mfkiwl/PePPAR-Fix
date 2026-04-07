@@ -1126,27 +1126,24 @@ def _set_clock_class(ctx, state):
         ctx['pmc_announced'] = state
 
 
-def _save_osc_freq_corr(ctx, args):
+def _save_osc_freq_corr(ctx):
     """Save refined oscillator frequency corrections on clean shutdown."""
-    drift_path = getattr(args, 'drift_file', None) or 'data/drift.json'
+    drift_path = ctx.get('drift_file', 'data/drift.json')
     adjfine = ctx.get('adjfine_ppb', 0.0)
     carrier_tracker = ctx.get('carrier_tracker')
     try:
         import json, os
         data = {}
-        # Load existing to preserve fields we don't update
         try:
             with open(drift_path) as f:
                 data = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             pass
         data['adjfine_ppb'] = adjfine
-        data['phc'] = getattr(args, 'servo', '/dev/ptp0')
+        data['phc'] = ctx.get('phc_dev', '/dev/ptp0')
         data['timestamp'] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        # Save refined TCXO correction from carrier tracker if available
         if (carrier_tracker is not None and carrier_tracker._n_d > 0
                 and carrier_tracker.drift_rate_ppb != 0):
-            # D = phc_corr - tcxo_corr → tcxo_corr = phc_corr - D
             data['tcxo_freq_corr_ppb'] = adjfine - carrier_tracker.drift_rate_ppb
         os.makedirs(os.path.dirname(drift_path) or '.', exist_ok=True)
         with open(drift_path, 'w') as f:
@@ -1492,6 +1489,8 @@ def _setup_servo(args, known_ecef, qerr_store):
 
     return {
         'ptp': ptp,
+        'phc_dev': args.servo,
+        'drift_file': getattr(args, 'drift_file', None) or 'data/drift.json',
         'actuator': actuator,
         'cm_phase_source': cm_phase_source,
         'servo': servo,
@@ -2275,7 +2274,7 @@ def _cleanup_servo(ctx):
     if pmc is not None:
         pmc.close()
     # Save refined oscillator corrections for next bootstrap
-    _save_osc_freq_corr(ctx, args)
+    _save_osc_freq_corr(ctx)
     log.info("PHC servo cleaned up")
 
 
