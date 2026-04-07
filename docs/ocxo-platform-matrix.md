@@ -1,6 +1,76 @@
 # ocxo Platform Matrix — E810 Driver Tradeoffs
 
-## Status as of 2026-04-07
+## Update: 2026-04-07 afternoon — ocxo runs end-to-end!
+
+**Root cause of the morning's failures**: the engine's EXTTS pin
+programming had no sysfs fallback (only the PEROUT path did).  On
+E810 with `program_pin=False`, the SDP pins were never programmed
+for EXTTS at all — leaving them in whatever state they were in from
+the previous boot.  EXTTS reads against an unprogrammed pin returned
+either I/O errors or stale frozen values.
+
+The fix (commit `2c76229`): apply the same try-ioctl-then-sysfs
+pattern to EXTTS in both `phc_bootstrap.py` and `peppar_fix_engine.py`.
+A second fix (`408f452`) replaced the hardcoded SMA1/SMA2 names with
+index-based lookup, since newer ice driver versions use SDP20-SDP23
+naming.
+
+**Result**: with both fixes, peppar-fix on ocxo now bootstraps
+successfully and runs the Carrier-driven servo to convergence.  10
+minute run on 2026-04-07 afternoon produced:
+
+| Metric | TimeHat (i226+TCXO) | ocxo (E810+OCXO) |
+|---|---|---|
+| TICC chA-chB σ (last 30s) | **3.5 ns** | 17.5 ns |
+| TICC range | 15 ns | 60 ns |
+| TICC constant offset | +96 ns | +206,958 ns |
+| Engine pps_error_ns σ | ~100 ns | ~2 µs |
+
+**Surprising finding**: TimeHat is *tighter* than ocxo despite the
+inferior oscillator.  The cause is two-fold:
+
+1. The e810 servo gains (kp=0.015, ki=0.001) are tuned for managing
+   PHC drift, but the OCXO is much quieter than the loop assumes.
+   The loop overshoots and oscillates at ~18 ns even though the
+   oscillator's natural noise floor is sub-ns.
+
+2. The E810 EXTTS appears to be much noisier than i226 EXTTS.  The
+   engine sees pps_error_ns σ = 2 µs vs ~100 ns on TimeHat.  The
+   servo's ability to settle is limited by its measurement quality.
+
+**Constant +207 µs PEROUT offset**: TICC consistently shows the
+disciplined PEROUT firing 206,958 ns after the F9T PPS, even though
+the engine's EXTTS reports the PHC near zero error.  Either:
+- The E810 PEROUT has a fixed ~207 µs hardware delay, or
+- The EXTTS capture has a corresponding latency (so the engine
+  thinks the PHC is on-time when it's actually 207 µs ahead).
+
+This is a pure phase calibration issue — the disciplined output is
+stable, just offset by a constant.  Could be characterized once and
+compensated via `phase_step_bias_ns` (which is currently a stub
+field that is parsed but not used by the engine).
+
+## Next ocxo improvements
+
+In rough priority order:
+
+1. **Per-profile servo tuning for OCXO**: lower ki to ~0.0001 and
+   slow the loop down, since the oscillator can be trusted at long
+   tau.  Should drop the 18 ns σ toward the EXTTS measurement floor.
+2. **Investigate E810 EXTTS noise**: 2 µs σ is much worse than i226.
+   Possible causes: hardware capture quantization, kernel timestamping
+   delay, or interaction with the holdover DPLL state.
+3. **Implement `phase_step_bias_ns`**: actually use the parsed value
+   to apply a fixed offset to PEROUT after bootstrap, removing the
+   207 µs constant.
+4. **TICC-driven servo on ocxo**: now that EXTTS works for bootstrap,
+   the engine could be told to drive from TICC (60 ps measurement
+   precision) instead of EXTTS (~2 µs).  Expected to be much better.
+5. **Out-of-tree driver path**: still potentially useful for OCXO
+   discipline through the DPLL, but no longer required for basic
+   peppar-fix operation.
+
+## Status as of 2026-04-07 morning (superseded — see above)
 
 The ocxo host (Intel E810-XXVDA4T NIC + onboard OCXO) cannot run
 peppar-fix end-to-end with the current code without significant
