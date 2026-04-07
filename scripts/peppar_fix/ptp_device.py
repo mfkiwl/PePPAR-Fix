@@ -130,29 +130,20 @@ class PtpDevice:
           u32 flags;
           ptp_clock_time on;      // {s64 sec, u32 nsec, u32 reserved}
 
-        The igc driver offsets the first pulse by period/2 from the
-        start time.  Compensate by setting start to (next PHC second
-        - period/2) so the first pulse lands on the second boundary.
+        Start at an upcoming PHC second boundary (nsec=0).  The igc
+        driver fires the first pulse AT start (it does not add any
+        offset).  Verified empirically 2026-04-06 by setting different
+        start_nsec values and observing the TICC chA timestamp shift
+        by exactly the same amount.
 
-        History: this compensation was added in e55be79, removed in
-        7df1b18 (incorrectly — the igc behavior had not changed),
-        and restored after TICC #1 confirmed a 500.000180 ms offset
-        between PEROUT (chA) and F9T PPS (chB) on TimeHat 2026-04-06.
+        Use PTP_PEROUT_DUTY_CYCLE flag with 1 ms ON time so the pulse
+        is unambiguously a short rising-edge event.
         """
         period_s = period_ns // 1_000_000_000
         period_sub = period_ns % 1_000_000_000
         phc_ns, _sys_ns = self.read_phc_ns()
-        next_sec = phc_ns // 1_000_000_000 + 2
-        half_period_ns = period_ns // 2
-        start_sec = next_sec - half_period_ns // 1_000_000_000
-        start_nsec = 1_000_000_000 - (half_period_ns % 1_000_000_000)
-        if start_nsec >= 1_000_000_000:
-            start_nsec -= 1_000_000_000
-            start_sec += 1
-        # Explicit short ON time (1 ms) with PTP_PEROUT_DUTY_CYCLE flag.
-        # Without the flag the `on` field is reserved and the kernel
-        # picks period/2 = 500 ms wide pulse.  A 500 ms wide pulse plus
-        # any edge ambiguity downstream produces a 500 ms offset.
+        start_sec = phc_ns // 1_000_000_000 + 2
+        start_nsec = 0
         PTP_PEROUT_DUTY_CYCLE = 1 << 1
         buf = struct.pack('<qII qII II qII',
                           start_sec, start_nsec, 0,
