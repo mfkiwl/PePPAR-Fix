@@ -136,6 +136,112 @@ What it *is* good for, and what we should do with it:
 Worth doing on the in-kernel driver too — `dpll_1_offset` is already
 populated even though the DPLL isn't actively disciplining the PHC.
 
+## On E810, the OCXO is not our DO
+
+The natural parallel to the Timebeat OTC's Renesas 8A34002 ClockMatrix
+breaks down on E810.  On the OTC we read the chip's TDC for measurement
+*and* write a frequency control word (FCW) to steer the OCXO directly,
+running our PI servo entirely in userspace.  On E810 we only get the
+first half.
+
+### What a "software incrementer" is
+
+Every NIC PHC is conceptually a counter clocked from a hardware oscillator
+(here, the OCXO via the ZL30632 EEC).  But the counter doesn't advance
+by 1 tick per oscillator cycle — it advances by a programmable
+**increment value** held in a register Intel calls `GLTSYN_INCVAL`.
+If the hardware tick is 1 ns and `INCVAL = 1.0`, the PHC tracks real
+time.  If we want the PHC to run 100 ppb fast, we write `INCVAL = 1
++ 1e-7`.  The oscillator still ticks at exactly the same rate; we
+have only changed how much *PHC time* is added per tick.
+
+This is the "software incrementer".  It is a rate adjustment applied
+in arithmetic, layered on top of an oscillator the host did not
+actually retune.  Phase is real (the PHC really does report a
+different time), but the underlying frequency reference is
+unchanged — and any short-term phase noise of the OCXO passes
+through the incrementer untouched.
+
+`clock_adjfine()` and `adjtimex(ADJ_FREQUENCY)` on E810 both terminate
+in `ice_ptp_adjfine()` → `GLTSYN_INCVAL`.  They do not reach the
+OCXO.  `ADJ_SETOFFSET` similarly pokes `GLTSYN_TIME`, jumping the
+counter without touching the oscillator.
+
+### Stock in-kernel ice driver: PHC behavior
+
+- Underlying clock: OCXO, locked by the EEC firmware to whichever
+  input pin it last latched onto (often holdover, since the F9T PPS
+  may not be wired to the EEC reference selector by default).
+- `adjfine`: writes `GLTSYN_INCVAL` only.  This is the only knob we
+  have, and it's a *software rate overlay*, not OCXO control.
+- `ADJ_SETOFFSET`: writes `GLTSYN_TIME`, instantaneous PHC step.
+- EXTTS: works (with the sysfs-pin-program fallback added in 2c76229).
+- DPLL: not exposed as a writable interface, but `dpll_1_offset` is
+  populated read-only and reflects the EEC's TDC.
+- **Net result**: from the servo's point of view the PHC behaves like
+  a normal Linux PHC and PePPAR Fix can run end-to-end (and does, as
+  of this afternoon).  But the OCXO is effectively frozen — we are
+  servoing the *software incrementer* against GNSS, not the oscillator.
+  Any moonshot goal that depends on the OCXO's short-term stability
+  shining through is unreachable on this driver.
+
+### Intel out-of-tree ice v2.4.5: PHC behavior
+
+- Underlying clock: still the OCXO, but now the DPLL is actively
+  managed via firmware-mediated reference selection and lock.  The
+  OCXO frequency *can* track the chosen reference (e.g., the internal
+  F9T PPS).
+- `adjfine`: still writes `GLTSYN_INCVAL` (same code path).  It does
+  not bypass the DPLL or steer the OCXO directly — it's still a
+  software rate overlay layered on top of whatever frequency the
+  EEC is producing.  Whether userspace `adjfine` makes practical
+  sense in this mode is unclear: if the DPLL is locked to GNSS the
+  PHC's underlying rate is already correct and `adjfine` only adds
+  a software-side bias.
+- `ADJ_SETOFFSET`: same as in-kernel.
+- EXTTS: **broken on SDP pins** — the OOT driver routes SDP pin
+  management through the DPLL subsystem and does not honor
+  `PTP_EXTTS_REQUEST` / `PTP_PIN_SETFUNC`.  No PHC-referenced PPS
+  edge timestamps available.
+- DPLL: writable for *reference selection* (`dpll_N_ref_pin`,
+  `pin_cfg`) and *phase adjust* (`DPLL_A_PIN_PHASE_ADJUST` in ps),
+  but **no frequency-write attribute** in the upstream `dpll`
+  netlink uapi.  The Vadim Fedorenko / Arkadiusz Kubalewski 2023–24
+  dpll series was explicitly scoped phase-only; freq write was
+  deferred and never landed.
+- **Net result**: the OCXO is finally being disciplined to GNSS, but
+  by the EEC firmware — not by us.  We have lost the EXTTS-based
+  measurement chain that would let our servo close the loop, and
+  the kernel offers no frequency-write path even if we wanted to
+  override the firmware.  The OCXO is a black box managed by Intel.
+
+### Intel `ice.ieps.0` auxiliary device
+
+Present on `ocxo` today (visible under `/sys/bus/auxiliary/devices/`).
+This is Intel's closed "Ethernet Precision Synchronization" hook,
+and it is the only known path that exposes a DCO/FCW write to the
+ZL30632.  CTI and Meinberg E810-based timing products use it.  It
+requires Intel's SDK, is not upstream, and is not documented for
+third parties.  In principle it would let us implement the full
+8A34002 architecture on E810 — read TDC via `dpll_1_offset`, write
+FCW via IEPS — but only under an Intel agreement.
+
+### Implication for the moonshot
+
+On E810 the right mental model is: **the OCXO is not our DO**.
+Intel's firmware owns it.  Our actual DO is the PHC's software
+incrementer, which is *softer* than even the i226 TCXO because it
+adds zero physical inertia — it's pure arithmetic on top of a
+firmware-controlled oscillator.
+
+The clean ClockMatrix-style architecture (host reads TDC, host
+writes FCW, userspace PI servo, oscillator's short-term stability
+shines through) requires a timing chip on a host-accessible bus
+with an open register map.  That is exactly what the Timebeat OTC
+provides and exactly what the E810 does not.  E810 remains useful
+for PTP transport and for experiments that don't require touching
+the OCXO, but it is not a moonshot platform.
+
 ## EXTTS quantization: why E810 looks "noisier" than i226
 
 Both ends of the PPS measurement happen to live on ~125 MHz clocks,
