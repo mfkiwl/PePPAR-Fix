@@ -1912,7 +1912,17 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     carrier_tracker = ctx.get('carrier_tracker')
     if carrier_tracker is not None and not getattr(args, 'no_carrier', False):
         if dt_rx_ns is not None and dt_rx_sigma is not None:
-            carrier_tracker.try_auto_init(dt_rx_ns)
+            just_initialized = (not carrier_tracker.initialized
+                                and carrier_tracker.try_auto_init(dt_rx_ns))
+            if just_initialized:
+                # Anchor the Carrier zero-point to PPS truth.  Without
+                # this, the servo drives carrier_error to zero but
+                # carries a hidden bias relative to pps_error.
+                carrier_tracker.anchor_to_pps(pps_error_ns, dt_rx_ns)
+                if carrier_tracker._anchored:
+                    log.info("Carrier tracker: anchored to PPS "
+                             "(offset=%+.1f ns)",
+                             carrier_tracker.phase_anchor_ns)
         if carrier_tracker.initialized:
             carrier_tracker.accumulate_adjfine(ctx['adjfine_ppb'])
             carrier_tracker.update_drift_estimate(

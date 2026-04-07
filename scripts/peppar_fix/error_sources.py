@@ -146,6 +146,9 @@ class CarrierPhaseTracker:
         self._prev_pps_error = None
         self._prev_adjfine = None
         self.drift_rate_ppb = 0.0  # current best estimate of D
+        # Phase anchor: ensures Carrier zero-point matches PPS truth
+        self.phase_anchor_ns = 0.0
+        self._anchored = False
 
     def initialize(self, dt_rx_ns):
         """Set the reference dt_rx (called when PHC is aligned to GPS)."""
@@ -159,6 +162,8 @@ class CarrierPhaseTracker:
         self._prev_pps_error = None
         self._prev_adjfine = None
         self.drift_rate_ppb = 0.0
+        self.phase_anchor_ns = 0.0
+        self._anchored = False
         self.initialized = True
         self._stable_count = 0
 
@@ -225,6 +230,23 @@ class CarrierPhaseTracker:
         import math
         return math.sqrt(var / self._n_d)
 
+    def anchor_to_pps(self, pps_error_ns, dt_rx_ns):
+        """One-time anchor of Carrier zero-point to PPS truth.
+
+        Called once when D is reasonably trusted (e.g., right after
+        initialization with a seeded D from drift file).  Computes the
+        offset such that compute_error(dt_rx_ns) == pps_error_ns at
+        this moment.  After anchoring, the Carrier source tracks PPS
+        truth with PPP precision instead of carrying a hidden bias.
+        """
+        if not self.initialized or self._anchored:
+            return
+        raw = (dt_rx_ns - self.dt_rx_ref_ns) + self.cumulative_adjfine_ns
+        correction = self.drift_rate_ppb * self._epoch_count
+        unanchored = raw + correction
+        self.phase_anchor_ns = pps_error_ns - unanchored
+        self._anchored = True
+
     def compute_error(self, dt_rx_ns):
         """Compute PHC phase error with inter-oscillator correction.
 
@@ -234,7 +256,7 @@ class CarrierPhaseTracker:
             return None
         raw = (dt_rx_ns - self.dt_rx_ref_ns) + self.cumulative_adjfine_ns
         correction = self.drift_rate_ppb * self._epoch_count
-        return raw + correction
+        return raw + correction + self.phase_anchor_ns
 
     def reset(self, dt_rx_ns):
         """Reset after a PHC restep (phase was re-aligned to GPS)."""
