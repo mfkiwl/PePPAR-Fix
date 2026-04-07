@@ -32,12 +32,25 @@ except ImportError:
     print("pip install scipy", file=sys.stderr)
     sys.exit(1)
 
-try:
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-except ImportError:
-    print("pip install plotly", file=sys.stderr)
-    sys.exit(1)
+# Plotly is only needed by make_plot().  Importing lazily so this
+# module can be used by build_do_characterization.py on hosts that
+# don't have plotly installed.
+go = None
+make_subplots = None
+
+
+def _ensure_plotly():
+    global go, make_subplots
+    if go is not None:
+        return
+    try:
+        import plotly.graph_objects as _go
+        from plotly.subplots import make_subplots as _ms
+        go = _go
+        make_subplots = _ms
+    except ImportError:
+        print("pip install plotly", file=sys.stderr)
+        sys.exit(1)
 
 
 # ── Loading ────────────────────────────────────────────────────────────── #
@@ -177,6 +190,7 @@ def make_plot(all_psds, output_path, title=None):
 
     Two stacked panels: ns sources (top) and ppb sources (bottom).
     """
+    _ensure_plotly()
     fig = make_subplots(
         rows=2, cols=1,
         subplot_titles=('Phase error sources (ns)', 'Frequency control (ppb)'),
