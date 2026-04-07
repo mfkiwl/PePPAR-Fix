@@ -130,15 +130,27 @@ class PtpDevice:
           u32 flags;
           ptp_clock_time on;      // {s64 sec, u32 nsec, u32 reserved}
 
-        Start at an upcoming PHC second boundary (nsec=0).
-        The pulse should fire at integer seconds of the PHC.
+        The igc driver offsets the first pulse by period/2 from the
+        start time.  Compensate by setting start to (next PHC second
+        - period/2) so the first pulse lands on the second boundary.
+
+        History: this compensation was added in e55be79, removed in
+        7df1b18 (incorrectly — the igc behavior had not changed),
+        and restored after TICC #1 confirmed a 500.000180 ms offset
+        between PEROUT (chA) and F9T PPS (chB) on TimeHat 2026-04-06.
         """
         period_s = period_ns // 1_000_000_000
         period_sub = period_ns % 1_000_000_000
         phc_ns, _sys_ns = self.read_phc_ns()
-        start_sec = phc_ns // 1_000_000_000 + 2
+        next_sec = phc_ns // 1_000_000_000 + 2
+        half_period_ns = period_ns // 2
+        start_sec = next_sec - half_period_ns // 1_000_000_000
+        start_nsec = 1_000_000_000 - (half_period_ns % 1_000_000_000)
+        if start_nsec >= 1_000_000_000:
+            start_nsec -= 1_000_000_000
+            start_sec += 1
         buf = struct.pack('<qII qII II qII',
-                          start_sec, 0, 0,
+                          start_sec, start_nsec, 0,
                           period_s, period_sub, 0,
                           channel, 0,
                           0, 0, 0)
