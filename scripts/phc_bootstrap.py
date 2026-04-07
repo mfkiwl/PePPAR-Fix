@@ -127,8 +127,13 @@ def _set_pin_function_sysfs(ptp_dev, pin_name, func, channel):
         return False
 
 
-# Map pin index to E810 sysfs name
-_E810_PIN_NAMES = {0: "GNSS", 1: "SMA1", 2: "SMA2", 3: "U.FL1", 4: "U.FL2"}
+# Map pin index to E810 sysfs name.
+# Different kernel versions expose different names — newer ice driver
+# uses SDP20-SDP23 (after the GNSS pin), older versions used SMA1/SMA2.
+# We pass the index as a digit string and let _set_pin_function_sysfs
+# look up the actual file via sorted glob, which works regardless of
+# the names the kernel happens to use.
+_E810_PIN_NAMES = {0: "0", 1: "1", 2: "2", 3: "3", 4: "4"}
 
 
 def _enable_pps_out(ptp, args):
