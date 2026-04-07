@@ -4,6 +4,38 @@ You are working on PePPAR Fix, a GNSS-disciplined precision clock system.
 This file contains hard-won operational knowledge. Read it before writing
 code or touching lab hardware.
 
+## Project goal
+
+PePPAR Fix aims to faithfully transfer the **long-term stability of GPS
+time** to a local oscillator while preserving that oscillator's
+**superior short-term stability**.
+
+The "moonshot" target: at every tau, the disciplined output should be
+as stable as the better of (GPS time, the local oscillator).  At short
+tau, the oscillator's noise floor should shine through unmolested by
+the discipline loop.  At long tau, the output should track GNSS to
+within the receiver's measurement precision.  The discipline loop
+should guide the transition between these regimes ever so gently — no
+servo-induced noise, no overshoot, no loop bandwidth artifacts.
+
+The ideal short-tau stability target is **the local oscillator's free-
+running noise floor** (e.g., the i226 TCXO, the OCXO on Timebeat OTC,
+or whatever crystal clocks the PHC).  Beating PPS or PPS+qErr is not
+enough — those are limited by the F9T's measurement floor, not by
+what a good oscillator can deliver.
+
+We are searching for:
+- The best **servo input** (PPS, PPS+qErr, PPP carrier phase, PPP-AR)
+- The best **servo tuning** (loop bandwidth, gain scheduling, anti-windup)
+- The right **bootstrap initialization** (drift file, frequency seed)
+- The right **measurement chain** (TICC, EXTTS, internal TDC) to
+  characterize each component without contaminating the result
+
+Along the way we document and illustrate the challenges: measurement
+noise floors, quantization errors at every stage, oscillator drift
+sources, two-oscillator differentials, loop dynamics.  Each of these
+gets a story in `docs/visual-stories.md`.
+
 ## Before running on a lab host — read this first
 
 **Read `docs/lab-operations.md`** for the deployment procedure,
