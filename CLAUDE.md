@@ -52,21 +52,96 @@ story in `docs/visual-stories.md`.
 ## Before running on a lab host — read this first
 
 **Read `docs/lab-operations.md`** for the deployment procedure,
-pre-flight checklist, and known stumbling points. The most common
-failures when running on a lab host:
+pre-flight checklist, and known stumbling points.
+
+### The repo is the source of truth
+
+Every lab host has its `peppar-fix` checkout at `~/peppar-fix`, and
+that directory **must** be a git working tree.  The first thing to do
+when starting work on any lab host is:
+
+```sh
+ssh <host>
+cd ~/peppar-fix
+git status        # ← see what's locally modified before doing anything
+git pull          # ← when you actually want fresh code from upstream
+```
+
+`git pull` is on-demand, not automatic.  Lab hosts can lag the upstream
+indefinitely — that's a feature when one host is in a known-good state
+you want to keep as a comparison baseline.  Pull only when you have a
+reason to.  Always `git status` before pulling so you know whether
+local edits are about to land in a merge.
+
+**Local edits on a lab host are encouraged**, not avoided.  When
+you're debugging something that only reproduces on a particular host,
+edit files directly in `~/peppar-fix` on that host, test there, and
+let `git status`/`git diff` track what you tried.  Don't pre-commit
+every speculative fix — `git checkout -- <file>` discards what didn't
+pan out, and `git add && git commit` keeps what did.  When a fix is
+worth keeping, push *from the lab host*:
+
+```sh
+git push origin main           # ← lands on gt's bare local upstream
+                               #    which auto-mirrors to GitHub
+```
+
+You can then pull the same fix to other lab hosts to confirm it didn't
+break them, all before publishing anything beyond the bare upstream.
+
+### **Hard rule: never `scp` or `rsync` code that's tracked in the repo.**
+
+If you find yourself wanting to `scp scripts/foo.py to:somewhere` or
+`rsync -a scripts/peppar_fix/ to:somewhere`, **stop**.  That's a sign
+the workflow has broken — fix it via commit + push + pull on the
+affected hosts.  scp around version control just creates drift between
+hosts that git can't see.  Catastrophes from violating this rule
+include the 2026-04-08 ocxo incident where multiple non-git copies
+piled up at `~/peppar-fix`, `~/git/PePPAR-Fix`, and `~/PePPAR-Fix` and
+nobody knew which was authoritative.
+
+The only legitimate cross-host file copies are for things that **are
+not in the repo**: `ntrip.conf` (credentials), `data/*.csv` (capture
+artifacts pulled back to gt for archival), `data/position.json` and
+`data/drift.json` (host-local runtime state).
+
+### gt is the local upstream
+
+The primary git upstream for lab hosts is the bare repo on the gt
+home server at `bob@gt:git/PePPAR-Fix.git`, **not** GitHub directly.
+Pushes to gt's bare are auto-mirrored to GitHub by a `post-receive`
+hook (additive only — never deletes refs on GitHub even if they're
+gone from the bare; see `hooks/post-receive` inside the bare for the
+incident that produced this rule).
+
+The reason for using gt as the local upstream rather than GitHub
+directly:
+- **Faster** — local network instead of github.com round trip.
+- **Safer iteration** — push a fix from one lab host to gt, then pull
+  on a *second* lab host and confirm it didn't break things there,
+  *before* the change ever reaches GitHub.  Catches "fixed it on
+  host A, broke host B" early.
+- **Works without internet** — the lab is on a local network; gt is
+  always reachable even when GitHub is not.
+
+GitHub is still the public origin and remains the long-term home of
+record.  It's just that lab hosts and gt's dev tree both push *through*
+the gt bare upstream, not directly to it.
+
+### Common lab-host failures (in order of frequency)
 
 1. **Missing Python deps**: set up the venv first:
    `cd ~/peppar-fix && python3 -m venv venv && venv/bin/pip install pyubx2 pyserial`
    (add `smbus2` on I2C hosts). Never use `--break-system-packages`.
 2. **Missing directories**: `mkdir -p ~/peppar-fix/data`
 3. **Missing ntrip.conf**: `scp TimeHat:~/peppar-fix/ntrip.conf ~/peppar-fix/`
-4. **Stale processes**: `sudo pkill -f peppar` before starting
+   (this is the *one* legitimate scp — credentials are not in the repo).
+4. **Stale processes**: `sudo pkill -f peppar` before starting.
 5. **TICC args need splitting**: `--engine-arg --ticc-port --engine-arg /dev/ticc1`
-   (NOT `--engine-arg "--ticc-port /dev/ticc1"`)
-6. **Timebeat must be stopped on OTC hosts**: `sudo systemctl stop timebeat`
+   (NOT `--engine-arg "--ticc-port /dev/ticc1"`).
+6. **Timebeat must be stopped on OTC hosts**: `sudo systemctl stop timebeat`.
 
 Always use the `peppar-fix` orchestration wrapper, not individual scripts.
-Always use `git pull` to update code on lab hosts, not rsync/scp.
 
 ## Lab Test Protocol
 
