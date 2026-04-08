@@ -288,7 +288,9 @@ def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
                           carrier_max_sigma=50.0,
                           ticc_error_ns=None, ticc_confidence=None,
                           ppp_cal=None, tick_ns=8.0,
-                          carrier_tracker=None):
+                          carrier_tracker=None,
+                          corr_age_s=None,
+                          corr_staleness_ns_per_s=0.1):
     """Compute all available error sources and return sorted by confidence.
 
     Args:
@@ -302,11 +304,34 @@ def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
         ppp_cal: PPPCalibration instance (None disables PPS+PPP)
         tick_ns: receiver clock tick period (ns)
         carrier_tracker: CarrierPhaseTracker instance (None disables Carrier)
+        corr_age_s: age of the freshest applicable NTRIP correction stream
+            (seconds, host-monotonic).  When > 0, Carrier and PPS+PPP
+            confidences are inflated to reflect that their dt_rx input is
+            being computed against increasingly stale corrections.  None
+            disables inflation (back-compat).
+        corr_staleness_ns_per_s: linear inflation rate (ns of σ per second
+            of correction age).  Default 0.1 ns/s puts the GNSS-derived
+            sources past PPS+qErr's ~3 ns floor at ~30 s of staleness and
+            past PPS-only's ~20 ns floor at ~200 s, giving graceful
+            degradation through the source competition.
 
     Returns:
         List of ErrorSource, sorted by confidence (best first).
+
+    Note: when NTRIP corrections go stale, this function does NOT remove
+    Carrier/PPS+PPP from the running — it inflates their σ so source
+    competition naturally hands off to PPS+qErr / PPS / TICC.  When
+    corrections return, the age drops, the inflation drops, and the GNSS
+    sources reclaim the top slot automatically.  No tear-down/restart.
     """
     sources = []
+
+    # Compute the staleness inflation once.  Squared so it can be
+    # quadrature-summed with each source's native sigma.
+    if corr_age_s is not None and corr_age_s > 0.0:
+        inflation_var = (corr_staleness_ns_per_s * corr_age_s) ** 2
+    else:
+        inflation_var = 0.0
 
     sources.append(ErrorSource('PPS', pps_error_ns, pps_confidence))
 
@@ -320,8 +345,9 @@ def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
             and dt_rx_sigma_ns < carrier_max_sigma):
         carrier_error = carrier_tracker.compute_error(dt_rx_ns)
         if carrier_error is not None:
+            carrier_sigma = math.sqrt(dt_rx_sigma_ns ** 2 + inflation_var)
             sources.append(ErrorSource('Carrier', carrier_error,
-                                       dt_rx_sigma_ns))
+                                       carrier_sigma))
 
     if (dt_rx_sigma_ns is not None and dt_rx_sigma_ns < carrier_max_sigma
             and ppp_cal is not None and ppp_cal.calibrated):
@@ -329,9 +355,10 @@ def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
         # Sanity: qerr_ppp must be within ±tick/2 (by construction it is,
         # but guard against numerical edge cases).
         if abs(qerr_ppp_ns) <= tick_ns / 2 + 0.1:
+            ppp_sigma = math.sqrt(dt_rx_sigma_ns ** 2 + inflation_var)
             sources.append(ErrorSource('PPS+PPP',
                                        pps_error_ns + qerr_ppp_ns,
-                                       dt_rx_sigma_ns))
+                                       ppp_sigma))
 
     if ticc_error_ns is not None and ticc_confidence is not None:
         sources.append(ErrorSource('TICC',

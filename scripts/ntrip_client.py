@@ -75,7 +75,8 @@ class NtripStream:
     """A single NTRIP stream connection to one mountpoint."""
 
     def __init__(self, caster, port, mountpoint, user=None, password=None,
-                 timeout=10, reconnect_delay=5, max_reconnects=10, tls=None):
+                 timeout=10, reconnect_delay=5, max_reconnect_delay=60,
+                 max_reconnects=None, tls=None):
         self.caster = caster
         self.port = port
         self.mountpoint = mountpoint
@@ -83,7 +84,15 @@ class NtripStream:
         self.password = password
         self.timeout = timeout
         self.reconnect_delay = reconnect_delay
+        self.max_reconnect_delay = max_reconnect_delay
+        # max_reconnects retained for tests/CLI compat; production use is None
+        # (retry forever with exponential backoff).  See raw_frames().
         self.max_reconnects = max_reconnects
+        # Mark fatal once a permanent server-side rejection has been seen
+        # (HTTP 401/403/404/410).  Transient transport failures
+        # (DNS, ECONNREFUSED, timeouts, TLS handshake errors) never set this.
+        self._fatal = False
+        self._fatal_reason = None
         self.tls = tls if tls is not None else (port == 443)
         self._sock = None
         self._buffer = bytearray()
@@ -140,6 +149,14 @@ class NtripStream:
         status_line = header_str.split("\r\n")[0]
 
         if "200" not in status_line and "ICY 200" not in status_line:
+            # Permanent rejections: bad credentials, missing/dead mountpoint.
+            # Distinguished from transport failures so the supervisor loop
+            # in raw_frames() knows to stop retrying.
+            for code in ("401", "403", "404", "410"):
+                if code in status_line:
+                    self._fatal = True
+                    self._fatal_reason = status_line
+                    break
             raise ConnectionError(f"NTRIP error: {status_line}")
 
         # Any data after the header boundary goes into our buffer
@@ -228,27 +245,56 @@ class NtripStream:
     def raw_frames(self):
         """Generator yielding (msg_type, frame_bytes) tuples.
 
-        Handles reconnection automatically. Use this if you want to do
-        your own RTCM3 decoding.
+        Reconnects forever on transport failure with exponential backoff
+        (reconnect_delay → max_reconnect_delay).  The only conditions that
+        cause this generator to return are:
+
+          - The caster returned a permanent HTTP rejection (401/403/404/410).
+            self._fatal is set inside connect() and we stop retrying.
+          - max_reconnects is set to a finite integer (legacy / test mode)
+            and that budget is exhausted.
+
+        Transient failures (DNS resolution failures, ECONNREFUSED, timeouts,
+        TLS handshake errors, EHOSTUNREACH, ECONNRESET) never give up — the
+        supervisor loop just keeps retrying so a transient NTRIP outage shows
+        up to the consumer as growing correction age, not as a dead thread.
+
+        Note: this is the supervisor loop in the user's two-thread mental
+        model.  The connection-maintenance happens here; the consumer
+        (ntrip_reader in realtime_ppp.py) just iterates and lets correction
+        freshness propagate downstream.
         """
+        backoff = self.reconnect_delay
         while True:
             if not self._connected:
-                if self._reconnect_count >= self.max_reconnects:
+                if self._fatal:
+                    log.error(
+                        "NTRIP %s: permanent rejection (%s) — not retrying",
+                        self.mountpoint, self._fatal_reason)
+                    return
+                if (self.max_reconnects is not None
+                        and self._reconnect_count >= self.max_reconnects):
                     log.error("Max reconnection attempts reached")
                     return
                 try:
                     self.connect()
-                except (ConnectionError, OSError, socket.timeout) as e:
+                    backoff = self.reconnect_delay  # reset on success
+                except (ConnectionError, OSError, socket.timeout, ssl.SSLError) as e:
                     self._reconnect_count += 1
-                    log.warning(f"Connection failed ({self._reconnect_count}/"
-                                f"{self.max_reconnects}): {e}")
-                    time.sleep(self.reconnect_delay)
+                    if self._fatal:
+                        # connect() classified this as permanent (HTTP 4xx)
+                        continue  # next iteration will hit the _fatal branch
+                    log.warning(
+                        "NTRIP %s reconnect %d failed: %s — retry in %ds",
+                        self.mountpoint, self._reconnect_count, e, backoff)
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, self.max_reconnect_delay)
                     continue
 
             try:
                 self._recv()
-            except (ConnectionError, OSError, socket.timeout) as e:
-                log.warning(f"Connection lost: {e}")
+            except (ConnectionError, OSError, socket.timeout, ssl.SSLError) as e:
+                log.warning("NTRIP %s connection lost: %s", self.mountpoint, e)
                 self.disconnect()
                 continue
 

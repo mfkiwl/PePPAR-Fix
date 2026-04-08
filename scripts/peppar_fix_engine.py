@@ -1127,7 +1127,16 @@ def _set_clock_class(ctx, state):
 
 
 def _save_osc_freq_corr(ctx):
-    """Save refined oscillator frequency corrections on clean shutdown."""
+    """Save refined oscillator frequency corrections on clean shutdown.
+
+    Skipped in --freerun mode: the live adjfine there is what the servo
+    *would have* written if it were actuating, not a value the PHC has
+    actually been steered to.  Persisting it would poison the next
+    bootstrap with a fictitious frequency.
+    """
+    if ctx.get('freerun'):
+        log.info("Skipping drift.json save (freerun mode)")
+        return
     drift_path = ctx.get('drift_file', 'data/drift.json')
     adjfine = ctx.get('adjfine_ppb', 0.0)
     carrier_tracker = ctx.get('carrier_tracker')
@@ -2071,6 +2080,16 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             if done:
                 log.info(f"  PPP calibration done: offset={ppp_cal.offset_ns:+.3f}ns "
                          f"({ppp_cal._n} samples)")
+        # Correction age drives sigma inflation on Carrier and PPS+PPP.
+        # When NTRIP goes stale, those sources lose competition gracefully
+        # to PPS+qErr / PPS instead of dying.
+        corr_age_for_inflation = None
+        if corr_snapshot is not None:
+            ages = [a for a in (corr_snapshot.get("broadcast_age_s"),
+                                corr_snapshot.get("ssr_age_s"))
+                    if a is not None]
+            if ages:
+                corr_age_for_inflation = max(ages)
         sources = compute_error_sources(
             pps_error_ns,
             None if args.no_qerr else qerr_ns,
@@ -2080,8 +2099,25 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             ppp_cal=None if args.no_ppp else ppp_cal,
             carrier_tracker=(None if getattr(args, 'no_carrier', False)
                              else ctx.get('carrier_tracker')),
+            corr_age_s=corr_age_for_inflation,
+            corr_staleness_ns_per_s=getattr(
+                args, 'corr_staleness_ns_per_s', 0.1),
         )
     best = sources[0]
+
+    # Source-change logging: when the winner of the source competition
+    # changes, emit a one-liner so postmortem can spot graceful degradation
+    # cascades (Carrier → PPS+qErr → PPS → holdover).
+    last_source_name = ctx.get('last_source_name')
+    if last_source_name != best.name:
+        log.info(
+            "Source change: %s → %s (err=%+.1fns σ=%.1fns, corr_age=%s)",
+            last_source_name or "(none)", best.name,
+            best.error_ns, best.confidence_ns,
+            f"{corr_age_for_inflation:.1f}s"
+            if corr_age_for_inflation is not None else "n/a",
+        )
+        ctx['last_source_name'] = best.name
 
     # No warmup or step phases — PHC bootstrap handles phase and frequency.
     # PI tracking from epoch 1.
@@ -2788,7 +2824,17 @@ Two-phase operation:
     ntrip.add_argument("--ntrip-user", help="NTRIP username")
     ntrip.add_argument("--ntrip-password", help="NTRIP password")
     ntrip.add_argument("--max-broadcast-age-s", type=float, default=None,
-                       help="Maximum host-monotonic age for broadcast correction state (default: 30)")
+                       help="Maximum host-monotonic age for broadcast correction state "
+                            "(default: 600). Past this, the freshness gate skips EKF "
+                            "updates entirely. Sigma inflation (see "
+                            "--corr-staleness-ns-per-s) handles graceful degradation "
+                            "well before reaching this hard limit.")
+    ntrip.add_argument("--corr-staleness-ns-per-s", type=float, default=0.1,
+                       help="Linear inflation rate (ns of σ per second of NTRIP "
+                            "correction age) applied to Carrier and PPS+PPP error "
+                            "sources. Default 0.1 puts those sources past the "
+                            "PPS+qErr 3 ns floor at ~30 s of NTRIP staleness, so "
+                            "the source competition hands off automatically.")
     ntrip.add_argument("--require-ssr", action="store_true", default=None,
                        help="Require fresh SSR state before EKF updates")
     ntrip.add_argument("--max-ssr-age-s", type=float, default=None,
@@ -2953,7 +2999,10 @@ Two-phase operation:
     if args.phc_timescale is None:
         args.phc_timescale = "tai"
     if args.max_broadcast_age_s is None:
-        args.max_broadcast_age_s = 30.0
+        # Generous so the sigma-inflation cascade has room to run.
+        # Broadcast ephemeris is good for hours; the gate's job is a
+        # last-resort safety, not graceful degradation.
+        args.max_broadcast_age_s = 600.0
     if args.require_ssr is None:
         args.require_ssr = False
     if args.max_ssr_age_s is None:
