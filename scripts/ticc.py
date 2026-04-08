@@ -133,6 +133,22 @@ class _SharedTiccPort:
         if self.refcount > 0:
             self.refcount -= 1
 
+    def _force_dtr_reset(self) -> None:
+        """Force the Arduino to reboot by pulsing DTR low-then-high.
+
+        Needed when the TICC is in the cold state where DTR is already
+        asserted (e.g. after a ModemManager probe at boot), so the
+        normal open doesn't produce the rising edge that triggers the
+        Arduino's auto-reset capacitor.
+        """
+        assert self.serial is not None
+        try:
+            self.serial.dtr = False
+            _time.sleep(0.5)
+            self.serial.dtr = True
+        except (serial.SerialException, OSError):
+            pass
+
     def _wait_for_boot(self) -> None:
         """Wait for TICC to be ready (booting or already running).
 
@@ -145,18 +161,51 @@ class _SharedTiccPort:
         We send a CR during the menu wait to accept defaults and
         shorten the boot.
 
-        If the TICC is already running (dsrdtr=False prevented reset),
-        the first line will be a valid timestamp — accept it immediately.
+        Cold-start case: on a freshly-booted host where ModemManager
+        (or any other prober) has already probed the ttyACM device,
+        DTR is left asserted and our HUPCL-clearing open keeps it
+        asserted, so no rising edge ever fires the Arduino's
+        auto-reset.  The TICC sits in pre-boot state forever.  We
+        detect this — no data within ``cold_threshold_s`` seconds —
+        and force a DTR reset, then continue waiting for the boot
+        banner.
+
+        Warm case: if the TICC is already running (typical on a
+        long-uptime host), the first line is usually a valid
+        timestamp and we return immediately without resetting.
 
         Raises TimeoutError if the TICC doesn't produce a valid
-        timestamp within 20 seconds.
+        timestamp even after a forced reset.
         """
         assert self.serial is not None
-        deadline = _time.monotonic() + 20
+        cold_threshold_s = 3.0
+        # We get one forced-reset attempt before giving up.  After a
+        # reset the Arduino takes ~10–15 s to print its banner and
+        # reach steady state, so the overall budget is ~25 s.
+        budget_s = 25.0
+        deadline = _time.monotonic() + budget_s
+        cold_kick_at = _time.monotonic() + cold_threshold_s
         seen_header = False
         sent_cr = False
         seen_sentinel = False
+        forced_reset = False
         while _time.monotonic() < deadline:
+            # Cold-state detection: if nothing has shown up after
+            # cold_threshold_s and we haven't reset yet, force one.
+            if (not forced_reset and not seen_header
+                    and _time.monotonic() >= cold_kick_at):
+                self._force_dtr_reset()
+                forced_reset = True
+                # Extend the deadline so we don't time out before the
+                # banner finishes printing after the forced reset.
+                deadline = max(deadline, _time.monotonic() + 20.0)
+                # Drain anything stale that may have arrived during
+                # the reset pulse.
+                try:
+                    self.serial.reset_input_buffer()
+                except (serial.SerialException, OSError):
+                    pass
+                continue
             try:
                 raw = self.serial.readline()
             except (serial.SerialException, OSError):
@@ -189,8 +238,9 @@ class _SharedTiccPort:
                     seen_sentinel = True
         else:
             raise TimeoutError(
-                f"TICC on {self.port} did not produce data within 20s "
-                f"(seen_header={seen_header}, seen_sentinel={seen_sentinel})"
+                f"TICC on {self.port} did not produce data within {budget_s:.0f}s "
+                f"(seen_header={seen_header}, seen_sentinel={seen_sentinel}, "
+                f"forced_reset={forced_reset})"
             )
 
     def close(self) -> None:
