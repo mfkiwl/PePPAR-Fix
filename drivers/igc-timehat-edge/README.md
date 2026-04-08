@@ -13,31 +13,103 @@ control and can layer our own patches on top deterministically.
 
 ## Why we want it
 
-The stock Linux igc driver has two related problems for the way
-PePPAR Fix uses i226 timing hardware:
+The stock Linux igc driver has two unrelated problems for the way
+PePPAR Fix uses i226 timing hardware.  This patch fixes both, plus
+adds groundwork the `igc-adjfine-fix` series may build on.
 
-1. **EXTTS dual-edge timestamping.** The i226 hardware unconditionally
-   captures both rising and falling PPS edges and the stock driver
-   passes them all to userspace.  With a typical GPS receiver emitting
-   a 100 ms wide PPS pulse at 1 Hz, the engine sees 2 events/sec
-   100 ms apart and the servo demands +3 Mppb to chase the spurious
-   error.  See `docs/madhat-bringup-2026-04-07.md` stumble #10 for
-   the full debugging trail.
+### 1. EXTTS dual-edge timestamping (the falling-edge bug)
 
-   **PePPAR Fix already filters this in userspace** via
-   `peppar_fix.ptp_device.DualEdgeFilter` (commit `aa20423`).  The
-   kernel patch is defense in depth and lets non-peppar-fix tools
-   (`testptp`, `ts2phc`, custom scripts) see clean rising edges.
+The i226 hardware unconditionally captures both rising and falling
+PPS edges and the stock driver passes them all to userspace.  With
+a typical GPS receiver emitting a 100 ms wide PPS pulse at 1 Hz,
+EXTTS reports 2 events/sec 100 ms apart, the engine arbitrarily
+picks the falling edge half the time, and the servo demands ~3 Mppb
+to chase a spurious 100 ms phase error.  See
+`docs/madhat-bringup-2026-04-07.md` stumble #10 for the full
+debugging trail.
 
-2. **PEROUT 1 PPS quirk.** Stock `igc` produces a 1 Hz square wave
-   instead of a proper 1 PPS pulse when `testptp -p 1000000000` is
-   used.  The TimeHAT patch fixes the periodic-output configuration
-   path to honor the requested period correctly.
+The TimeHAT patch fixes this at the kernel level using **two
+mechanisms working together**:
 
-The TimeHAT patch also adds per-channel EXTTS pin and flags tracking,
-which is groundwork the `igc-adjfine-fix` patch series (in this repo
-at `drivers/igc-adjfine-fix/`) builds on.  See "Composing with
-igc-adjfine-fix" below.
+**Part A — flag forcing** (`intel-igc-ppsfix/src/igc_ptp.c:265`):
+
+```c
+case PTP_CLK_REQ_EXTTS:
+    /* PPS fix: force rising edge only ... */
+    if (rq->extts.flags & PTP_ENABLE_FEATURE) {
+        rq->extts.flags = PTP_ENABLE_FEATURE | PTP_RISING_EDGE;
+    }
+```
+
+This rewrites every EXTTS request to ask for rising edges only,
+overriding whatever userspace passed in.  By itself it would not be
+enough, because the i226 hardware ignores the request flag and
+captures both edges anyway.
+
+**Part B — interrupt-handler GPIO filter**
+(`intel-igc-ppsfix/src/igc_main.c:5466–5547`):
+
+When an EXTTS interrupt fires, the handler
+
+1. Waits `edge_check_delay_us` (default 20 µs) for the line to settle.
+2. Reads the actual GPIO pin level via `gpio_get_value()`.
+3. Compares the level to the saved per-channel `ts{0,1}_flags` to
+   determine whether the captured event was a rising or falling edge.
+4. **Drops the event before delivering it to userspace** if the polarity
+   doesn't match what was requested.
+
+Two new module parameters control the filter:
+
+- `edge_check_delay_us` — settling delay before pin read (default 20 µs)
+- `edge_check_invert` — flip the expected pin level for hardware that
+  inverts the signal somewhere (default 0)
+
+This is what *actually* fixes the dual-edge problem — Part A is
+bookkeeping, Part B is the filter.
+
+**Relationship to PePPAR Fix's userspace filter**: PePPAR Fix
+already ships its own filter at
+`peppar_fix.ptp_device.DualEdgeFilter` (commit `aa20423`).  That
+filter is purely temporal — it drops any EXTTS event closer than
+0.4 s to the previous accepted event — and works on a stock kernel.
+The TimeHAT kernel patch is **defense in depth**: it lets
+non-peppar-fix tools (`testptp`, `ts2phc`, custom scripts, future
+peppar-fix variants) see clean rising edges without each having to
+implement their own filter, and it inspects the physical pin state
+rather than relying on temporal heuristics.  Both can run together
+safely; the kernel filter just makes the userspace filter a no-op.
+
+### 2. PEROUT 1 PPS frequency-mode bug
+
+Stock `igc` has a special case that, when asked for a 1 Hz
+periodic output, drops into "frequency mode" which produces a 50%
+duty-cycle square wave (500 ms HIGH / 500 ms LOW) instead of a
+proper PPS pulse.  The TimeHAT patch removes the `500000000` special
+case so 1 Hz uses Target Time mode like every other rate, producing
+a clean short pulse.
+
+**Overlap with PePPAR Fix's userspace PEROUT fix**: commit `01a401c`
+in this repo sets the `PTP_PEROUT_DUTY_CYCLE` flag with a 1 ms ON
+time so the kernel produces a clean 1 ms pulse instead of the
+default ~500 ms wide one.  The TimeHAT patch reaches the same goal
+through a different code path (forcing TT mode unconditionally).
+Both fixes target the same symptom — `peppar-fix` works on stock
+kernels with `01a401c`, and `testptp -p 1000000000` works on
+patched kernels with the TimeHAT fix.  After installing this patch
+the userspace `PTP_PEROUT_DUTY_CYCLE` request should still be
+honored (TT mode honors per-pulse ON time), but this is **untested**
+and worth verifying with a TICC measurement after the first patched
+boot.
+
+### 3. Per-channel pin/flags tracking (groundwork)
+
+Adds `ts0_pin`, `ts0_flags`, `ts1_pin`, `ts1_flags` fields to
+`struct igc_adapter` (`intel-igc-ppsfix/src/igc.h:331-334`),
+populated by the EXTTS request handler in Part A and consumed by
+the GPIO edge filter in Part B.  Our `igc-adjfine-fix` series
+(`drivers/igc-adjfine-fix/`) does not currently use these fields,
+but they're useful future infrastructure for any code that needs
+per-channel polarity awareness in the interrupt path.
 
 ## What's included
 
