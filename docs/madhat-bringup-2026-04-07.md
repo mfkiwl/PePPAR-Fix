@@ -467,7 +467,118 @@ setup procedure as a standard prereq, alongside `git`.  It's a
 ~few-MB package and gives you the full standard tooling.  The
 `peppar-install` script should also install it.
 
-### #12 — TICC #3 doesn't reset properly when opened by either probe or engine
+### #12 (resolved) — TICC #3 cold-start: two compounding bugs in `_SharedTiccPort`
+
+After the user pushed back on my initial diagnosis, deeper
+investigation found *two* bugs in `scripts/ticc.py` that combined
+to break first-time TICC bring-up on any host where ModemManager
+is enabled (default on Trixie / Raspberry Pi OS).
+
+**Bug A — DTR is already HIGH at first open, so no reset fires.**
+
+`TIOCMGET` on a freshly-booted MadHat shows `DTR=HIGH` on
+`/dev/ticc3` *before* peppar-fix (or any of our tools) has touched
+it.  Almost certainly ModemManager probed the new ttyACM at boot,
+asserted DTR via the cdc_acm driver, then closed the fd.  HUPCL is
+the kernel default for cdc_acm so closing should drop DTR — but it
+doesn't, in practice, on this kernel/version.
+
+`_SharedTiccPort._open_serial` opens the port with `dsrdtr=False`
+(deliberately, so pyserial doesn't manage DTR) and then clears
+HUPCL via termios.  Both my diagnostic probe and the engine's
+TICC reader use this same code path.  Since DTR is already high
+at the moment of the open, the open does **not** produce a rising
+edge → the Arduino's auto-reset capacitor is not triggered → the
+TICC sits in pre-boot state forever.
+
+This was masked on TimeHat #1 because some prior open had reset
+its TICC long ago and HUPCL has been clear ever since, leaving the
+sketch running.  MadHat is the first cold-DTR-high host where the
+trap fires.
+
+**Bug B — the `_wait_for_boot` "skip the menu" CR write actively
+enters the menu instead.**
+
+Even after a successful reset, the existing `_wait_for_boot`
+sent `b"\r"` to the TICC during the boot wait with a comment
+claiming this would "accept defaults and skip the ~5 s menu
+timeout".  Empirical reading of raw TICC output on MadHat:
+
+```
+=== sending CR and reading 4s more ===
+  '\r???'
+  'M   Measurement Mode        T               default T'
+  'S   clock Speed  (MHz)      10.000000       default 10'
+  ...
+  'W   Write changes and exit setup'
+  'Z   Discard changes and exit setup'
+  'choose one:'
+```
+
+The TICC firmware echoes the CR (and prints `???` because CR
+isn't a valid menu command), then dumps the **interactive setup
+menu** and waits forever for a menu command.  The comment in the
+code was simply wrong — CR doesn't bypass the menu, it's the very
+keystroke that *enters* it.
+
+The correct way to skip the menu is **silence**: send nothing
+during the 5-second wait, and the firmware drops through to
+normal timestamp output on its own timeout.
+
+**Verified-correct boot sequence on MadHat with no writes**:
+
+```
+HDR # TAPR TICC Timestamping Counter
+HDR # Copyright 2017 N8UR, K9TRG, NH6Z, WA8YWQ
+... (~20 header lines) ...
+TS  1.346514407487 chB
+TS  2.346514407008 chB
+TS  3.346514406536 chB
+```
+
+Headers, then ~5 s of silence (the menu timeout), then steady
+chA/chB timestamps.
+
+**Fix** (commits `d5c053b` + `bd70924`):
+
+`_SharedTiccPort._wait_for_boot` now:
+
+1. Triggers a forced DTR low-then-high pulse (`_force_dtr_reset`)
+   if no timestamp line has arrived within 3 seconds, regardless
+   of whether headers are visible.  This handles both the cold
+   DTR-already-high case and the stuck-in-menu case from any
+   prior code path.
+2. Sends **no bytes at all** during the boot wait.  The CR write
+   is gone.  Comment block warns future code not to add it back.
+3. Extends the budget to 25 s + post-reset 20 s so cold-boot has
+   enough time to complete.
+
+**Verified end-to-end on MadHat**: after a fresh reboot (DTR=HIGH
+confirmed), running `peppar-fix --duration 60 --engine-arg
+--ticc-port --engine-arg /dev/ticc3` causes the engine's
+`_SharedTiccPort` to:
+
+- Detect "no timestamps in 3 s"
+- Force the DTR reset
+- Read ~20 banner lines from the booting TICC
+- Wait silently through the 5 s menu timeout
+- Receive the first chB timestamp
+- Start the reader thread (`TICC reader started on /dev/ticc3`)
+- Log 43 chA + 42 chB events to `data/madhat-smoke-ticc.csv`
+  over the 42 s of TICC streaming time
+
+**Stumble character**: a CLAUDE.md-grade entry — both bugs were
+load-bearing for cold-start, but neither had ever been exercised
+because every other lab host's TICC had been booted at some prior
+moment and stayed running.
+
+**Prevent next time**:
+
+1. The fix is upstream now; future hosts will work on first run.
+2. *Test fresh-host paths regularly*.  Both bugs survived because
+   we never tested cold-start.  A test rig that power-cycles a
+   TICC and confirms `Ticc(wait_for_boot=True)` succeeds would
+   have caught both.
 
 **Tried**: read TICC #3 events alongside EXTTS during stumble #10
 diagnosis.  Then ran the full peppar-fix engine with TICC #3 as the
