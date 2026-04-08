@@ -36,7 +36,7 @@ import time
 sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
-from peppar_fix.ptp_device import PtpDevice
+from peppar_fix.ptp_device import PtpDevice, DualEdgeFilter
 from peppar_fix.receiver import ensure_receiver_ready
 from solve_ppp import FixedPosFilter, ls_init
 
@@ -197,11 +197,16 @@ def measure_pps_frequency(ptp, channel, n_samples=5, timeout_s=8):
     samples = []  # (elapsed_sec, nsec)
     first_sec = None
     deadline = time.monotonic() + timeout_s
+    # i226 dual-edge quirk: with a wide PPS pulse the kernel reports both
+    # rising and falling edges, doubling the apparent rate and corrupting
+    # the frequency estimate.  Filter the falling edges out.
+    dedup = DualEdgeFilter()
 
     for _ in range(n_samples + 1):
         if time.monotonic() > deadline:
             break
-        event = ptp.read_extts(timeout_ms=2000)
+        remaining_ms = max(50, int((deadline - time.monotonic()) * 1000))
+        event = ptp.read_extts_dedup(dedup, timeout_ms=min(2000, remaining_ms))
         if event is None:
             continue
         sec, nsec, _idx, _mono, _qr, _pa = event
@@ -210,6 +215,9 @@ def measure_pps_frequency(ptp, channel, n_samples=5, timeout_s=8):
         samples.append((sec - first_sec, nsec))
 
     ptp.disable_extts(channel)
+    if dedup.dropped:
+        log.info("PPS frequency measurement: dual-edge filter dropped %d events",
+                 dedup.dropped)
 
     if len(samples) < 2:
         return None, None, 0
@@ -613,10 +621,12 @@ def main():
 
     # ── Evaluate PHC ──────────────────────────────────────────────── #
 
-    # Read PHC phase at the most recent PPS edge
-    # We need to capture one more PPS event to compare
+    # Read PHC phase at the most recent PPS edge.  read_one_rising_edge
+    # collects events for one full PPS period and applies dual-edge
+    # filtering so the returned event is a confirmed rising edge — never
+    # the i226's spurious falling-edge timestamp.
     ptp.enable_extts(args.extts_channel, rising_edge=True)
-    pps_event = ptp.read_extts(timeout_ms=2000)
+    pps_event = ptp.read_one_rising_edge(timeout_s=3.0)
     pps_realtime_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
     ptp.disable_extts(args.extts_channel)
 
@@ -763,8 +773,10 @@ def main():
                      args.phc_optimal_stop_limit_s)
 
         # Verify: measure true residual φ₀ from the next PPS edge.
+        # read_one_rising_edge filters out the i226 dual-edge falling
+        # timestamp; see DualEdgeFilter and read_one_rising_edge docstrings.
         ptp.enable_extts(args.extts_channel, rising_edge=True)
-        evt = ptp.read_extts(timeout_ms=2000)
+        evt = ptp.read_one_rising_edge(timeout_s=3.0)
         if evt is not None:
             v_realtime_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
             v_sec, v_nsec = evt[0], evt[1]

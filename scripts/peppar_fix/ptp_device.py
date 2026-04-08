@@ -10,6 +10,63 @@ import struct
 import time
 
 
+class DualEdgeFilter:
+    """Suppress duplicate EXTTS events from NICs that timestamp both edges.
+
+    The Intel i226 (and i210/i225 — they share the timing core) reports
+    a hardware EXTTS event for *both* the rising and falling edges of any
+    PPS signal on the EXTTS pin.  See the i226 dual-edge quirk note in
+    CLAUDE.md and the kernel-patch discussion at
+    https://github.com/Time-Appliances-Project/TimeHAT.
+
+    With a typical GPS receiver emitting a 100 ms wide PPS pulse at 1 Hz,
+    the engine sees 2 events per second 100 ms apart.  Without filtering,
+    the engine treats whichever edge it picks as "the PPS edge" for that
+    epoch — when it picks the falling edge it computes a phase error 100 ms
+    larger than the truth and the servo demands an absurd correction.
+
+    This filter is *purely temporal*: any event closer than ``min_spacing_s``
+    to the previous accepted event is dropped.  No assumption about PHC
+    alignment, second boundaries, pulse width, or oscillator state — works
+    during cold-start bootstrap, during steady-state servo, and across
+    arbitrary GPS receiver pulse-width configurations up to ~400 ms.
+
+    Default ``min_spacing_s`` of 0.4 s is chosen to:
+    - safely reject the falling edge of pulses up to ~400 ms wide,
+    - safely accept the rising edge of the next 1 Hz period (1.0 - 0.4 = 0.6 s
+      margin),
+    - leave headroom for jitter and clock skew during bootstrap.
+
+    For PPS rates other than 1 Hz, instantiate with a smaller spacing
+    (e.g. ``min_spacing_s=0.04`` for 10 Hz).  The filter has no concept of
+    "expected rate" beyond this minimum.
+    """
+
+    def __init__(self, min_spacing_s: float = 0.4):
+        self.min_spacing_s = min_spacing_s
+        self._last_phc_s: float | None = None
+        self.dropped: int = 0
+        self.accepted: int = 0
+
+    def accept(self, phc_sec: int, phc_nsec: int) -> bool:
+        """Return True if the (phc_sec, phc_nsec) event should be processed.
+
+        Drops events whose PHC time is within ``min_spacing_s`` of the
+        last accepted event's PHC time.  Updates internal state on accept.
+        """
+        ts = phc_sec + phc_nsec * 1e-9
+        if self._last_phc_s is not None and (ts - self._last_phc_s) < self.min_spacing_s:
+            self.dropped += 1
+            return False
+        self._last_phc_s = ts
+        self.accepted += 1
+        return True
+
+    def reset(self) -> None:
+        """Forget the previous accepted event (e.g. after a PHC step)."""
+        self._last_phc_s = None
+
+
 # ── PTP ioctl constants (from linux/ptp_clock.h) ─────────────────────── #
 
 PTP_CLK_MAGIC = ord('=')
@@ -176,6 +233,71 @@ class PtpDevice:
         sec, nsec, _reserved, index = struct.unpack_from('<qIII', data, 0)
         r_more, _, _ = select.select([self.fd], [], [], 0.0)
         return (sec, nsec, index, recv_mono, bool(r_more), 0.0)
+
+    def read_extts_dedup(self, dedup, timeout_ms=1500):
+        """read_extts() with a DualEdgeFilter applied to suppress falling edges.
+
+        Calls read_extts in a loop until an event passes the filter or the
+        deadline is reached.  Returns the same tuple shape as read_extts(),
+        or None on timeout.
+
+        Note for one-shot use: if ``dedup`` has no prior state, the very
+        first event is always accepted regardless of which edge it is.
+        For one-shot reads where you need a confirmed rising edge (e.g.
+        bootstrap phase verification), use ``read_one_rising_edge`` instead.
+        """
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                return None
+            ev = self.read_extts(timeout_ms=remaining_ms)
+            if ev is None:
+                return None
+            if dedup.accept(ev[0], ev[1]):
+                return ev
+            # rejected — loop and try the next event
+
+    def read_one_rising_edge(self, channel_unused=None,
+                             min_spacing_s: float = 0.4,
+                             collection_window_s: float = 1.3,
+                             timeout_s: float = 3.0):
+        """One-shot read that guarantees the returned event is a rising edge.
+
+        Reads EXTTS events for at least ``collection_window_s`` (default 1.3 s,
+        slightly longer than one PPS period at 1 Hz) so that *at least one*
+        full PPS period passes through the filter, then returns the *last*
+        accepted event.  After one full period the last accepted event is
+        always the leading edge of a pair (a rising edge), regardless of
+        whether the first event happened to land on a falling edge.
+
+        Returns ``(sec, nsec, index, recv_mono, queue_remains, parse_age_s)``
+        on success, or ``None`` if no events arrive within ``timeout_s``.
+
+        EXTTS must already be enabled on the relevant channel before calling.
+        """
+        dedup = DualEdgeFilter(min_spacing_s=min_spacing_s)
+        deadline_total = time.monotonic() + timeout_s
+        first_accept_mono = None
+        last_accepted = None
+        while time.monotonic() < deadline_total:
+            remaining_total_ms = int((deadline_total - time.monotonic()) * 1000)
+            if remaining_total_ms <= 0:
+                break
+            ev = self.read_extts(timeout_ms=min(2000, remaining_total_ms))
+            if ev is None:
+                if last_accepted is None:
+                    return None  # nothing came; bubble up the timeout
+                break
+            if dedup.accept(ev[0], ev[1]):
+                if first_accept_mono is None:
+                    first_accept_mono = time.monotonic()
+                last_accepted = ev
+                # Once we've held a stable accepted event for at least one
+                # full period, the last one is provably a rising edge.
+                if time.monotonic() - first_accept_mono >= collection_window_s:
+                    break
+        return last_accepted
 
     def read_adjfine(self):
         """Read current PHC frequency adjustment in ppb."""

@@ -1304,7 +1304,7 @@ def _setup_servo(args, known_ecef, qerr_store):
             )
 
     # Import PTP constants for pin setup
-    from peppar_fix.ptp_device import PTP_PF_EXTTS
+    from peppar_fix.ptp_device import PTP_PF_EXTTS, DualEdgeFilter
 
     extts_channel = args.extts_channel
     extts_ok = False
@@ -1343,8 +1343,12 @@ def _setup_servo(args, known_ecef, qerr_store):
             return 1
 
     # Verify PPS is actually arriving before committing to the servo loop.
+    # Use a DualEdgeFilter so the i226 dual-edge quirk doesn't fool the
+    # one-shot test (it would otherwise sometimes return the falling edge,
+    # which still proves PPS is arriving but is misleading for diagnostics).
+    extts_dedup = DualEdgeFilter()
     if extts_ok:
-        test_pps = ptp.read_extts(timeout_ms=3000)
+        test_pps = ptp.read_extts_dedup(extts_dedup, timeout_ms=3000)
         if test_pps is None and not args.ticc_drive:
             log.error("No PPS event within 3s after enabling EXTTS — "
                       "check PPS wiring, pin config, and PTP device")
@@ -1392,13 +1396,31 @@ def _setup_servo(args, known_ecef, qerr_store):
     ticc_log_f = None
     ticc_log_w = None
 
+    last_dedup_log_mono = [time.monotonic()]
+
     def extts_reader():
         while not stop_pps.is_set():
             event = ptp.read_extts(timeout_ms=1500)
             if event is None:
                 continue
-            delay_injector.maybe_inject_delay(f"ptp:{args.servo}")
             phc_sec, phc_nsec, index, recv_mono, queue_remains, parse_age_s = event
+            # Drop the falling edge of the i226 dual-edge timestamping quirk:
+            # when the PPS pulse is wide (e.g. F9T default ~100 ms), the i226
+            # reports both rising and falling edges and the engine would
+            # otherwise see ~2 events/sec.  See ptp_device.DualEdgeFilter and
+            # docs/madhat-bringup-2026-04-07.md stumble #10.
+            if not extts_dedup.accept(phc_sec, phc_nsec):
+                # Periodic summary so the user can see the filter working,
+                # without spamming once-per-event log lines.
+                now = time.monotonic()
+                if now - last_dedup_log_mono[0] > 60.0:
+                    log.info("EXTTS dual-edge filter: dropped %d, accepted %d "
+                             "(min_spacing=%.3fs)",
+                             extts_dedup.dropped, extts_dedup.accepted,
+                             extts_dedup.min_spacing_s)
+                    last_dedup_log_mono[0] = now
+                continue
+            delay_injector.maybe_inject_delay(f"ptp:{args.servo}")
             base_confidence = estimate_correlation_confidence(
                 queue_remains=queue_remains,
                 parse_age_s=parse_age_s,
