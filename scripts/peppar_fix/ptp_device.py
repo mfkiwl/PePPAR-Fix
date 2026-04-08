@@ -4,10 +4,64 @@ import array
 import ctypes
 import ctypes.util
 import fcntl
+import logging
 import os
 import select
 import struct
 import time
+
+log = logging.getLogger(__name__)
+
+
+def _stock_igc_freq_mode_workaround_needed(ptp_path: str) -> bool:
+    """Detect when this PTP device is on a stock (unpatched) igc driver.
+
+    Stock igc has a special case in its PEROUT request handler:
+    when the requested period is exactly 1_000_000_000 ns (1 Hz), it
+    drops the request into hardware frequency mode and ignores the
+    requested start time entirely.  Frequency mode picks its own phase
+    reference from the i226's internal counter, so the resulting 1 PPS
+    output ends up at an arbitrary offset (often 500 ms) from the
+    actual GPS second — disastrous for any tool consuming the PEROUT
+    edge as a 1 PPS reference.
+
+    The TimeHAT igc patch series (drivers/igc-timehat-edge/) removes
+    this special case so 1 Hz uses Target Time mode like every other
+    rate, AND adds the ``edge_check_delay_us`` module parameter as a
+    side effect of its rising-edge filter.  We use the presence of
+    that module parameter as a runtime fingerprint of the patched
+    module — much more reliable than version sniffing.
+
+    Returns True only when:
+      1. The PTP device is backed by the igc driver, AND
+      2. /sys/module/igc/parameters/edge_check_delay_us does not exist
+         (indicating the stock module is loaded).
+
+    On any other driver (ice/E810, e1000e, macb, etc.) this returns
+    False because the bug doesn't apply — those drivers handle 1 Hz
+    PEROUT correctly.  On the patched igc module this returns False
+    because there's nothing to work around.
+
+    The detection is intentionally conservative: if anything in the
+    sysfs walk fails (unexpected layout, permissions, missing files)
+    we return False and use the unmodified period.  Better to leave
+    the period correct on an unknown system than to apply a workaround
+    that might silently introduce drift.
+    """
+    try:
+        phc_basename = os.path.basename(ptp_path)
+        if not phc_basename.startswith("ptp"):
+            return False
+        # /sys/class/ptp/ptpN/device → PCI device → driver symlink
+        sys_path = f"/sys/class/ptp/{phc_basename}/device/driver"
+        driver_name = os.path.basename(os.readlink(sys_path))
+    except (OSError, ValueError):
+        return False
+    if driver_name != "igc":
+        return False
+    return not os.path.exists(
+        "/sys/module/igc/parameters/edge_check_delay_us"
+    )
 
 
 class DualEdgeFilter:
@@ -195,7 +249,32 @@ class PtpDevice:
 
         Use PTP_PEROUT_DUTY_CYCLE flag with 1 ms ON time so the pulse
         is unambiguously a short rising-edge event.
+
+        Stock-igc 1 Hz frequency-mode workaround: when running against
+        a stock (unpatched) Intel igc driver, the kernel intercepts a
+        period of exactly 1_000_000_000 ns and silently switches the
+        i226 hardware into frequency mode, which ignores our start
+        time and produces an output phase-shifted by an arbitrary
+        amount (typically ~500 ms) from the actual GPS second.  When
+        we detect that situation we nudge the requested period by 1 ns
+        to dodge the special-case `==` and force Target Time mode,
+        which respects start time exactly.  The resulting 1 PPB period
+        offset between PEROUT and the PHC is undetectable for our
+        servo and worth the trade for a correctly-phased pulse.
+
+        On the patched TimeHAT igc, on E810 (ice driver), and on any
+        other PHC the period is left at exactly 1_000_000_000 ns.
         """
+        if (period_ns == 1_000_000_000
+                and _stock_igc_freq_mode_workaround_needed(self.path)):
+            log.warning(
+                "Stock igc detected on %s: nudging PEROUT period "
+                "1_000_000_000 → 999_999_999 ns to dodge the 1 Hz "
+                "frequency-mode bug. Install the TimeHAT igc patch "
+                "(drivers/igc-timehat-edge/) for the proper fix.",
+                self.path,
+            )
+            period_ns = 999_999_999
         period_s = period_ns // 1_000_000_000
         period_sub = period_ns % 1_000_000_000
         phc_ns, _sys_ns = self.read_phc_ns()
