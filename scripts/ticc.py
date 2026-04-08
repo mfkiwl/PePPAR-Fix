@@ -153,46 +153,60 @@ class _SharedTiccPort:
         """Wait for TICC to be ready (booting or already running).
 
         The TICC (Arduino Mega) boot sequence after DTR reset:
-          1. Prints config header (# lines)
-          2. Waits ~5s for config menu input
-          3. Prints "# timestamp" sentinel
-          4. Begins timestamp output at ref_sec=1
 
-        We send a CR during the menu wait to accept defaults and
-        shorten the boot.
+          1. Prints the TAPR banner (# lines).
+          2. Prints the loaded configuration (more # lines).
+          3. Waits ~5 s for any keystroke.  *If a key arrives* the
+             firmware drops into an interactive setup menu and waits
+             forever for menu commands.
+          4. If no key arrives within 5 s, the firmware exits the
+             menu wait and begins normal timestamp output.
 
-        Cold-start case: on a freshly-booted host where ModemManager
-        (or any other prober) has already probed the ttyACM device,
-        DTR is left asserted and our HUPCL-clearing open keeps it
-        asserted, so no rising edge ever fires the Arduino's
-        auto-reset.  The TICC sits in pre-boot state forever.  We
-        detect this — no data within ``cold_threshold_s`` seconds —
-        and force a DTR reset, then continue waiting for the boot
-        banner.
+        Critically, **we do NOT send any keystrokes during the boot
+        wait**.  Earlier versions of this code sent ``\\r`` "to skip
+        the menu", but the TICC firmware interprets that as a key
+        press and *enters* the menu, leaving the chip stuck waiting
+        for a menu command instead of producing timestamps.  Empty
+        silence is what makes the menu wait time out.
+
+        Cold-start case (the reason this method ever needs to do
+        anything): on a freshly-booted host where ModemManager (or
+        any other prober) has already touched the ttyACM device,
+        DTR is left asserted and our subsequent HUPCL-clearing open
+        keeps it asserted, so no rising edge ever fires the
+        Arduino's auto-reset capacitor.  The TICC sits in pre-boot
+        state and never speaks.  We detect this — no timestamp line
+        within ``cold_threshold_s`` seconds — and force a DTR
+        low-then-high pulse, after which the boot sequence runs
+        normally.
 
         Warm case: if the TICC is already running (typical on a
-        long-uptime host), the first line is usually a valid
+        long-uptime host), the first line read is usually a valid
         timestamp and we return immediately without resetting.
 
-        Raises TimeoutError if the TICC doesn't produce a valid
-        timestamp even after a forced reset.
+        Raises TimeoutError if no timestamp arrives even after a
+        forced reset.
         """
         assert self.serial is not None
         cold_threshold_s = 3.0
-        # We get one forced-reset attempt before giving up.  After a
-        # reset the Arduino takes ~10–15 s to print its banner and
-        # reach steady state, so the overall budget is ~25 s.
+        # One forced-reset attempt is allowed.  After a reset the
+        # Arduino takes ~10 s of banner + 5 s of menu wait + ~1 s
+        # of settle before timestamps start, so the post-reset
+        # budget needs to be at least ~18 s.
         budget_s = 25.0
         deadline = _time.monotonic() + budget_s
         cold_kick_at = _time.monotonic() + cold_threshold_s
         seen_header = False
-        sent_cr = False
         seen_sentinel = False
         forced_reset = False
         while _time.monotonic() < deadline:
-            # Cold-state detection: if nothing has shown up after
-            # cold_threshold_s and we haven't reset yet, force one.
-            if (not forced_reset and not seen_header
+            # Cold-state detection: if no *timestamp line* has shown
+            # up after cold_threshold_s and we haven't reset yet,
+            # force one.  We trigger the reset on lack-of-timestamps
+            # rather than lack-of-headers because the TICC can also
+            # be stuck in the menu (header-only state) if any code
+            # path has sent a stray byte to it.
+            if (not forced_reset
                     and _time.monotonic() >= cold_kick_at):
                 self._force_dtr_reset()
                 forced_reset = True
@@ -220,22 +234,17 @@ class _SharedTiccPort:
             line = raw.decode(errors="replace").strip()
             if not line:
                 continue
-            # Valid timestamp line — TICC is ready, whether we went
-            # through a boot sequence or it was already running.
+            # Valid timestamp line — TICC is in steady-state output.
             if _LINE_RE.match(line):
                 break
             if line.startswith("#"):
                 seen_header = True
-                # Send CR during menu wait to accept defaults and
-                # skip the ~5s menu timeout.  Send once, early.
-                if not sent_cr:
-                    try:
-                        self.serial.write(b"\r")
-                    except (serial.SerialException, OSError):
-                        pass
-                    sent_cr = True
                 if _BOOT_SENTINEL in line:
                     seen_sentinel = True
+            # Note: we deliberately do NOT write anything to the
+            # serial port here.  Any byte we send during the boot
+            # menu wait would push the firmware into interactive
+            # setup mode and break the boot.
         else:
             raise TimeoutError(
                 f"TICC on {self.port} did not produce data within {budget_s:.0f}s "
