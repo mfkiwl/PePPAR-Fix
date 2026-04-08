@@ -467,11 +467,91 @@ setup procedure as a standard prereq, alongside `git`.  It's a
 ~few-MB package and gives you the full standard tooling.  The
 `peppar-install` script should also install it.
 
+### #12 — TICC #3 doesn't reset properly when opened by either probe or engine
+
+**Tried**: read TICC #3 events alongside EXTTS during stumble #10
+diagnosis.  Then ran the full peppar-fix engine with TICC #3 as the
+TICC source.
+
+**Observed**: in *both* paths, the TICC produces no data:
+
+```
+TICC reader reconnect after error: TICC on /dev/ticc3 did not
+produce data within 20s (seen_header=False, seen_sentinel=False)
+```
+
+The engine retries on a 20 s cycle and never gets a header or a
+sentinel back from the Arduino.  The TICC LEDs were observed
+triggering during this period, so chA and chB *are* receiving edges
+— the chip just isn't shipping serial output to the host.
+
+**Background**: TAPR TICCs use Arduino Mega 2560 which reboots on
+the rising edge of DTR.  After the reboot the TICC re-prints its
+config header and starts emitting `chA`/`chB` lines.  CLAUDE.md
+documents the standard workaround:
+
+> The fix is to clear the `HUPCL` termios flag, which tells the
+> kernel to leave DTR asserted when the fd closes [...]
+> All TICC access should go through `scripts/ticc.py` which handles
+> this automatically via the `_SharedTiccPort` helper.
+
+The `_SharedTiccPort` path is the *anti*-reset path: it preserves
+DTR across opens so that subsequent opens don't reboot the chip.
+That's correct for steady-state operation, but it assumes the chip
+*was* booted at some prior point.
+
+On a fresh host where the TICC has never been opened before — like
+MadHat tonight — the very first `_SharedTiccPort.acquire()` opens
+the port with `HUPCL` already cleared, DTR stays high through every
+operation, the Arduino *never* sees the rising edge that would
+trigger its reset, and it sits in whatever state it powered up in
+(which on a TAPR TICC is pre-boot, waiting for a reset).
+
+The user's expectation was that the engine's open path would
+naturally kick the TICC.  It doesn't, because the entire TICC
+helper is designed *not* to.
+
+**Stumble character**: a chicken-and-egg between the existing
+no-reset-on-reopen design and the cold-start case.  Existing
+behavior is correct for "TICC has been booted, just reconnect".
+Wrong for "TICC was never booted on this host."
+
+**Prevent next time**:
+1. Add a one-shot cold-start kick: on the very first `acquire()`
+   per host boot (or whenever no header has been seen), open the
+   port *with* `HUPCL` set, close it, sleep ~15 s, then proceed
+   normally.  Subsequent acquires use the no-reset path.
+2. Or expose a `peppar-fix --kick-ticc` flag (or
+   `tools/reset_ticc.py`) that the operator runs once after
+   plugging in a TICC for the first time.
+3. Or detect "no header within N seconds" and trigger an automatic
+   reset cycle from the existing reader thread, instead of
+   reconnecting endlessly to a chip that won't talk.
+
 ## Status
 
-**As of 2026-04-07 evening**: bring-up reached Phase 2 servo on
-first attempt after fixing #1–#7, then hit stumble #10 (PHC
-bootstrap residual / runaway adjfine) which is hardware-level and
-requires physical inspection.  Stumbles #1–#9 are real lessons
-learned and should be folded into `docs/lab-operations.md` and a
-future `peppar-install` script regardless of how #10 resolves.
+**As of 2026-04-07 night, after stumble #10 fixed**: MadHat is
+running peppar-fix end-to-end with a factory-default F9T-BOT and
+the engine's new dual-edge filter (commit `aa20423`).  60-second
+test run produced clean Carrier-source convergence:
+
+| Epoch | Carrier err | adjfine |
+|---|---|---|
+| 20 | -903 ns | +47 ppb |
+| 30 | -461 ns | +44 ppb |
+| 40 |  -59 ns | +39 ppb |
+
+Settled at adjfine = **+33.9 ppb** (i226 TCXO normal range).
+49 epochs in 50 s, clean shutdown, drift file saved.  No
+re-bootstrap loop.  No UBX overrides on the F9T.  No kernel
+patches required.
+
+**Outstanding for tomorrow**:
+- Stumble #12 (TICC cold-start reset) — engine sees no TICC data,
+  so the run above used the EXTTS+Carrier path only, not TICC-drive.
+  Once the TICC kick is implemented, MadHat becomes a full second
+  measurement chain.
+- Fold stumbles #1–#7, #9, #11 into `docs/lab-operations.md`.
+- Decide whether to also pursue the upstream TimeHat igc kernel
+  patch for defense in depth, even though the engine-side filter
+  alone is sufficient.
