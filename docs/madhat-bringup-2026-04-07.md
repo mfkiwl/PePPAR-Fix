@@ -357,6 +357,116 @@ all subsequent bring-up.
    ~1 s apart with reasonable jitter, before any bootstrap is
    attempted.
 
+### #10 (resolved) — Root cause: i226 dual-edge timestamping + 100 ms F9T PPS pulse + missing kernel patch
+
+After diagnosis the hardware is fine and the engine is fine.  The
+runaway adjfine demand was caused by a setup gap, not a bug in the
+peppar-fix code.
+
+**Diagnostic chain**:
+
+1. `phc_ctl /dev/ptp0 cmp` showed the i226 PHC running ~564 ppb fast
+   vs CLOCK_REALTIME — perfectly normal TCXO behavior.  Hardware is
+   healthy.
+2. Direct EXTTS reads on pin 1 showed **2.00 events/sec, in two
+   tight clusters 100 ms apart**, with ~25 ns jitter spread within
+   each cluster and ~3 ppb relative drift between PHC and the source
+   over a 7 s window.  Both numbers are consistent with real F9T PPS
+   edges; my initial suspicion of "PHC-internal source" was wrong.
+3. Unplugging the SMA from PPS IN dropped the EXTTS event rate to
+   zero, confirming the events are externally sourced.
+
+**Root cause**: the i226's PTP hardware unconditionally timestamps
+**both rising and falling edges** of any signal on its EXTTS pin
+("dual-edge quirk", documented in CLAUDE.md but not internalized by
+me before this debugging session).  When a GPS receiver is configured
+to emit a *long* PPS pulse — F9T-BOT uses ~100 ms by default — the
+i226 reports two events per second, 100 ms apart.  The peppar-fix
+engine's PPS reader does not filter falling edges and treats whichever
+one it sees as "the PPS edge" for that epoch.  When it picks the
+falling edge it computes a phase error 100 ms larger than the truth,
+the servo demands +3 Mppb to chase, hits the actuator rail, and
+triggers the auto re-bootstrap exit.
+
+**Confirmed by upstream documentation**: both the Time Appliances
+Project [TimeHAT GitHub README](https://github.com/Time-Appliances-Project/TimeHAT)
+and the [Tindie product listing](https://www.tindie.com/products/timeappliances/timehat-i226-nic-with-pps-inout-for-rpi5/)
+explicitly acknowledge this:
+
+> "Note: I226 driver passes both edges to Linux, so both rising and
+> falling edges will be listed.  A fix for this is listed below,
+> requires patching and building kernel."
+
+> "The I226 hardware triggers timestamps on both rising and falling
+> edges.  The stock driver requires `PTP_STRICT_FLAGS` with both
+> edges enabled, making single-edge filtering impossible.  The patch
+> addresses this by implementing a GPIO-level workaround that reads
+> pin state after each interrupt and filters unwanted edges."
+
+So the official Time Appliances Project answer is **patch the kernel
+igc driver**.  TimeHat #1 has been silently running this patched
+driver since the user set it up before this conversation started.
+MadHat is on a stock Trixie Lite kernel and has not been patched —
+hence the dual events.
+
+**Two fixes, both worth doing**:
+
+1. **Patch the igc driver on MadHat the same way TimeHat #1 is
+   patched**.  This is the upstream-blessed fix.  Steps need to be
+   captured from whatever procedure the user originally followed for
+   TimeHat #1, then copied into this repo's documentation so future
+   hosts don't relearn.
+2. **Reconfigure F9T-BOT to emit a short PPS pulse via UBX CFG-TP5**
+   (e.g., 10 µs).  Workaround: makes the falling edge close enough
+   to the rising edge that the i226 can't distinguish them and only
+   one event is reported per second.  Doesn't require kernel patching.
+   Survives kernel updates.  Will silently break if the F9T config
+   is ever factory-reset.  Likely TimeHat #1's F9T is *also*
+   configured this way as defense in depth.
+
+**Stumble character**: a setup gap, not a peppar-fix bug.  But the
+engine should detect this failure mode and emit a clear diagnostic
+instead of looping in re-bootstrap forever.  See defensive engine
+work below.
+
+**Prevent next time**:
+1. `docs/lab-operations.md` First-time setup must include: "On
+   TimeHat hosts, apply the Time Appliances Project igc kernel
+   patch from <repo URL> before first run."  Include the full DKMS
+   build procedure.
+2. `docs/lab-operations.md` should also include: "Verify the F9T's
+   PPS pulse width is configured for short (~10 µs) pulses via
+   UBX CFG-TP5 — see `tools/configure_f9t_pps_pulse.py` (TODO)."
+3. The peppar-fix engine should grow a falling-edge filter as a
+   defensive guard: drop any EXTTS event whose nsec is more than,
+   say, 10 ms from the nearest integer second in PHC time.  Document
+   it as a workaround for unpatched igc and as a safety net for
+   misconfigured F9T pulse widths.
+4. The engine's re-bootstrap retry loop should detect "we just did
+   N consecutive re-bootstraps in M seconds" and bail out with a
+   diagnostic like "PHC error consistently >100 ms after bootstrap;
+   suspect dual-edge EXTTS or wrong PPS source — see
+   docs/madhat-bringup-2026-04-07.md stumble #10."
+
+### #11 — `linuxptp` not in the install instructions; no `phc_ctl` / `testptp` for diagnosis
+
+**Tried**: `phc_ctl /dev/ptp0 cmp` to compare PHC rate against the
+system clock while debugging stumble #10.
+
+**Failed**: `phc_ctl: command not found`.  `dpkg -l linuxptp` shows no
+package installed.
+
+**Missing**: `lab-operations.md` first-time setup never installs
+`linuxptp`.  We rely on `phc_ctl`, `testptp`, `pmc`, `ptp4l`, and
+`phc2sys` for *every* PHC diagnostic — including the ones the
+ptp4l-supervision design uses to enforce clockClass — and they all
+ship in this one Debian package.
+
+**Prevent next time**: add `apt install linuxptp` to the first-time
+setup procedure as a standard prereq, alongside `git`.  It's a
+~few-MB package and gives you the full standard tooling.  The
+`peppar-install` script should also install it.
+
 ## Status
 
 **As of 2026-04-07 evening**: bring-up reached Phase 2 servo on
