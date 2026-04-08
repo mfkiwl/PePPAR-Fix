@@ -1,0 +1,34 @@
+[peppar]
+# Bring-up profile for the i226 add-in card on host ocxo (TimeHAT v6)
+# alongside the existing E810 + onboard PTP-slave NIC.  See
+# docs/ocxo-i226-bringup-2026-04-08.md for the full bring-up history.
+#
+# F9T-TOP on USB CDC ACM via the stable by-id path — survives
+# enumeration shuffling between /dev/ttyACM0 and /dev/ttyACM1 across
+# reboots and replugs.  Don't use /dev/gnss0 (the kernel I2C path):
+# os.write() writes to it silently fail (project_e810_i2c_write).
+serial = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"
+baud = 38400
+ubx_port = "USB"
+receiver = "f9t"
+
+# i226 PHC.  /dev/ptp0 because adding the i226 in front of the existing
+# E810 + onboard NIC at boot put it first in PCI enumeration order.
+# After 2026-04-08 the layout is:
+#   /dev/ptp0 → i226 (this card)
+#   /dev/ptp1 → mbeth (onboard e1000e PTP-slave)
+#   /dev/ptp2 → e810p0 (Intel E810-XXVDA4T, OCXO PHC)
+ptp_profile = "i226"
+ptp_dev = "/dev/ptp0"
+
+ntrip_conf = "ntrip.conf"
+eph_mount = "BCEP00BKG0"
+
+# Approximate antenna position from a live LS fix on 2026-04-08 after
+# the antenna was recabled.  Refine to a converged PPP fix once the
+# bring-up is fully verified — the engine will save the refined value
+# back to data/position.json automatically.
+known_pos = "41.8437,-88.1036,141"
+position_file = "data/position.json"
+
+systems = "gps,gal"
