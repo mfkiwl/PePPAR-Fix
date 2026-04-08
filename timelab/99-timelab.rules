@@ -21,3 +21,21 @@ SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="0403", ENV{ID_SERIAL_SHORT}=="D30GD1PE", S
 # ── PTP hardware clocks (igc driver, TimeHAT / OTC boards) ──
 SUBSYSTEM=="ptp", KERNEL=="ptp[0-9]*", DRIVERS=="igc", MODE="0664", GROUP="dialout"
 
+# ── Host ocxo: stable network interface names (MAC-keyed) ──
+# Three NIC families share this host and the kernel/systemd default
+# names (enp1s0f0np0, enp2s0, eno1) don't make any of them obvious.
+# Identical-board swap is considered unlikely so MACs are pinned.
+# Other hosts are unaffected — the MAC match makes these rules ocxo-only.
+#
+# E810-XXVDA4T (Intel ice driver) — the OCXO-disciplined PHC, /dev/ptp1
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="ice", ATTR{address}=="50:7c:6f:53:d5:38", NAME="e810p0"
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="ice", ATTR{address}=="50:7c:6f:53:d5:39", NAME="e810p1"
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="ice", ATTR{address}=="50:7c:6f:53:d5:3a", NAME="e810p2"
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="ice", ATTR{address}=="50:7c:6f:53:d5:3b", NAME="e810p3"
+#
+# TimeHAT v6 i226 add-in (Intel igc driver) — second PHC for cross-comparison
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="igc", ATTR{address}=="f0:b2:b9:31:a7:86", NAME="i226"
+#
+# Onboard motherboard NIC (Intel e1000e) — PTP slave-only, no PHC servo use
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="e1000e", ATTR{address}=="a0:8c:fd:da:a9:b1", NAME="mbeth"
+

@@ -132,9 +132,9 @@
       "platform": "x86_64",
       "os": "Linux",
       "interfaces": [
-        "eno1",
-        "enp1s0f1np1",
-        "E810 PHC /dev/ptp1"
+        "mbeth (onboard, e1000e, PTP slave-only)",
+        "e810p0..e810p3 (Intel E810-XXVDA4T, ice driver, OCXO PHC /dev/ptp1)",
+        "i226 (TimeHAT v6 add-in, igc driver, second PHC for cross-comparison)"
       ],
       "location": "lab rack",
       "status": "active"

@@ -100,8 +100,8 @@ Linux kernel 6.7+ exposes a `dpll` genl family (and Intel ships a
 legacy sysfs view for the same data).  On `ocxo` today:
 
 ```
-/sys/class/net/enp1s0f0np0/device/dpll_1_offset = -241   # picoseconds
-/sys/class/net/enp1s0f0np0/device/dpll_1_state  = 4      # LOCKED_HO_ACQ
+/sys/class/net/e810p0/device/dpll_1_offset = -241   # picoseconds
+/sys/class/net/e810p0/device/dpll_1_state  = 4      # LOCKED_HO_ACQ
 ```
 
 What's exposed: `DPLL_A_PHASE_OFFSET` / `DPLL_A_PIN_PHASE_OFFSET`
