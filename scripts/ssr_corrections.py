@@ -571,13 +571,28 @@ class RealtimeCorrections:
         else:
             self._broadcast_only += 1
 
-        # Apply SSR clock correction
+        # Apply SSR clock correction — but ONLY if the orbit IOD matches.
+        # Clock and orbit corrections from a single AC are a matched pair:
+        # the clock is the satellite's clock error *given that specific orbit*.
+        # Applying the clock without the matching orbit (because the IOD
+        # didn't match our broadcast ephemeris) creates a clock/orbit
+        # mismatch that produces hundreds of meters of pseudorange error.
+        # This is exactly what happened with CAS SSR on 2026-04-09: orbits
+        # were IOD-checked and skipped, but clocks were applied blindly,
+        # and the PPP filter diverged to altitude -600m.
         cc = self.ssr.get_clock(prn)
         if cc is not None:
-            # SSR clock correction is in meters, convert to seconds
-            # Convention: corrected = broadcast + delta_clock / C
-            # (RTKLIB: dts[0] += corr->ssr.dclk[0]/CLIGHT)
-            bcast_clk = bcast_clk + cc.c0 / C
+            # Check IOD consistency (same check as orbit)
+            if bcast_iod is not None and oc is not None and oc.iod == bcast_iod:
+                # SSR clock correction is in meters, convert to seconds
+                # Convention: corrected = broadcast + delta_clock / C
+                bcast_clk = bcast_clk + cc.c0 / C
+            elif bcast_iod is None or oc is None:
+                # No orbit correction available — can't verify IOD.
+                # Apply clock conservatively (broadcast-only orbit is
+                # typically consistent with any recent SSR clock).
+                bcast_clk = bcast_clk + cc.c0 / C
+            # else: IOD mismatch — skip clock too (matched pair with orbit)
         # else: use broadcast clock as-is
 
         return bcast_pos, bcast_clk

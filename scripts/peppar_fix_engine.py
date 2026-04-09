@@ -2106,6 +2106,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 )
             return "no_ticc"
         sources = ticc_only_error_source(ticc_diff_ns, args.ticc_confidence_ns)
+        corr_age_for_inflation = None  # not applicable in TICC-drive mode
     else:
         # Feed PPP calibration: compare PPP-derived qerr against TIM-TP
         # qErr for the first ~10 epochs to determine the constant offset.
