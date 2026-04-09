@@ -149,10 +149,18 @@ class NtripStream:
         status_line = header_str.split("\r\n")[0]
 
         if "200" not in status_line and "ICY 200" not in status_line:
-            # Permanent rejections: bad credentials, missing/dead mountpoint.
+            # Permanent rejections: bad credentials (401/403).
             # Distinguished from transport failures so the supervisor loop
             # in raw_frames() knows to stop retrying.
-            for code in ("401", "403", "404", "410"):
+            #
+            # NOTE: 404 and 410 are NOT treated as permanent.  NTRIP
+            # casters go through maintenance restarts where mounts
+            # disappear briefly and return 404.  On 2026-04-08 the
+            # Australian caster returned 404 for SSRA00BKG0 during a
+            # maintenance window; treating it as fatal killed Carrier
+            # for 93% of TimeHat's overnight run.  404/410 are retried
+            # with the normal exponential backoff.
+            for code in ("401", "403"):
                 if code in status_line:
                     self._fatal = True
                     self._fatal_reason = status_line
