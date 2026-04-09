@@ -2592,8 +2592,30 @@ def run(args):
     corrections = RealtimeCorrections(beph, ssr)
     obs_queue = queue.Queue(maxsize=100)
 
-    # QErr store (shared with serial reader if servo is active)
-    qerr_store = QErrStore() if args.servo else None
+    # QErr store (shared with serial reader if servo is active).
+    # If --qerr-log was specified, open a CSV that captures every
+    # TIM-TP message with its CLOCK_MONOTONIC arrival time, for
+    # post-hoc index-matching against TICC chB events.
+    qerr_store = None
+    qerr_log_f = None
+    if args.servo:
+        qerr_log_writer = None
+        if getattr(args, 'qerr_log', None):
+            try:
+                qerr_log_f = open(args.qerr_log, 'w', newline='')
+                qerr_log_writer = csv.writer(qerr_log_f)
+                qerr_log_writer.writerow([
+                    'host_timestamp', 'host_monotonic', 'qerr_ns',
+                    'tow_ms', 'qerr_invalid',
+                ])
+                qerr_log_f.flush()
+                log.info("qErr CSV log: %s", args.qerr_log)
+            except OSError as e:
+                log.error("Failed to open qerr_log %s: %s", args.qerr_log, e)
+                qerr_log_writer = None
+                qerr_log_f = None
+        qerr_store = QErrStore(log_writer=qerr_log_writer,
+                               log_file=qerr_log_f)
 
     # Load NTRIP config
     load_ntrip_config(args)
@@ -2956,7 +2978,23 @@ Two-phase operation:
     ticc.add_argument("--ticc-port", default=None,
                       help="TICC serial port for experimental measurement/servo input")
     ticc.add_argument("--ticc-log", default=None,
-                      help="Optional raw TICC CSV log path for lab analysis")
+                      help="Optional raw TICC CSV log path for lab analysis. "
+                           "Each row records host_monotonic when the line "
+                           "arrived from the TICC over USB, plus ref_sec/"
+                           "ref_ps/channel.  Pair with --qerr-log to do "
+                           "post-hoc qErr correction by index-matching on "
+                           "CLOCK_MONOTONIC.")
+    ticc.add_argument("--qerr-log", default=None,
+                      help="Optional raw qErr CSV log path.  Each row "
+                           "captures one TIM-TP message from the F9T with "
+                           "(host_timestamp, host_monotonic, qerr_ns, "
+                           "tow_ms, qerr_invalid) — host_monotonic is "
+                           "CLOCK_MONOTONIC at the moment the message was "
+                           "parsed, the same clock the engine's "
+                           "match_pps_mono uses internally.  Independent "
+                           "of servo state; lets post-processing redo the "
+                           "qErr ↔ TICC chB matching the engine does in "
+                           "real time, without sawtooth dewrap heuristics.")
     ticc.add_argument("--ticc-baud", type=int, default=115200,
                       help="TICC baud rate (default: 115200)")
     ticc.add_argument("--ticc-phc-channel", choices=["chA", "chB"], default="chA",

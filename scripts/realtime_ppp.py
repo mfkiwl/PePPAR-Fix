@@ -144,11 +144,30 @@ class RtcmMessageView:
 # ── Serial observation reader ──────────────────────────────────────────────── #
 
 class QErrStore:
-    """Thread-safe history of TIM-TP quantization error samples."""
+    """Thread-safe history of TIM-TP quantization error samples.
 
-    def __init__(self, maxlen=128):
+    The optional ``log_writer`` is a csv.writer (or similar) configured
+    with the header
+    ``host_timestamp,host_monotonic,qerr_ns,tow_ms,qerr_invalid``.
+    When set, every call to ``update()`` writes one row, capturing the
+    full TIM-TP arrival stream as raw as possible — independent of
+    servo epochs, EXTTS reads, or any downstream consumer.
+
+    The intended use is for post-hoc index-matching against the TICC
+    chB log: each TICC csv row already has ``host_monotonic`` (when the
+    line arrived from the TICC over USB CDC ACM), and each qErr csv row
+    has ``host_monotonic`` (when the TIM-TP UBX message was parsed
+    after arrival from the F9T).  Both are CLOCK_MONOTONIC on the same
+    host, so they can be matched directly without any wall-clock,
+    GPS TOW, or sawtooth-dewrap heuristics — same way the engine's
+    QErrStore.match_pps_mono matches qErr to PPS events at runtime.
+    """
+
+    def __init__(self, maxlen=128, log_writer=None, log_file=None):
         self._lock = threading.Lock()
         self._samples = deque(maxlen=maxlen)
+        self._log_writer = log_writer
+        self._log_file = log_file  # so .flush() works after every write
 
     @staticmethod
     def _normalize_tow_ms(tow_ms):
@@ -174,13 +193,46 @@ class QErrStore:
             delta -= week_ms
         return int(delta)
 
-    def update(self, qerr_ps, tow_ms):
-        """Store new qErr (picoseconds from TIM-TP) as nanoseconds."""
+    def update(self, qerr_ps, tow_ms, qerr_invalid=False):
+        """Store new qErr (picoseconds from TIM-TP) as nanoseconds.
+
+        Captures CLOCK_MONOTONIC at the moment the message is processed.
+        If a log writer was provided at construction time, also emits
+        one row to the qErr CSV log so post-processing can index-match
+        against TICC chB events by monotonic time.
+
+        ``qerr_invalid`` is the qErrInvalid flag from TIM-TP.  Invalid
+        samples are still recorded to the log (for completeness) but
+        are not appended to the in-memory deque the engine uses for
+        live correlation.
+        """
+        host_time = time.monotonic()
+        host_wall = time.time()
+        norm_tow = self._normalize_tow_ms(tow_ms)
+        qerr_ns = qerr_ps / 1000.0
+
+        if self._log_writer is not None:
+            try:
+                self._log_writer.writerow([
+                    f"{host_wall:.6f}",
+                    f"{host_time:.9f}",
+                    f"{qerr_ns:.3f}",
+                    norm_tow if norm_tow is not None else "",
+                    1 if qerr_invalid else 0,
+                ])
+                if self._log_file is not None:
+                    self._log_file.flush()
+            except (OSError, ValueError):
+                pass  # never let logging break the stream
+
+        if qerr_invalid:
+            return  # don't pollute the in-memory store with invalid samples
+
         with self._lock:
             self._samples.append({
-                "qerr_ns": qerr_ps / 1000.0,
-                "tow_ms": self._normalize_tow_ms(tow_ms),
-                "host_time": time.monotonic(),
+                "qerr_ns": qerr_ns,
+                "tow_ms": norm_tow,
+                "host_time": host_time,
             })
 
     def get(self, max_age_s=2.0):
@@ -419,9 +471,15 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     qerr_invalid = bool(flags & 0x10) if isinstance(flags, int) else False
                 else:
                     qerr_invalid = bool(decoded_invalid)
-                if qerr_ps is not None and not qerr_invalid:
-                    qerr_store.update(qerr_ps, tow_ms)
-                elif qerr_invalid:
+                if qerr_ps is not None:
+                    # Forward to the store unconditionally so the qErr
+                    # log captures invalid samples too — invalid ones
+                    # are filtered out of the in-memory deque inside
+                    # update(), but they're useful for accounting in
+                    # post-processing.
+                    qerr_store.update(qerr_ps, tow_ms,
+                                      qerr_invalid=qerr_invalid)
+                if qerr_invalid:
                     now = time.monotonic()
                     if now - last_qerr_invalid_log > 30.0:
                         log.warning(
