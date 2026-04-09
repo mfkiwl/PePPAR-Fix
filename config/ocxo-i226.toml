@@ -23,6 +23,7 @@ ptp_dev = "/dev/ptp0"
 
 ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
+ssr_mount = "SSRA01CAS1"
 
 # Approximate antenna position from a live LS fix on 2026-04-08 after
 # the antenna was recabled.  Refine to a converged PPP fix once the
