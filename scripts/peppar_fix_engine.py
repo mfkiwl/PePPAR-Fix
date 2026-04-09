@@ -622,7 +622,7 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
                 # plenty for PPPFilter seeding.
                 _beph = corrections.beph
                 x_ls, ok, n_sv = ls_init(observations, _beph, gps_time,
-                                          clk_file=_beph)
+                                          clk_file=None)
                 if not ok or n_sv < 4:
                     log.info(f"Waiting for enough satellites (got {n_sv})")
                     continue
@@ -2794,7 +2794,7 @@ def run(args):
                 # for validation gives ~5-10m accuracy which is plenty for
                 # the 100m threshold check.
                 x_ls, ok, n_sv = ls_init(observations, beph, gps_time,
-                                          clk_file=beph)
+                                          clk_file=None)
                 if not ok or n_sv < 6:
                     continue
                 ls_ecef = x_ls[:3]
