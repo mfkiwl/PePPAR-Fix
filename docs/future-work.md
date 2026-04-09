@@ -4,6 +4,146 @@ Improvement candidates drawn from SatPulse comparison and operational
 experience.  These are independent of each other and can be adopted
 incrementally.
 
+## Three-source position consensus + self-healing FixedPosFilter
+
+**What**: When the engine is in Phase 2 (FixedPosFilter, position
+locked), maintain *three independent* estimates of the antenna's
+position and use majority consensus to distinguish "antenna physically
+moved" from "internal filter state corrupted".  When the FixedPos
+EKF blows up, reset it from the consensus position and coast on
+PPS+qErr until it reconverges, instead of the current behavior of
+exiting the engine and waiting for a manual restart.
+
+**Why**: 2026-04-08 evening, MadHat's overnight died at 51 minutes
+because the FixedPosFilter's residual-RMS watchdog tripped:
+
+```
+[3030] dt_rx=+8.18 ms ±0.11 ns  rms=  28 m  ← normal
+[3035] dt_rx=−12.04 ms ±0.11 ns rms=1323 m  ← BLOWN UP
+```
+
+The dt_rx jumped 20 ms in one epoch while the EKF's own σ stayed
+at 0.1 ns — the textbook "misplaced confidence" failure.  Most likely
+cause: simultaneous undetected cycle slips on multiple satellites,
+which the EKF "absorbed" into its position+clock states while
+reporting unchanged covariance.  The watchdog correctly detected
+something was wrong, but its only diagnostic message was "antenna may
+have moved!" — which was *false*.  TimeHat (different F9T on the same
+physical antenna via splitter) ran fine through the same instant, so
+the antenna obviously hadn't moved.  The engine had no way to tell.
+
+The current architecture has only **one** position-aware EKF in
+steady state (FixedPosFilter), and its watchdog can't disambiguate
+"antenna moved" from "filter corrupted".  Adding two independent
+position references gives us a 2-of-3 vote.
+
+**The three sources**:
+
+1. **Live PPP background monitor** — a second `PPPFilter` instance
+   running in its own thread on the same observation stream (or a
+   subsampled copy, e.g. one epoch every 10–30 s to keep CPU low).
+   Independent state vector, independent ambiguity tracking.  When
+   it converges, its position estimate is an outer-loop sanity check
+   on `known_ecef`.  If it agrees with `known_ecef`, the antenna is
+   where we think it is.  If it disagrees, the antenna actually moved.
+
+2. **F9T's own onboard position fix** — the third opinion.  The F9T
+   runs its own internal position-fixing engine continuously and
+   reports it via `NAV-PVT` (and `NAV-HPPOSECEF` for high precision).
+   We **already enable NAV-PVT** in the receiver config
+   (`scripts/peppar_fix/receiver.py:99`) but currently drop it on the
+   floor in `realtime_ppp.py`.  The plumbing addition is small: stash
+   the latest `NAV-PVT` lat/lon/h into a thread-safe slot and let the
+   monitor read it.  In TIME mode the F9T forces its position, so we
+   need to either run the F9T in NAV mode (defeats the purpose of
+   TIME mode) or use NAV-PVT only as a sanity check that the F9T's
+   *internal* fixed-position state hasn't been disturbed.  Ideally
+   we toggle the F9T out of TIME mode briefly each minute to take a
+   fresh fix — but the cleaner answer is to just leave the F9T in NAV
+   mode and rely on our own EKFs for the precise clock estimation.
+
+3. **The original `known_ecef`** — the position the engine bootstrapped
+   to (or that came from `known_pos`/`position.json`).  This is the
+   "ground truth as of the last bootstrap" that the FixedPosFilter
+   trusts implicitly.
+
+**Consensus logic** (all distances in metres, computed in ECEF):
+
+```
+Δ_PPP    = | bg_PPP_position - known_ecef |
+Δ_F9T    = | F9T_NAV_PVT_position - known_ecef |
+Δ_F9T_v_PPP = | F9T_NAV_PVT_position - bg_PPP_position |
+
+case 1: Δ_PPP ≤ ε   AND  Δ_F9T ≤ ε
+        → all three agree.  If FixedPos watchdog trips here,
+          known_ecef and bg_PPP_position both confirm the antenna
+          is fine.  → RESET FixedPos state from known_ecef, coast
+          on PPS+qErr until FixedPos reconverges.  Self-healing.
+
+case 2: Δ_PPP > ε   AND  Δ_F9T > ε
+        → both independent sources say the antenna moved.
+          known_ecef is stale.  → trigger a real bootstrap, save the
+          new position, restart FixedPos from the new known_ecef.
+
+case 3: Δ_PPP ≤ ε   AND  Δ_F9T > ε  (or vice versa)
+        → disagreement between background sources.  Don't act on
+          either alone.  Hold the alarm and log loud — operator
+          investigation needed.
+
+case 4: Δ_F9T ≤ ε   BUT bg_PPP itself blows up
+        → the background PPP is poisoned (cycle slips, bad SSR).
+          F9T position confirms antenna is fine.  → reset bg_PPP
+          state without touching FixedPos.
+
+Threshold ε: ~5 m for "agreement".  Loose enough that PPP filter
+noise during convergence doesn't trip it; tight enough that real
+antenna moves of >10 m alarm immediately.
+```
+
+**Behavior when FixedPos resets without operator intervention**:
+the engine should stay in steady-state servo on PPS+qErr (whose error
+source confidence is 3 ns) for the ~60–90 seconds it takes the new
+FixedPosFilter to reconverge from `known_ecef`.  PPS+qErr doesn't
+care about `dt_rx` so the corrupted-EKF event doesn't disturb it.
+Once FixedPos's `dt_rx_sigma_ns` drops back below the carrier_max
+threshold and the source competition picks Carrier again, the engine
+is fully back.  No restart, no missed minutes of data, no operator
+woken at 3 am.
+
+**Implementation sketch**:
+
+- New `BackgroundPPPMonitor` thread in `peppar_fix_engine.py`
+- New `F9TPositionStore` (analogous to `QErrStore`) in `realtime_ppp.py`
+- `serial_reader` parses `NAV-PVT` (already enabled) and writes to
+  `F9TPositionStore`
+- `FixedPosFilter` watchdog handler reads both consensus sources
+  before deciding what to do
+- New CLI flag `--bg-ppp-cadence-s` (default: 30 s)
+- New servo CSV column: `consensus_state` (one of `agree`, `f9t_only`,
+  `ppp_only`, `disagreement`, `recovering`)
+
+**CPU/memory cost**: PPP filter on a Pi 5 takes ~2 s of CPU per epoch
+at full rate.  Subsampled to every 30 s, the background monitor
+consumes ~6% of one core.  Memory is one extra EKF state vector
+(dozens of floats per satellite) — negligible.  NAV-PVT adds zero
+cost — we already enable it on the receiver.
+
+**What this would have done last night**: when MadHat's FixedPos
+watchdog tripped at 22:03, the consensus check would have:
+- Read `bg_PPP_position` ≈ `known_ecef` (background filter unaffected by
+  the cycle slip in FixedPos's state)
+- Read `F9T_NAV_PVT_position` ≈ `known_ecef` (F9T's onboard fix is its
+  own engine, immune to our EKF's state)
+- Recognized case 1: both consensus sources agree antenna is fine
+- Reset FixedPos from `known_ecef`, kept the engine running on PPS+qErr,
+  written `consensus_state=recovering` to the servo CSV for the next
+  60–90 s, then resumed Carrier-driven servo when FixedPos converged
+- The 8-hour overnight would have completed with maybe 90 seconds of
+  PPS+qErr fallback in the middle, instead of dying at 51 minutes
+
+**Reference**: 2026-04-08 ocxo bring-up + MadHat overnight failure;
+project memory `project_madhat_ekf_overconfidence`.
+
 ## MAD-based outlier rejection
 
 **What**: Reject individual PPS error samples that are statistical
