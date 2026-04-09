@@ -2675,6 +2675,31 @@ def run(args):
     # position fix for the position-consensus watchdog.
     nav2_store = Nav2PositionStore()
 
+    # Enable NAV2 secondary engine on the F9T if not already on.
+    # This is done here (before serial_reader starts) because the
+    # ensure_receiver step only runs the full config when dual-freq
+    # observations are missing — if the F9T was already configured
+    # for L5 from a previous run, the NAV2 keys would never be sent.
+    # This quick config burst is harmless if NAV2 is already enabled.
+    try:
+        from peppar_fix.receiver import send_cfg, PORT_SUFFIX
+        from peppar_fix.gnss_stream import open_gnss
+        from pyubx2 import UBXReader as _UBR
+        _nav2_ser, _ = open_gnss(args.serial, args.baud)
+        _nav2_ubr = _UBR(_nav2_ser, protfilter=2)
+        _pname = PORT_SUFFIX.get(args.port_type, "USB")
+        _nav2_ok = send_cfg(_nav2_ser, _nav2_ubr, {
+            "CFG_NAV2_OUT_ENABLED": 1,
+            f"CFG_MSGOUT_UBX_NAV2_PVT_{_pname}": 5,
+        }, "NAV2 secondary engine enable")
+        _nav2_ser.close()
+        if _nav2_ok:
+            log.info("NAV2 secondary engine enabled (position consensus)")
+        else:
+            log.warning("NAV2 config failed (position consensus unavailable)")
+    except Exception as e:
+        log.warning("NAV2 config attempt failed: %s (continuing without)", e)
+
     # Start serial reader
     serial_kwargs = {}
     if qerr_store:
