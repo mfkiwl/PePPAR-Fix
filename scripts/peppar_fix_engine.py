@@ -616,8 +616,13 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
                 init_pos = seed_ecef
                 init_clk = 0.0
             else:
-                x_ls, ok, n_sv = ls_init(observations, corrections, gps_time,
-                                          clk_file=corrections)
+                # Use broadcast-only for LS init (same rationale as position
+                # validation: SSR orbit corrections poison the absolute LS
+                # solver).  Broadcast-only gives ~5m accuracy which is
+                # plenty for PPPFilter seeding.
+                _beph = corrections.beph
+                x_ls, ok, n_sv = ls_init(observations, _beph, gps_time,
+                                          clk_file=_beph)
                 if not ok or n_sv < 4:
                     log.info(f"Waiting for enough satellites (got {n_sv})")
                     continue
@@ -2778,8 +2783,18 @@ def run(args):
                     continue
                 if len(observations) < 6:
                     continue
-                x_ls, ok, n_sv = ls_init(observations, corrections, gps_time,
-                                          clk_file=corrections)
+                # Use broadcast-only ephemeris for the LS validation check,
+                # NOT the full SSR-corrected RealtimeCorrections object.
+                # CAS single-AC SSR orbit+clock corrections cause the LS
+                # solver to produce wildly wrong positions (altitude -2000m)
+                # when the SSR correction reference frame doesn't match the
+                # broadcast ephemeris's reference.  FixedPosFilter is immune
+                # (time differencing cancels the bias) but the LS solver's
+                # absolute pseudorange model is not.  Using broadcast-only
+                # for validation gives ~5-10m accuracy which is plenty for
+                # the 100m threshold check.
+                x_ls, ok, n_sv = ls_init(observations, beph, gps_time,
+                                          clk_file=beph)
                 if not ok or n_sv < 6:
                     continue
                 ls_ecef = x_ls[:3]
