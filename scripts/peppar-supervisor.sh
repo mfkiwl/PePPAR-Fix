@@ -59,14 +59,17 @@ now=$(date +%s)
 ts=$(date '+%Y-%m-%dT%H:%M:%S%z')
 
 # JSON helpers — no jq dependency, just python3.
+# Output is shell-safe key=value pairs using shlex.quote on every value
+# so commands containing spaces, quotes, and shell metacharacters round-trip
+# correctly through `eval`.
 read_state() {
     python3 -c "
-import json, sys
+import json, shlex, sys
 try:
     with open('$STATE_FILE') as f:
         data = json.load(f)
     for k, v in data.items():
-        print(f'{k}={v}')
+        print(f'{k}={shlex.quote(str(v))}')
 except FileNotFoundError:
     sys.exit(2)
 except Exception as e:
