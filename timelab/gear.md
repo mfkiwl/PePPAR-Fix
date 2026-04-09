@@ -18,19 +18,25 @@
 | Role | testAnt data collection, PePPAR Fix observations |
 | Docs | — |
 
-### Onocoy — Mining and network infrastructure
+### Onocoy — **MOTHBALLED 2026-04-08**
+
+Powered down and disconnected from peripherals.  TICC #2 was moved to
+host `ocxo` for the i226 bring-up.  F10T and PX1125T are physically
+disconnected and stored.  Confirmed never had a peppar-fix checkout.
+Don't try to ssh — host may not be reachable, and the entries below
+are a record of what *was* connected, not what *is*.
 
 | Field | Value |
 |-------|-------|
-| Hostname | Onocoy |
+| Hostname | ~~Onocoy~~ (mothballed) |
 | Hardware | Raspberry Pi 4 (BCM2711, aarch64) |
 | OS | Debian, kernel 6.12.47+rpt-rpi-v8 |
-| IP | 10.168.60.143 (DHCP) |
-| Access | `ssh onocoy.local` |
-| Serial ports | /dev/ttyACM0, /dev/ttyUSB0, /dev/ttyUSB1, /dev/ttyUSB2 |
-| Services | onocoy-stream.sh |
+| IP | 10.168.60.143 (DHCP) — no longer assigned |
+| Access | (mothballed) |
+| Serial ports | (none — host powered down) |
+| Services | (none) |
 | HW timestamping | **No** (BCM54210PE — single PPS pin, disqualified) |
-| Role | Onocoy GNSS mining, serial console to FS switch |
+| Role | (was: Onocoy GNSS mining, serial console to FS switch) |
 | Docs | — |
 
 ### otcBob1 — Timebeat Open Time Card (SBC)
@@ -235,7 +241,7 @@ specific enumeration order that may not hold after re-plugging.
 | Role | Time-of-day for chrony NTP + PTP GM |
 | Notes | Low-cost consumer GPS, adequate for PPS-disciplined NTP/PTP but not for carrier-phase work |
 
-### PX1125T (Onocoy)
+### PX1125T (mothballed 2026-04-08, was Onocoy)
 
 | Field | Value |
 |-------|-------|
@@ -247,7 +253,7 @@ specific enumeration order that may not hold after re-plugging.
 | Role | PPS timing evaluation (px1125t_eval project) |
 | Notes | qErr from $PSTI,00 correlates with velocity, not phase — firmware bug. Raw PPS is good: TDEV(1s)=3.42 ns |
 
-### ZED-F10T (Onocoy)
+### ZED-F10T (mothballed 2026-04-08, was Onocoy)
 
 | Field | Value |
 |-------|-------|
@@ -273,18 +279,18 @@ specific enumeration order that may not hold after re-plugging.
 | Role | SatPulse / PePPAR Fix TDEV measurement |
 | Docs | [TAPR TICC](http://www.tapr.org/ticc.html) |
 
-### TAPR TICC #2 (Onocoy)
+### TAPR TICC #2 (host: ocxo as of 2026-04-08; was Onocoy)
 
 | Field | Value |
 |-------|-------|
 | Model | TAPR TICC |
 | Resolution | 60 ps |
-| Host | Onocoy |
-| Port | /dev/ttyUSB0 (FTDI FT230X) |
+| Host | ocxo (moved 2026-04-08; was Onocoy) |
+| Port | /dev/ticc2 (USB CDC ACM, Arduino serial 44236313835351B02001) |
 | Baud | 115200 |
-| Channels | chA = F10T PPS (ArduSimple, Patch3 via GUS #2), chB = PX1125T PPS (UFO via GUS #1) |
-| Reference | 10 MHz from SV1AFN distribution amp (fed by Geppetto GPSDO) |
-| Role | PX1125T PPS timing evaluation |
+| Channels | chA = i226 PEROUT (SDP0), chB = F9T-TOP PPS — matches TimeHat / MadHat layout |
+| Reference | 10 MHz (when fed) |
+| Role | i226 add-in card PPS measurement on host ocxo |
 | Docs | [TAPR TICC](http://www.tapr.org/ticc.html) |
 
 ### TAPR TICC #3 (TimeHat)

@@ -160,16 +160,16 @@ passwordless for user `bob`.
 |---|---|---|---|---|
 | TimeHat | `ssh TimeHat` | Primary peppar-fix dev + PHC discipline | F9T-3RD on `/dev/gnss-top` | Has i226 PHC, TICC #1, heatsink on TCXO |
 | PiPuss | `ssh PiPuss.local` | Dual-F9T, caster/client testing | F9T-TOP `/dev/gnss-top`, F9T-BOT `/dev/gnss-bot` | Zero-baseline (both on Patch3 via GUS #2) |
-| Onocoy | `ssh Onocoy.local` | F10T, PX1125T, TICC #2 | F10T on `/dev/f10t`, PX1125T on `/dev/ttyUSB0` | F10T uses ArduSimple FTDI, not CDC ACM |
+| ~~Onocoy~~ | mothballed 2026-04-08 | F10T + PX1125T disconnected; TICC #2 moved to ocxo | – | Powered down. Never had a peppar-fix checkout. |
 | otcBob1 | `ssh otcBob1` | Timebeat OTC SBC, OCXO, Renesas ClockMatrix | F9T on `/dev/ttyAMA0` at 460800 | Stop `timebeat` before accessing I2C or GNSS |
 | ptBoat | `ssh ptBoat` | Timebeat OTC Mini PT, weatherproof, PoE | F9T on `/dev/ttyAMA0` at 115200 | Same Renesas ClockMatrix as otcBob1 |
 | ocxo | `ssh ocxo` | E810-XXVDA4T x86 host, OCXO, DPLL | F9T on `/dev/gnss0` (kernel, I2C) | PHC at `/dev/ptp1`, trusted net + PTP net |
 | bbb | `ssh bbb` | BeagleBone, GPS L1 only | `/dev/gps0` at 9600 | Legacy NTP/PTP GM |
 
 **Hostname resolution**: Try `<host>` first (DNS search domain VanValzah.Com).
-If that fails, try `<host>.local` (mDNS). Some hosts (PiPuss, Onocoy)
-only resolve via `.local`. Never use the PTP LAN (10.168.13.x) for
-SSH — keep that clean for timing traffic.
+If that fails, try `<host>.local` (mDNS). PiPuss only resolves via
+`.local`.  Never use the PTP LAN (10.168.13.x) for SSH — keep that
+clean for timing traffic.
 
 ## Serial Port Gotchas
 
@@ -261,11 +261,10 @@ be <200 ns). Root cause: BDS time system (BDT vs GPST, 14-second offset)
 handling in `broadcast_eph.py` is still wrong despite multiple fix
 attempts. Do NOT enable BDS until this is fixed (see bead `pf-luu`).
 
-### F10T on Onocoy doesn't respond to UBX
+### ~~F10T on Onocoy doesn't respond to UBX~~ — Onocoy mothballed 2026-04-08
 
-The NEO-F10T is on an ArduSimple board using FTDI at `/dev/f10t`.
-It doesn't respond at any standard baud rate. May need USB-C power
-on the ArduSimple's second connector. Investigation ongoing.
+The NEO-F10T issue is parked along with the host.  When we revive F10T
+work it'll be on a different host.
 
 ## peppar-fix Python Environment
 
@@ -273,7 +272,7 @@ on the ArduSimple's second connector. Investigation ongoing.
 |---|---|---|
 | TimeHat | `/home/bob/peppar-fix/venv` | `source ../venv/bin/activate` |
 | PiPuss | `/home/bob/pygpsclient` | `source ~/pygpsclient/bin/activate` |
-| Onocoy | (system python3) | pyubx2 may not be installed |
+| ~~Onocoy~~ | mothballed 2026-04-08 | – |
 | otcBob1 | (system python3) | May need `pip install smbus2` for I2C |
 
 Scripts live in `/home/bob/peppar-fix/scripts/` on TimeHat. Other hosts

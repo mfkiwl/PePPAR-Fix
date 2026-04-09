@@ -56,21 +56,15 @@
       "access": "ssh onocoy.local",
       "ip": "10.168.60.143",
       "hardware": "Raspberry Pi 4",
+      "status": "mothballed 2026-04-08",
       "expected_devices": {
         "gnss": [],
-        "ticc": [
-          "/dev/ttyUSB0"
-        ],
+        "ticc": [],
         "ptp": []
       },
-      "receivers": [
-        "F10T",
-        "PX1125T"
-      ],
-      "ticcs": [
-        "TICC-2"
-      ],
-      "notes": "Onocoy GNSS mining, PX1125T eval. TICC on /dev/ttyUSB0 (not udev symlink)."
+      "receivers": [],
+      "ticcs": [],
+      "notes": "Mothballed 2026-04-08. Confirmed never had a peppar-fix checkout (find / -iname '*peppar*' returned zero hits during the lab cleanup that day). The F10T (ArduSimple) and PX1125T are physically disconnected; TICC #2 has been moved to host ocxo. The Pi 4 is powered down. Don't ssh — the host may not be reachable."
     },
     "otcBob1": {
       "access": "ssh otcBob1",

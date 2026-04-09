@@ -1,8 +1,15 @@
 # Lab Topology
 
+> **Diagram is a 2026-03-16 snapshot.**  See the change log at the
+> bottom for everything that has happened since.  Notably, **Onocoy
+> was mothballed 2026-04-08** — wherever the diagram or sourcetable
+> below shows Onocoy, F10T, or PX1125T, treat it as historical.
+> The current host for TICC #2 is `ocxo` (with the F9T-TOP and the
+> i226 add-in card), and Onocoy itself is powered down.
+
 ## Current connections
 
-*Last updated: 2026-03-16*
+*Last updated: 2026-03-16 (host blocks); see change log for deltas*
 
 ```
   ┌────────────────────────────────┐  ┌──────────────────────────────┐
@@ -164,6 +171,28 @@ NTS is used on Internet sources for MITM protection.
 
 Record topology changes here so the history of what was connected when
 is preserved. Include date, what changed, and why.
+
+### 2026-04-08 — Onocoy mothballed; TICC #2 moved to ocxo for i226 bring-up
+
+- **Onocoy host powered down and mothballed.**  No further work planned
+  on this host.  F10T (ArduSimple) and PX1125T physically disconnected
+  and stored.  Confirmed Onocoy never had a peppar-fix checkout, so
+  nothing to clean up software-side.
+- **TICC #2 relocated** from PiPuss to ocxo (was on PiPuss as of the
+  2026-04-04 entry, briefly back to Onocoy in between, now on ocxo).
+  Now `/dev/ticc2` on ocxo via the udev symlink rule (Arduino serial
+  44236313835351B02001 — stable across host moves).
+- **TICC #2 channel mapping on ocxo**: chA = i226 PEROUT (SDP0),
+  chB = F9T-TOP PPS via SMA tee.  Matches the TimeHat/MadHat layout
+  for direct comparison.
+- **F9T-TOP moved to ocxo** as the timing receiver for the new i226
+  add-in card (was on PiPuss).  USB CDC ACM, accessed via
+  `/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00`
+  (the only stable handle — no SEC-UNIQID exposed via udev).
+- New i226 add-in card on ocxo: bare Intel-branded i226 retail card,
+  hand-wired pin headers + Timebeat u.FL adapter + SMA.  Stable name
+  `i226` via MAC-keyed udev rule landed today.  See
+  `docs/ocxo-i226-bringup-2026-04-08.md` for the bring-up history.
 
 ### 2026-04-04 — TICC #2 moved to PiPuss for otcBob1 ClockMatrix work
 

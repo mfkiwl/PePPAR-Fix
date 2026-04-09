@@ -59,9 +59,9 @@ any cable change.
 
 | Device | Host | VID:PID | Serial | Identification |
 |---|---|---|---|---|
-| PX1125T (SkyTraq) | Onocoy | Silicon Labs CP2102, `10c4:ea60` | `0001` (generic) | No udev symlink — app must probe |
-| FS switch console | Onocoy | Prolific, `2478:2008` | (none) | No udev symlink — app must probe |
-| F10T (ArduSimple board) | Onocoy | FTDI FT230X, `0403:6015` | **`D30GD1PE`** | Unique serial → `/dev/f10t` via udev |
+| PX1125T (SkyTraq) | ~~Onocoy~~ (mothballed 2026-04-08) | Silicon Labs CP2102, `10c4:ea60` | `0001` (generic) | Stored. |
+| FS switch console | ~~Onocoy~~ (mothballed 2026-04-08) | Prolific, `2478:2008` | (none) | Stored. |
+| F10T (ArduSimple board) | ~~Onocoy~~ (mothballed 2026-04-08) | FTDI FT230X, `0403:6015` | **`D30GD1PE`** | Stored. `/dev/f10t` udev rule still in `99-timelab.rules` for whenever F10T is revived on a different host. |
 
 Note: TICC #2 has NO separate FTDI data port. Data comes over the
 Arduino ACM connection. The FTDI `D30GD1PE` belongs to the F10T's
