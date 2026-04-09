@@ -363,14 +363,100 @@ class QErrStore:
             return info
 
 
+class Nav2PositionStore:
+    """Thread-safe latest position from the F9T's secondary navigation engine.
+
+    The F9T has two independent nav engines.  The primary (NAV-*) runs in
+    whatever mode we configure (typically TIME / fixed-position for timing).
+    The secondary (NAV2-*) always computes a fresh position fix regardless
+    of the primary's mode.
+
+    We use NAV2-PVT as a "third opinion" on antenna position — independent
+    of our PPP filter and of the primary engine's fixed-position assumption.
+    See docs/architecture-vision.md "Three-source position consensus".
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._lat = None          # degrees
+        self._lon = None
+        self._height_m = None     # height above ellipsoid (m)
+        self._h_acc_m = None      # horizontal accuracy estimate (m)
+        self._v_acc_m = None      # vertical accuracy estimate (m)
+        self._fix_type = None     # 0=no, 2=2D, 3=3D
+        self._num_sv = 0
+        self._host_mono = None
+        self._update_count = 0
+
+    def update(self, parsed_msg):
+        """Store a fresh NAV2-PVT decoded message."""
+        with self._lock:
+            self._lat = getattr(parsed_msg, 'lat', None)
+            self._lon = getattr(parsed_msg, 'lon', None)
+            self._height_m = getattr(parsed_msg, 'height', None)
+            if self._height_m is not None:
+                self._height_m /= 1000.0  # mm → m
+            self._h_acc_m = getattr(parsed_msg, 'hAcc', None)
+            if self._h_acc_m is not None:
+                self._h_acc_m /= 1000.0  # mm → m
+            self._v_acc_m = getattr(parsed_msg, 'vAcc', None)
+            if self._v_acc_m is not None:
+                self._v_acc_m /= 1000.0
+            self._fix_type = getattr(parsed_msg, 'fixType', None)
+            self._num_sv = getattr(parsed_msg, 'numSV', 0)
+            self._host_mono = time.monotonic()
+            self._update_count += 1
+
+    def get_ecef(self, max_age_s=30.0):
+        """Return (ecef_xyz, h_acc_m, age_s) or (None, None, None) if stale.
+
+        Converts from LLH to ECEF using a simple WGS84 formula.
+        """
+        with self._lock:
+            if self._host_mono is None:
+                return None, None, None
+            age = time.monotonic() - self._host_mono
+            if age > max_age_s:
+                return None, None, None
+            if self._fix_type not in (2, 3) or self._lat is None:
+                return None, None, None
+            lat, lon, h = self._lat, self._lon, self._height_m or 0.0
+        # WGS84 LLH → ECEF
+        import math
+        a = 6378137.0
+        f = 1 / 298.257223563
+        e2 = 2 * f - f * f
+        lat_r = math.radians(lat)
+        lon_r = math.radians(lon)
+        sin_lat = math.sin(lat_r)
+        cos_lat = math.cos(lat_r)
+        N = a / math.sqrt(1 - e2 * sin_lat * sin_lat)
+        x = (N + h) * cos_lat * math.cos(lon_r)
+        y = (N + h) * cos_lat * math.sin(lon_r)
+        z = (N * (1 - e2) + h) * sin_lat
+        import numpy as np
+        return np.array([x, y, z]), self._h_acc_m, age
+
+    def summary(self):
+        """One-line status for logging."""
+        with self._lock:
+            if self._host_mono is None:
+                return "NAV2: no data"
+            age = time.monotonic() - self._host_mono
+            return (f"NAV2: fix={self._fix_type} sv={self._num_sv} "
+                    f"hAcc={self._h_acc_m:.1f}m age={age:.0f}s "
+                    f"n={self._update_count}")
+
+
 def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                    ssr=None, qerr_store=None, config_queue=None, driver=None,
-                   raw_callback=None):
+                   raw_callback=None, nav2_store=None):
     """Read UBX messages from a GNSS device.
 
     Puts (timestamp, observations_list) tuples onto obs_queue for each
     RXM-RAWX epoch. Also feeds RXM-SFRBX to broadcast ephemeris.
     If qerr_store is provided, extracts TIM-TP qErr and stores it.
+    If nav2_store is provided, captures NAV2-PVT for position consensus.
 
     Args:
         systems: set of system names to include (e.g. {'gps', 'gal', 'bds'}).
@@ -487,6 +573,10 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                             port,
                         )
                         last_qerr_invalid_log = now
+
+            # NAV2-PVT: secondary navigation engine position fix
+            if msg_id == 'NAV2-PVT' and nav2_store is not None:
+                nav2_store.update(parsed)
 
             if msg_id == 'RXM-RAWX':
                 # Fire raw callback before IF processing (for NTRIP caster)

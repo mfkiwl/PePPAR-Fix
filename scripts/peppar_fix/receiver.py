@@ -474,7 +474,16 @@ def configure_messages(ser, ubr, port_id, sfrbx_rate=1):
     else:
         messages[f"CFG_MSGOUT_UBX_NAV_PVT_{pname}"] = 0
         messages[f"CFG_MSGOUT_UBX_NAV_SAT_{pname}"] = 0
-    names = "RAWX, TIM-TP" if sfrbx_rate == 0 else "RAWX, SFRBX, PVT, SAT, TIM-TP"
+    # Enable the F9T's secondary navigation engine (NAV2).  This is a
+    # completely independent position-fixing chain that runs even when
+    # the primary engine is in TIME mode.  We use NAV2-PVT as an
+    # independent sanity check on our PPP filter's position — if our
+    # filter blows up but NAV2 still agrees with known_ecef, we know
+    # the antenna hasn't moved and can re-seed instead of exiting.
+    # See docs/architecture-vision.md "Three-source position consensus".
+    messages["CFG_NAV2_OUT_ENABLED"] = 1
+    messages[f"CFG_MSGOUT_UBX_NAV2_PVT_{pname}"] = 5  # every 5th epoch (~0.2 Hz)
+    names = "RAWX, TIM-TP" if sfrbx_rate == 0 else "RAWX, SFRBX, PVT, SAT, TIM-TP, NAV2-PVT"
     return send_cfg(ser, ubr, messages, f"UBX messages on {pname}: {names}")
 
 

@@ -43,6 +43,18 @@ class PositionWatchdog:
             self._bad_count = 0
             return True
 
+    def reset(self):
+        """Reset the watchdog after a filter re-seed.
+
+        Clears the alarm state, the bad-epoch counter, and the baseline
+        RMS so the watchdog re-learns a new baseline from the re-seeded
+        filter's residuals.
+        """
+        self._alarmed = False
+        self._bad_count = 0
+        self._baseline_rms = None
+        self._residuals = []
+
     @property
     def alarmed(self):
         return self._alarmed

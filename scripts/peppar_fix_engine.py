@@ -53,7 +53,7 @@ from solve_ppp import PPPFilter, FixedPosFilter, ls_init
 from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections
 from ntrip_client import NtripStream
-from realtime_ppp import serial_reader, ntrip_reader, QErrStore
+from realtime_ppp import serial_reader, ntrip_reader, QErrStore, Nav2PositionStore
 from ticc import Ticc
 from peppar_fix import (
     CorrectionFreshnessGate,
@@ -736,7 +736,7 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
 # ── Phase 2: Steady state ────────────────────────────────────────────── #
 
 def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
-                     stop_event, qerr_store=None, out_w=None):
+                     stop_event, qerr_store=None, out_w=None, nav2_store=None):
     """Run FixedPosFilter for clock estimation with optional servo.
 
     This is the steady-state phase: position is known, we estimate clock
@@ -991,16 +991,52 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 skip_stats["too_few_meas"] += 1
                 continue
 
-            # Watchdog
+            # Watchdog with NAV2 position consensus
             resid_rms = float(np.sqrt(np.mean(resid ** 2))) if len(resid) > 0 else 0.0
             watchdog.update(resid_rms, n_used)
             if watchdog.alarmed:
-                if servo_ctx is not None:
-                    _set_clock_class(servo_ctx, "freerun")
-                log.error("POSITION WATCHDOG ALARM: antenna may have moved! "
-                          "Servo disabled. Restart with correct position or "
-                          "delete position file to re-bootstrap.")
-                break
+                # Before giving up: check NAV2 secondary engine position.
+                # If NAV2 agrees with known_ecef, the antenna hasn't moved
+                # and our FixedPosFilter just blew up — re-seed it instead
+                # of exiting.  If NAV2 disagrees, the antenna actually
+                # moved.  See docs/architecture-vision.md.
+                reseed = False
+                if nav2_store is not None:
+                    nav2_ecef, nav2_acc, nav2_age = nav2_store.get_ecef(max_age_s=30.0)
+                    if nav2_ecef is not None:
+                        nav2_sep = float(np.linalg.norm(nav2_ecef - known_ecef))
+                        log.warning(
+                            "Watchdog: NAV2 position %.1fm from known_ecef "
+                            "(hAcc=%.1fm, age=%.0fs) — %s",
+                            nav2_sep, nav2_acc or -1, nav2_age,
+                            "AGREES (re-seeding filter)" if nav2_sep < 50.0
+                            else "DISAGREES (antenna may have moved)",
+                        )
+                        if nav2_sep < 50.0:
+                            # NAV2 confirms antenna is fine.  Reset the
+                            # filter state from known_ecef and continue.
+                            log.info("Re-seeding FixedPosFilter from known_ecef "
+                                     "(NAV2 consensus: antenna stable)")
+                            filt = FixedPosFilter(known_ecef)
+                            prev_t = None
+                            watchdog.reset()
+                            if servo_ctx is not None:
+                                # Purge stale servo state so the servo
+                                # doesn't act on the corrupted dt_rx
+                                _purge_pps_state(servo_ctx)
+                                servo_ctx['filter_needs_clock_reset'] = True
+                            reseed = True
+                    else:
+                        log.warning("Watchdog: NAV2 position not available "
+                                    "(%s) — cannot verify antenna position",
+                                    nav2_store.summary())
+                if not reseed:
+                    if servo_ctx is not None:
+                        _set_clock_class(servo_ctx, "freerun")
+                    log.error("POSITION WATCHDOG ALARM: antenna may have moved! "
+                              "Servo disabled. Restart with correct position or "
+                              "delete position file to re-bootstrap.")
+                    break
 
             dt_rx_ns = filt.x[filt.IDX_CLK] / C * 1e9
             p_clk = filt.P[filt.IDX_CLK, filt.IDX_CLK]
@@ -2635,6 +2671,10 @@ def run(args):
         if not wait_for_ephemeris(beph, stop_event, systems=systems):
             return 1
 
+    # NAV2 position store — captures the F9T secondary engine's fresh
+    # position fix for the position-consensus watchdog.
+    nav2_store = Nav2PositionStore()
+
     # Start serial reader
     serial_kwargs = {}
     if qerr_store:
@@ -2642,7 +2682,7 @@ def run(args):
     t_serial = threading.Thread(
         target=serial_reader,
         args=(args.serial, args.baud, obs_queue, stop_event, beph, systems, ssr),
-        kwargs={**serial_kwargs, 'driver': driver},
+        kwargs={**serial_kwargs, 'driver': driver, 'nav2_store': nav2_store},
         daemon=True,
     )
     t_serial.start()
@@ -2755,6 +2795,7 @@ def run(args):
             stop_event,
             qerr_store=qerr_store,
             out_w=out_w,
+            nav2_store=nav2_store,
         )
         # run_steady_state returns an int exit code on error,
         # or a gate_stats dict on normal completion.
