@@ -46,12 +46,15 @@ Precision notes:
 
 from __future__ import annotations
 
+import logging
 import re
 import termios
 import time as _time
 import atexit
 
 import serial
+
+log = logging.getLogger(__name__)
 
 from peppar_fix.event_time import (
     TiccEvent,
@@ -149,108 +152,166 @@ class _SharedTiccPort:
         except (serial.SerialException, OSError):
             pass
 
+    # Boot-recovery tunables.  Class attributes so tests can override them
+    # to keep test runs fast (the timing constants assume a real TICC at
+    # the other end of the wire).
+    _BOOT_MAX_RESET_ATTEMPTS = 3
+    _BOOT_PER_ATTEMPT_BUDGET_S = 18.0   # banner + 5 s menu wait + settle
+    _BOOT_SILENCE_THRESHOLD_S = 3.5     # no bytes at all → cold
+    _BOOT_POST_SENTINEL_THRESHOLD_S = 4.0  # sentinel printed but no timestamps
+    _BOOT_POST_HEADER_THRESHOLD_S = 9.0    # headers but no sentinel/timestamps
+
     def _wait_for_boot(self) -> None:
-        """Wait for TICC to be ready (booting or already running).
+        """Wait until the TICC is producing timestamp lines.
 
-        The TICC (Arduino Mega) boot sequence after DTR reset:
+        DTR is toggled lazily — we touch it only when we have evidence
+        the device is wedged.  In the warm-path case (TICC has been
+        running for hours, we just opened the port from another
+        process), the first ``readline()`` returns a timestamp and we
+        return immediately without ever pulsing DTR.
 
-          1. Prints the TAPR banner (# lines).
-          2. Prints the loaded configuration (more # lines).
-          3. Waits ~5 s for any keystroke.  *If a key arrives* the
-             firmware drops into an interactive setup menu and waits
-             forever for menu commands.
-          4. If no key arrives within 5 s, the firmware exits the
-             menu wait and begins normal timestamp output.
+        Recovery path: up to ``_BOOT_MAX_RESET_ATTEMPTS`` DTR resets.
+        Each attempt detects three distinct failure modes:
 
-        Critically, **we do NOT send any keystrokes during the boot
-        wait**.  Earlier versions of this code sent ``\\r`` "to skip
-        the menu", but the TICC firmware interprets that as a key
-        press and *enters* the menu, leaving the chip stuck waiting
-        for a menu command instead of producing timestamps.  Empty
-        silence is what makes the menu wait time out.
+          - **cold**: no bytes at all on the wire for
+            ``_BOOT_SILENCE_THRESHOLD_S``.  DTR was never pulsed
+            (because HUPCL is cleared) and the Arduino is in
+            pre-boot state.
 
-        Cold-start case (the reason this method ever needs to do
-        anything): on a freshly-booted host where ModemManager (or
-        any other prober) has already touched the ttyACM device,
-        DTR is left asserted and our subsequent HUPCL-clearing open
-        keeps it asserted, so no rising edge ever fires the
-        Arduino's auto-reset capacitor.  The TICC sits in pre-boot
-        state and never speaks.  We detect this — no timestamp line
-        within ``cold_threshold_s`` seconds — and force a DTR
-        low-then-high pulse, after which the boot sequence runs
-        normally.
+          - **stuck after sentinel**: the boot sentinel line
+            (``# timestamp``) printed but timestamps never started
+            within ``_BOOT_POST_SENTINEL_THRESHOLD_S``.  This means
+            something disturbed the chip after the boot wait
+            completed — extremely rare but possible if a process is
+            actively writing to the port.
 
-        Warm case: if the TICC is already running (typical on a
-        long-uptime host), the first line read is usually a valid
-        timestamp and we return immediately without resetting.
+          - **stuck in headers**: more than
+            ``_BOOT_POST_HEADER_THRESHOLD_S`` of header lines without
+            ever seeing the boot sentinel.  This is the classic
+            "menu-stuck" symptom: the firmware received a stray byte
+            during the 5 s menu wait and dropped into the interactive
+            setup menu, which prints the configuration on a loop and
+            never gets to the sentinel.
 
-        Raises TimeoutError if no timestamp arrives even after a
-        forced reset.
+        On any of those three, force a DTR low-then-high pulse to
+        reboot the Arduino and try again.
+
+        We **never** write to the serial port — the TICC firmware
+        interprets any byte during the boot menu wait as a key press
+        and enters the interactive setup menu, which is exactly the
+        state we're trying to escape from.  The only acceptable
+        recovery is the DTR pulse, which the Arduino's auto-reset
+        capacitor turns into a hardware reset.
+
+        Permanent prevention is in 99-timelab.rules: ModemManager and
+        brltty are told to ignore Arduino devices via udev environment
+        variables, so they don't probe the TICC and put it in the
+        menu in the first place.  This in-process recovery is defense
+        in depth — for a host where the rule isn't deployed yet, or
+        for a device that wedged before the rule could take effect.
+
+        Raises TimeoutError after all reset attempts are exhausted.
         """
         assert self.serial is not None
-        cold_threshold_s = 3.0
-        # One forced-reset attempt is allowed.  After a reset the
-        # Arduino takes ~10 s of banner + 5 s of menu wait + ~1 s
-        # of settle before timestamps start, so the post-reset
-        # budget needs to be at least ~18 s.
-        budget_s = 25.0
-        deadline = _time.monotonic() + budget_s
-        cold_kick_at = _time.monotonic() + cold_threshold_s
-        seen_header = False
-        seen_sentinel = False
-        forced_reset = False
-        while _time.monotonic() < deadline:
-            # Cold-state detection: if no *timestamp line* has shown
-            # up after cold_threshold_s and we haven't reset yet,
-            # force one.  We trigger the reset on lack-of-timestamps
-            # rather than lack-of-headers because the TICC can also
-            # be stuck in the menu (header-only state) if any code
-            # path has sent a stray byte to it.
-            if (not forced_reset
-                    and _time.monotonic() >= cold_kick_at):
+
+        last_failure = "(none)"
+        for attempt in range(self._BOOT_MAX_RESET_ATTEMPTS + 1):
+            result = self._wait_for_boot_one_attempt()
+            if result == "ok":
+                return
+            last_failure = result
+            if attempt < self._BOOT_MAX_RESET_ATTEMPTS:
+                log.warning(
+                    "TICC on %s: %s — forcing DTR reset (attempt %d/%d)",
+                    self.port, result, attempt + 1, self._BOOT_MAX_RESET_ATTEMPTS,
+                )
                 self._force_dtr_reset()
-                forced_reset = True
-                # Extend the deadline so we don't time out before the
-                # banner finishes printing after the forced reset.
-                deadline = max(deadline, _time.monotonic() + 20.0)
-                # Drain anything stale that may have arrived during
-                # the reset pulse.
-                try:
-                    self.serial.reset_input_buffer()
-                except (serial.SerialException, OSError):
-                    pass
-                continue
+
+        raise TimeoutError(
+            f"TICC on {self.port} did not produce timestamps after "
+            f"{self._BOOT_MAX_RESET_ATTEMPTS} reset attempts; "
+            f"last failure: {last_failure}"
+        )
+
+    def _wait_for_boot_one_attempt(self) -> str:
+        """One pass through the boot-detect state machine.
+
+        Returns ``"ok"`` on success or a human-readable failure reason
+        string suitable for logging and the eventual TimeoutError.
+
+        Each loop iteration checks failure conditions whether or not
+        ``readline()`` returned bytes — empty (timed-out) reads still
+        advance the silence detector.  ``last_byte_at`` is updated on
+        any non-empty ``raw``, including partial reads at timeout, so
+        a TICC that's dribbling out a stuck-menu config dump won't be
+        misclassified as cold.
+        """
+        assert self.serial is not None
+        try:
+            self.serial.reset_input_buffer()
+        except (serial.SerialException, OSError):
+            pass
+
+        attempt_start = _time.monotonic()
+        last_byte_at = attempt_start
+        first_header_at: float | None = None
+        sentinel_at: float | None = None
+
+        while _time.monotonic() - attempt_start < self._BOOT_PER_ATTEMPT_BUDGET_S:
             try:
                 raw = self.serial.readline()
-            except (serial.SerialException, OSError):
-                self.serial.close()
-                _time.sleep(1)
+            except (serial.SerialException, OSError) as e:
+                # Try a single reopen — if it works, restart this attempt's
+                # state machine; if it doesn't, surface the error.
+                try:
+                    self.serial.close()
+                except (serial.SerialException, OSError):
+                    pass
+                _time.sleep(0.5)
                 try:
                     self.serial = self._open_serial()
-                    self.serial.reset_input_buffer()
                 except (serial.SerialException, OSError):
-                    _time.sleep(1)
+                    return f"serial reopen failed after error: {e}"
+                attempt_start = _time.monotonic()
+                last_byte_at = attempt_start
+                first_header_at = None
+                sentinel_at = None
                 continue
-            line = raw.decode(errors="replace").strip()
-            if not line:
-                continue
-            # Valid timestamp line — TICC is in steady-state output.
-            if _LINE_RE.match(line):
-                break
-            if line.startswith("#"):
-                seen_header = True
-                if _BOOT_SENTINEL in line:
-                    seen_sentinel = True
-            # Note: we deliberately do NOT write anything to the
-            # serial port here.  Any byte we send during the boot
-            # menu wait would push the firmware into interactive
-            # setup mode and break the boot.
-        else:
-            raise TimeoutError(
-                f"TICC on {self.port} did not produce data within {budget_s:.0f}s "
-                f"(seen_header={seen_header}, seen_sentinel={seen_sentinel}, "
-                f"forced_reset={forced_reset})"
-            )
+
+            now = _time.monotonic()
+
+            if raw:
+                last_byte_at = now
+                line = raw.decode(errors="replace").strip()
+                if line:
+                    if _LINE_RE.match(line):
+                        return "ok"
+                    if line.startswith("#"):
+                        if first_header_at is None:
+                            first_header_at = now
+                        if _BOOT_SENTINEL in line and sentinel_at is None:
+                            sentinel_at = now
+
+            # Failure-condition checks run every iteration, even after
+            # an empty (timed-out) read — that's how we detect cold
+            # state and post-deadline staleness during silence.
+
+            if (first_header_at is None
+                    and now - last_byte_at > self._BOOT_SILENCE_THRESHOLD_S):
+                return f"cold (no bytes for {now - last_byte_at:.1f}s)"
+
+            if (sentinel_at is not None
+                    and now - sentinel_at > self._BOOT_POST_SENTINEL_THRESHOLD_S):
+                return (f"stuck after sentinel "
+                        f"({now - sentinel_at:.1f}s without timestamps)")
+
+            if (first_header_at is not None
+                    and sentinel_at is None
+                    and now - first_header_at > self._BOOT_POST_HEADER_THRESHOLD_S):
+                return (f"stuck in headers "
+                        f"({now - first_header_at:.1f}s of headers, no sentinel)")
+
+        return f"budget elapsed ({self._BOOT_PER_ATTEMPT_BUDGET_S:.0f}s)"
 
     def close(self) -> None:
         if self.serial is not None:

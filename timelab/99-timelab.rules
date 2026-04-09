@@ -15,6 +15,23 @@ SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="2341", ENV{ID_SERIAL_SHORT}=="442363138353
 # TICC #3
 SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="2341", ENV{ID_SERIAL_SHORT}=="44236313835351B0A091", SYMLINK+="ticc3", MODE="0664", GROUP="dialout"
 
+# Tell ModemManager and brltty to leave Arduino devices alone.  Both
+# services probe new ttyACM ports at boot/replug by sending arbitrary
+# AT-style strings.  The TAPR TICC firmware interprets any byte arriving
+# during its 5-second post-banner menu wait as a key press and drops
+# into an interactive setup menu where it waits forever for menu
+# commands instead of producing PPS timestamps.  We've hit this
+# multiple times — most recently 2026-04-08 on ocxo where the TICC was
+# wedged in menu mode after every reboot until we found ModemManager
+# was the source of the stray bytes.
+#
+# These rules apply to ALL Arduino USB devices (vendor 2341), not just
+# our specific TICCs.  We have no other Arduino devices in the lab
+# where we'd want ModemManager or brltty to do anything, so painting
+# with a broad brush is fine and protects future Arduinos automatically.
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="2341", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="2341", ENV{BRLTTY_DEVICE}="0"
+
 # ── NEO-F10T on ArduSimple (FTDI FT230X, unique serial) ──
 SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="0403", ENV{ID_SERIAL_SHORT}=="D30GD1PE", SYMLINK+="f10t", MODE="0664", GROUP="dialout"
 
