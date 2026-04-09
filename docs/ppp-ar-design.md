@@ -296,10 +296,216 @@ For initial implementation, AR could be tested with PPPFilter in
 Phase 1 (position bootstrap) to verify the algorithm works, then
 adapted for clock estimation in a future undifferenced clock filter.
 
+## AR module: unified architecture with background PPPFilter
+
+### How it fits together
+
+The AR module is **not** a separate component — it's a natural extension
+of the PPPFilter that already runs in Phase 1.  The key insight
+(2026-04-09 discussion): the same PPPFilter instance that bootstraps
+the position in Phase 1 **survives** into Phase 2, continues refining
+its position in the background at a slow cadence, and — once phase
+biases arrive — resolves integer ambiguities.  As integers fix, the
+position estimate tightens from decimeters to centimeters, and that
+refinement feeds *gradually* back into FixedPosFilter's `known_ecef`.
+
+The three-source position consensus (see `docs/future-work.md`) and
+PPP-AR are the same thread, the same filter, the same state vector:
+
+```
+Phase 1 (bootstrap)
+│  PPPFilter runs full-rate, converges to float position ~0.5 m.
+│  No phase biases yet (or float-only with them).
+│
+├──▶ Phase 1 → Phase 2 transition
+│    PPPFilter instance survives, passed to BackgroundPPPMonitor thread.
+│    Position → known_ecef for FixedPosFilter.
+│
+Phase 2 (steady state)
+│
+│  FixedPosFilter runs full-rate: clock estimation at known_ecef.
+│  Servo runs on Carrier/PPS+qErr as usual.
+│
+│  BackgroundPPPMonitor (same PPPFilter, slow cadence, ~30 s):
+│   ├── float convergence continues (ambiguities tighten)
+│   ├── consensus watchdog: bg_PPP_pos vs known_ecef vs NAV2-PVT
+│   │
+│   ├── [when phase biases become available from single-AC SSR]
+│   │   apply_phase_bias() to observations before IF combination
+│   │   float ambiguities cluster near integers
+│   │
+│   ├── [when integrality test passes for enough SVs]
+│   │   bootstrapping AR: fix N_float → N_int for each ready SV
+│   │   position estimate jumps to cm-level (the AR fix)
+│   │
+│   └── [gradual migration]
+│       known_ecef += alpha * (ar_position - known_ecef)
+│       each epoch, alpha ≈ 0.001 → ~50 min for 95% migration
+│       FixedPosFilter sees position move by < 1 mm/epoch
+│       dt_rx absorbs each shift smoothly (< 1 ps/s of phase migration)
+│       servo sees nothing — well below noise floor
+│
+│  End result after ~60 min of Phase 2:
+│   - Background PPPFilter has cm-level position (AR-fixed)
+│   - FixedPosFilter's known_ecef has migrated to match
+│   - dt_rx has < 100 ps of position-induced phase bias
+│   - Servo has been running continuously, no step, no restart
+```
+
+### Why FixedPosFilter doesn't need AR itself
+
+FixedPosFilter uses time-differenced carrier phase which **cancels
+ambiguities by design** — no ambiguity states in the EKF at all.  This
+is simpler, more robust, and avoids the whole AR complexity in the
+hot path.  The trade-off is that FixedPosFilter's dt_rx estimate
+inherits a *constant bias* from any error in `known_ecef`, because
+position error maps directly to clock error through the satellite
+geometry.
+
+The AR module fixes this indirectly: it refines `known_ecef` in the
+background until the position-induced bias drops below 100 ps.  The
+FixedPosFilter's time-differenced architecture stays untouched.
+
+### Gradual position feed-in: the math
+
+When the background PPPFilter produces a new AR-fixed position
+`ar_ecef`, migrate `known_ecef` with exponential blending:
+
+```python
+alpha = 0.001  # time constant = 1/alpha ≈ 1000 epochs = 1000 s at 1 Hz
+known_ecef += alpha * (ar_ecef - known_ecef)
+```
+
+For a 5 m migration (typical float → AR jump):
+- Migration rate: 5 m × 0.001 = 5 mm/epoch → phase = 5e-3 × cos(45°) / c ≈ 12 ps/epoch
+- F9T PPS noise: ~2300 ps/epoch (σ at τ=1 s)
+- Servo bandwidth: ~0.01 Hz (P = 100 s)
+- The 12 ps/epoch migration is 200× below the measurement noise floor
+  and 10000× below the servo's phase-correction rate.  Invisible.
+
+At 95% convergence (5τ = 5000 epochs ≈ 83 min), `known_ecef` is
+within 0.25 m of the AR position.  Phase bias: ~0.6 ns.  At 99%
+(7τ ≈ 117 min), within 0.05 m → ~0.1 ns.  At 99.9% (~167 min),
+within 5 mm → ~12 ps.
+
+The alpha could be adaptive: use a faster alpha when confidence is
+high (many fixed SVs, low formal sigma, large `known_ecef` error) and
+slower when confidence is low.  Or just use a fixed alpha and let it
+converge on its own timescale — the important thing is *no step*.
+
+### Handling the AR fix event
+
+When the bootstrapping AR first declares integers fixed, the background
+PPPFilter's position estimate may jump by 5–50 cm in a single epoch
+(the jump from float-to-fixed).  This is NOT fed directly into
+`known_ecef` — the exponential blend absorbs it.  The jump appears as a
+sudden change in `ar_ecef` that the blend then chases slowly.
+
+If the AR fix is wrong (e.g., wrong integer on one satellite due to
+multipath), the position will jump and then bounce when the bad integer
+is detected.  The slow blend protects `known_ecef` from this bounce:
+by the time the blend has moved 5% of the way to the wrong position,
+the AR module will likely have detected and unfixed the bad satellite.
+
+The blend acts as a natural low-pass filter on AR fix/unfix events.
+
+### Interaction with three-source consensus
+
+When AR is active, the consensus comparison becomes richer:
+
+```
+Δ_AR_vs_known  = | bg_PPP_AR_position - known_ecef |
+Δ_NAV2_vs_known = | F9T_NAV2_PVT - known_ecef |
+Δ_AR_vs_NAV2    = | bg_PPP_AR_position - F9T_NAV2_PVT |
+
+case 1: Δ_AR_vs_known large, Δ_NAV2_vs_known ≈ 0, Δ_AR_vs_NAV2 large
+        → AR is wrong (bad fix), known_ecef and NAV2 agree.
+        Reset AR, keep FixedPos.
+
+case 2: Δ_AR_vs_known ≈ Δ_NAV2_vs_known, both moderate (5-50 cm)
+        → AR and NAV2 agree on a position different from known_ecef.
+        This IS the expected AR convergence — known_ecef is the stale
+        float value and both independent sources say the true position
+        is nearby.  Increase blend alpha briefly to converge faster.
+
+case 3: all three agree (Δ < 5 cm)
+        → AR has converged AND known_ecef has migrated.  Steady state.
+        Position-induced phase bias < 100 ps.  Log it.
+```
+
+This gives us a safety net for the AR fix itself: if the AR produces
+a wrong fix, the F9T secondary engine (NAV2) will disagree and we can
+reject it before it pollutes `known_ecef`.
+
+### Revised implementation phases
+
+(Supersedes the 4-phase plan above — same content but restructured
+to flow from the architectural discussion.)
+
+**Phase A — Single-AC SSR source with phase biases**
+
+Switch from the combined BKG `SSRA00BKG0` (no phase biases) to a
+single-AC source that provides them.  Best candidates (all verified
+to have phase biases):
+- CAS: `SSRA01CAS1` — 159 phase biases for GPS+GAL+BDS, confirmed
+  working with our credentials on the Australian mirror
+  (`ntrip.data.gnss.ga.gov.au:443`).
+- CNES: `SSRA00CNE0` on `products.igs-ip.net:2101` — RTCM
+  1265/1266/1267 confirmed in sourcetable.  Requires access to the
+  `products.igs-ip.net` realm (Bob applied 2026-04-07; pending).
+
+Action: update the SSR mount config, verify phase biases arrive,
+confirm dt_rx is comparable to the combined product.  No code change
+needed — `SSRState._parse_phase_bias()` already handles the RTCM
+message types.
+
+**Phase B — Phase bias application + integrality monitoring**
+
+Apply phase biases in the observation processing path, before the IF
+combination.  Monitor `N_float mod 1` per satellite.  With correct
+phase biases, the histogram should collapse from uniform-in-[−0.5, 0.5]
+to clustered near 0.
+
+Action: `apply_phase_bias()` function in `solve_ppp.py` using the
+signal-code mapping table.  Log `mean |N mod 1|` per epoch (the
+"ambiguity integrality" metric already logged: see the overnight logs
+`Ambiguity integrality: mean|frac|=0.283 (n=11, <0.15 = ready for AR)`
+— this metric already exists in the engine for monitoring, it's just
+that the threshold is never actionable because we don't have phase
+biases yet).
+
+**Phase C — Bootstrapping AR + gradual position migration**
+
+Implement the simplest possible integer fixing: per-satellite threshold
+test on `|N_float - round(N_float)| < 0.15` AND `σ_N < 0.1`.  Fix one
+at a time.  When ≥ 70% of SVs are fixed, declare "AR convergence" and
+begin the exponential position migration.
+
+Action: AR module as an extension of PPPFilter (new method:
+`filt.attempt_ar()`).  `BackgroundPPPMonitor` thread calls it every
+N epochs.  Gradual migration: `known_ecef += alpha * (ar_pos - known_ecef)`
+applied in the main thread's observation-processing loop.
+
+**Phase D — Servo validation**
+
+Measure the end-to-end phase improvement via TICC chA TDEV
+comparison:
+- Float-only PPP: TDEV at τ=100-1000 s shows whatever the Carrier
+  source can deliver with current noise levels.
+- PPP-AR: should show measurably lower TDEV at τ > 100 s where the
+  position-induced phase bias was the limiting factor.
+- The most dramatic improvement: the *constant offset* between TICC
+  chA−chB should shrink from the current ~5-20 ns (position error)
+  to < 1 ns (cm-level position), visible as a simple mean-shift in
+  the time series.
+
 ## Dependencies
 
-- Phase bias SSR source (Galileo HAS IDD or single-AC NTRIP)
+- Phase bias SSR source (CAS `SSRA01CAS1` or CNES `SSRA00CNE0`)
 - Signal code mapping table (F9T u-blox IDs → RINEX codes)
 - Phase bias application in observation processing
-- AR algorithm (bootstrapping or LAMBDA)
+- AR algorithm (bootstrapping for initial implementation)
+- BackgroundPPPMonitor thread (shared with position consensus)
+- Gradual position migration in FixedPosFilter's observation loop
 - `--enable-ar` engine flag and logging
+- NAV2-PVT parsing (shared with position consensus, for AR validation)

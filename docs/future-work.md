@@ -208,6 +208,22 @@ watchdog tripped at 22:03, the consensus check would have:
 - The 8-hour overnight would have completed with maybe 90 seconds of
   PPS+qErr fallback in the middle, instead of dying at 51 minutes
 
+**Relationship to PPP-AR**: the background PPPFilter that serves as
+the consensus watchdog is the *same* filter that PPP-AR extends.  Once
+phase biases are available from a single-AC SSR source, the background
+filter's float ambiguities cluster near integers, and the bootstrapping
+AR module fixes them.  The AR-fixed position (cm-level) feeds gradually
+back into `known_ecef` via exponential blending, removing the
+decimeter-level phase bias that the FixedPosFilter would otherwise
+carry.  See `docs/ppp-ar-design.md` "AR module: unified architecture
+with background PPPFilter" for the full design including the blend
+math and the interaction with the consensus truth table.
+
+The NAV2-PVT secondary engine also serves as a safety net for the AR
+fix itself: if the bootstrapping AR produces a wrong integer fix, the
+position will jump, and the NAV2 consensus check will disagree —
+allowing us to reject the bad fix before it migrates into `known_ecef`.
+
 **Reference**: 2026-04-08 ocxo bring-up + MadHat overnight failure;
 project memory `project_madhat_ekf_overconfidence`.
 
