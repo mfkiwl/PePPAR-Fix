@@ -39,33 +39,89 @@ position references gives us a 2-of-3 vote.
 
 **The three sources**:
 
-1. **Live PPP background monitor** — a second `PPPFilter` instance
-   running in its own thread on the same observation stream (or a
-   subsampled copy, e.g. one epoch every 10–30 s to keep CPU low).
-   Independent state vector, independent ambiguity tracking.  When
-   it converges, its position estimate is an outer-loop sanity check
-   on `known_ecef`.  If it agrees with `known_ecef`, the antenna is
-   where we think it is.  If it disagrees, the antenna actually moved.
+1. **Live PPP background monitor** — implemented as **the same
+   `PPPFilter` instance currently destroyed at the end of Phase 1**,
+   simply kept alive and fed *decimated* observations during Phase 2
+   from a background thread.  No new filter class is needed.  The
+   existing PPPFilter is already proven (it's what bootstraps the
+   position in the first place); all we need is:
 
-2. **F9T's own onboard position fix** — the third opinion.  The F9T
-   runs its own internal position-fixing engine continuously and
-   reports it via `NAV-PVT` (and `NAV-HPPOSECEF` for high precision).
-   We **already enable NAV-PVT** in the receiver config
-   (`scripts/peppar_fix/receiver.py:99`) but currently drop it on the
-   floor in `realtime_ppp.py`.  The plumbing addition is small: stash
-   the latest `NAV-PVT` lat/lon/h into a thread-safe slot and let the
-   monitor read it.  In TIME mode the F9T forces its position, so we
-   need to either run the F9T in NAV mode (defeats the purpose of
-   TIME mode) or use NAV-PVT only as a sanity check that the F9T's
-   *internal* fixed-position state hasn't been disturbed.  Ideally
-   we toggle the F9T out of TIME mode briefly each minute to take a
-   fresh fix — but the cleaner answer is to just leave the F9T in NAV
-   mode and rely on our own EKFs for the precise clock estimation.
+   - In `run_steady_state`, *don't* `del filt` after Phase 1 — pass
+     the converged PPPFilter into a `BackgroundPPPMonitor` thread.
+   - The thread holds the filter, pulls one observation epoch every
+     N (default 10–30) from a tee of the observation queue, calls
+     `filt.predict()` + `filt.update()`, and exposes the latest
+     position estimate via a thread-safe slot.
+   - The main thread continues with FixedPosFilter exactly as today.
+
+   The cost is one additional consumer on the observation queue and
+   ~6% of one core for the PPPFilter step at 30 s cadence.  Memory is
+   the existing PPPFilter state vector — no growth.
+
+2. **F9T's secondary navigation engine** — the third opinion, and
+   **purpose-built by u-blox for exactly this use case**.
+
+   The F9T contains *two complete and independent navigation engines*.
+   The primary engine is what we already use: it can run in
+   position-fix, survey-in, fixed (TIME), or any of the standard
+   modes, and emits messages on UBX class 0x01 (`NAV-*`).  The
+   secondary engine is **always position-only** and runs continuously
+   regardless of what mode the primary is in.  It emits messages on
+   the parallel UBX class 0x29 (`NAV2-*`), with the same family of
+   message IDs (`NAV2-PVT`, `NAV2-POSECEF`, `NAV2-POSLLH`,
+   `NAV2-VELECEF`, etc.).
+
+   The whole point of NAV2 is what the user originally asked for:
+   when the primary is in TIME mode and forced to a fixed position,
+   the secondary is *still computing a fresh fix* every epoch.  So
+   you get your tight TIM-TP qErr (which depends on the primary's
+   fixed-position timing-mode behavior) AND a continuously-fresh
+   position estimate from a completely separate processing chain.
+   It's the cleanest possible disambiguation: same antenna, same RF
+   front end, same observations, but a different filter/engine.
+   If the primary's fixed-position assumption ever becomes wrong
+   (i.e. the antenna moved), NAV2 will see it within seconds.
+
+   **Status of NAV2 in our config**:
+   - pyubx2 fully supports the NAV2 family — verified on TimeHat:
+     `NAV2-PVT`, `NAV2-POSECEF`, `NAV2-CLOCK`, `NAV2-DOP`, `NAV2-SAT`,
+     `NAV2-SIG`, `NAV2-STATUS`, etc. all decode out of the box.
+   - We do NOT currently enable the secondary engine.  The receiver
+     config (`scripts/peppar_fix/receiver.py:99`) lists `NAV-PVT` as
+     required but says nothing about NAV2.  By default the F9T ships
+     with NAV2 *disabled* — it has its own enable key
+     `CFG-NAV2-OUT_ENABLED` that turns the second engine on, after
+     which individual `CFG-MSGOUT-UBX_NAV2_*` keys control message
+     output.  Enabling NAV2 increases the F9T's CPU load slightly
+     and adds a few hundred bytes/s to the UBX output stream — both
+     well within budget.
+   - We also do NOT parse NAV2-PVT in `realtime_ppp.py`, but the
+     handler is the same shape as the existing NAV-PVT case — the
+     parsed message has `lat`, `lon`, `height`, `hMSL`, `hAcc`,
+     `vAcc`, `numSV`, `fixType`, etc.  Just stash it in an
+     `F9TSecondaryPositionStore` (analogous to `QErrStore`) and the
+     consensus monitor reads from it.
+
+   Plumbing required (small):
+   - Add `CFG-NAV2-OUT_ENABLED = 1` to the receiver config.
+   - Add `CFG-MSGOUT-UBX_NAV2_PVT_<port> = 1` to enable the message.
+   - Add `NAV2-PVT` to the message dispatcher in `serial_reader`.
+   - New `F9TSecondaryPositionStore` class with `update()` and `get()`.
 
 3. **The original `known_ecef`** — the position the engine bootstrapped
    to (or that came from `known_pos`/`position.json`).  This is the
    "ground truth as of the last bootstrap" that the FixedPosFilter
    trusts implicitly.
+
+**Why this combination is robust**: the three sources have *completely
+independent failure modes*.  Cycle slips that poison FixedPosFilter
+won't affect the F9T secondary engine (different filter, possibly
+different ambiguity resolution).  An NTRIP outage won't affect the
+F9T secondary (it doesn't use SSR).  An F9T firmware glitch won't
+affect our background PPPFilter (different code, different state).
+And `known_ecef` is a fixed reference that doesn't change unless we
+deliberately update it after a real antenna move.  Any single source
+going wrong is caught by 2-of-3 vote against it.
 
 **Consensus logic** (all distances in metres, computed in ECEF):
 
@@ -112,28 +168,39 @@ woken at 3 am.
 
 **Implementation sketch**:
 
-- New `BackgroundPPPMonitor` thread in `peppar_fix_engine.py`
-- New `F9TPositionStore` (analogous to `QErrStore`) in `realtime_ppp.py`
-- `serial_reader` parses `NAV-PVT` (already enabled) and writes to
-  `F9TPositionStore`
+- `run_bootstrap` already returns the converged PPPFilter; today it's
+  destroyed.  Pass it through to `run_steady_state` instead.
+- New `BackgroundPPPMonitor` thread in `peppar_fix_engine.py` that
+  owns the inherited PPPFilter and steps it on a slow cadence.
+- New `F9TSecondaryPositionStore` (analogous to `QErrStore`) in
+  `realtime_ppp.py`.
+- `serial_reader` adds a `NAV2-PVT` case in the message dispatcher
+  and writes to `F9TSecondaryPositionStore`.
+- Receiver config gains two new keys: `CFG-NAV2-OUT_ENABLED=1` and
+  `CFG-MSGOUT-UBX_NAV2_PVT_<port>=1`.
 - `FixedPosFilter` watchdog handler reads both consensus sources
-  before deciding what to do
-- New CLI flag `--bg-ppp-cadence-s` (default: 30 s)
+  before deciding what to do.
+- New CLI flag `--bg-ppp-cadence-s` (default: 30 s).
 - New servo CSV column: `consensus_state` (one of `agree`, `f9t_only`,
-  `ppp_only`, `disagreement`, `recovering`)
+  `ppp_only`, `disagreement`, `recovering`).
 
 **CPU/memory cost**: PPP filter on a Pi 5 takes ~2 s of CPU per epoch
 at full rate.  Subsampled to every 30 s, the background monitor
-consumes ~6% of one core.  Memory is one extra EKF state vector
-(dozens of floats per satellite) — negligible.  NAV-PVT adds zero
-cost — we already enable it on the receiver.
+consumes ~6% of one core.  Memory is the existing PPPFilter state
+vector — already in memory during Phase 1, just kept around past
+the Phase 1 → Phase 2 transition instead of garbage-collected.
+NAV2 enable adds a few hundred bytes/s on the UBX serial stream and
+a small CPU bump on the F9T — both negligible.
 
 **What this would have done last night**: when MadHat's FixedPos
 watchdog tripped at 22:03, the consensus check would have:
-- Read `bg_PPP_position` ≈ `known_ecef` (background filter unaffected by
-  the cycle slip in FixedPos's state)
-- Read `F9T_NAV_PVT_position` ≈ `known_ecef` (F9T's onboard fix is its
-  own engine, immune to our EKF's state)
+- Read `bg_PPP_position` ≈ `known_ecef` (background PPPFilter is a
+  different state from FixedPosFilter and was not corrupted by the
+  cycle slip event)
+- Read `F9T_NAV2_PVT_position` ≈ `known_ecef` (F9T's *secondary*
+  navigation engine is a completely separate filter inside the F9T,
+  immune to anything happening in our PPP code or in the F9T's
+  primary timing-mode engine)
 - Recognized case 1: both consensus sources agree antenna is fine
 - Reset FixedPos from `known_ecef`, kept the engine running on PPS+qErr,
   written `consensus_state=recovering` to the servo CSV for the next
