@@ -1,5 +1,8 @@
 # From PPP to PPP-AR
 
+> **Future direction**: see `docs/architecture-vision.md` — AR is an
+> extension of AntPosEst, feeding cm-level positions back to DOFreqEst.
+
 Design for adding integer ambiguity resolution to peppar-fix.
 
 ## What we have today (float PPP)

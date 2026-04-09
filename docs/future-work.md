@@ -4,6 +4,11 @@ Improvement candidates drawn from SatPulse comparison and operational
 experience.  These are independent of each other and can be adopted
 incrementally.
 
+> **Architectural vision**: see `docs/architecture-vision.md` for the
+> unified naming (AntPosEst / DOFreqEst), state machines, measurement
+> fusion, bootstrap-as-seed-verification, and wrapper dissolution plan.
+> Many of the entries below are stepping stones toward that vision.
+
 ## Three-source position consensus + self-healing FixedPosFilter
 
 **What**: When the engine is in Phase 2 (FixedPosFilter, position
@@ -291,6 +296,47 @@ Tune window size and N for the platform's noise profile.
 
 **Reference**: SatPulse `time/internal/phcsync/converging.go`,
 window 5, stable count 3, offset limit 1000 ns.
+
+
+## In-band DO noise estimation from discipline gaps
+
+**What**: Continuously estimate the DO's noise floor (ADEV, TDEV,
+dominant noise type) from free-running samples that occur naturally
+during the adaptive discipline interval, instead of requiring a
+dedicated 30-minute freerun characterization.
+
+**Why**: The current `--freerun` characterization is a one-time
+snapshot at one temperature.  It goes stale as conditions change.
+But during normal servo operation, the adaptive discipline interval
+creates natural measurement windows: when adjfine is held constant
+for 10 seconds between corrections, epochs 2–9 are genuinely
+free-running.  After removing the known linear drift (constant
+adjfine × dt), the residual is pure DO phase noise.
+
+**How**: An `InBandNoiseEstimator` component inside DOFreqEst:
+1. Watches for adjfine-write events.
+2. Accumulates phase samples from discipline gaps (skipping the
+   first epoch after each write to avoid the transient).
+3. Computes running ADEV/TDEV at τ = 1, 2, 4, ... seconds.
+4. Exposes `current_adev(tau)` for the servo gain scheduler.
+5. Continuously updates as temperature changes, oscillator ages, etc.
+
+**Benefits over one-time freerun**:
+- Continuously current (no stale characterization)
+- No lost operational time
+- Better statistics (thousands of gaps per overnight)
+- Temperature correlation possible (if board temp is logged)
+
+**Limitations**: Can't measure ADEV at τ longer than the maximum
+discipline interval.  The one-time freerun still seeds the noise
+model for the very first run; the in-band estimator verifies and
+refines it.  Over time the initial characterization window can
+shrink from 30 minutes to 5 minutes as the in-band estimator
+matures.
+
+**Reference**: `docs/architecture-vision.md` "In-band DO noise
+estimation"; `docs/asd-psd-servo-tuning.md` and
+`docs/freerun-characterization.md` for the current approach.
 
 
 ## Holdover with frequency blending

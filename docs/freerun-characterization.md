@@ -1,5 +1,7 @@
 # Freerun PHC Characterization
 
+> **Future direction**: see `docs/architecture-vision.md` — freerun to be superseded by in-band DO noise estimation.
+
 ## Overview
 
 `peppar-fix --freerun` runs the full pipeline without steering the PHC.

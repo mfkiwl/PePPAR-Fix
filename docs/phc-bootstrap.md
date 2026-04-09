@@ -1,5 +1,7 @@
 # PHC Bootstrap Design
 
+> **Future direction**: see `docs/architecture-vision.md` — bootstrap logic to be absorbed into DOFreqEst initialization.
+
 ## Goal
 
 The servo should always start with a PHC that needs only minor

@@ -1,5 +1,7 @@
 # ptp4l Supervision — Layered Clock-Class Degradation
 
+> **Future direction**: see `docs/architecture-vision.md` — clockClass to be driven by estimator state transitions.
+
 When peppar-fix disciplines a PHC that ptp4l distributes as a PTP
 grandmaster, the two processes must coordinate quality signaling.  If
 peppar-fix loses GNSS lock, enters holdover, or crashes, ptp4l must

@@ -1,5 +1,7 @@
 # ASD/PSD Analysis for Servo Tuning
 
+> **Future direction**: see `docs/architecture-vision.md` — noise spectra to be measured in-band from discipline gaps.
+
 ## Why measure noise spectra
 
 The optimal loop bandwidth of a PI servo is **the frequency where the

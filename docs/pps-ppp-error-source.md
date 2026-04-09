@@ -1,5 +1,7 @@
 # PPS+PPP Error Source: Carrier-Phase-Precise PPS Correction
 
+> **Future direction**: see `docs/architecture-vision.md` — source competition to evolve into measurement fusion.
+
 ## Summary
 
 The PPP filter's `dt_rx` (receiver clock offset from GNSS time) can replace

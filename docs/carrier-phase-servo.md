@@ -1,5 +1,7 @@
 # PPP Carrier Phase Servo Drive
 
+> **Future direction**: see `docs/architecture-vision.md` — Carrier source to become FrequencyIntegrator inside DOFreqEst.
+
 ## Overview
 
 The Carrier Phase servo drive uses PPP carrier-phase observations
