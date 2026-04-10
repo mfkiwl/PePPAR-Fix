@@ -62,7 +62,7 @@ def main():
     with Ticc(args.ticc_port, wait_for_boot=True) as ticc:
         while ppb <= args.stop_ppb + args.step_ppb / 2:
             # Set adjfine
-            ptp.set_adjfine(ppb)
+            ptp.adjfine(ppb)
             print(f"adjfine={ppb:+.2f} ppb, settling {args.settle_s}s...",
                   end='', flush=True, file=sys.stderr)
             time.sleep(args.settle_s)
