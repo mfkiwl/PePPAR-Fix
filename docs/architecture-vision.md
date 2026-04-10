@@ -199,13 +199,30 @@ discipline interval, epochs 2–9 see the DO drifting with no correction
 applied.  After removing the known linear drift (constant adjfine × dt),
 the residual is pure DO phase noise.
 
-The `InBandNoiseEstimator` component of DOFreqEst:
-- Watches for adjfine-write events
-- Accumulates free-running phase samples from discipline gaps
-- Skips the first epoch after each write (transient)
-- Computes running ADEV/TDEV at τ = 1, 2, 4, ... seconds
-- Exposes `current_adev(tau)` for the servo gain scheduler to read
-- Continuously updates as temperature and conditions change
+The `InBandNoiseEstimator` component of DOFreqEst runs two channels:
+
+- **Gap channel**: phase noise from epochs with no adjfine change
+  (pure DO noise — the oscillator's free-running floor).
+- **Correction channel**: residual noise from epochs where adjfine
+  changed.  The expected phase change is subtracted
+  (`residual = measured - expected`, where `expected = Δfreq × Δt`).
+  If adjfine() calls are truly free (as measured 2026-04-09:
+  `docs/adjfine-noise-characterization-2026-04-09.md`), both channels
+  should agree.  Divergence indicates DO stress or write-latency issues.
+
+Both channels compute running ADEV/TDEV at τ = 1, 2, 4, ... seconds.
+The gap channel gives the DO's noise floor; the correction channel
+validates that the servo's corrections aren't adding hidden noise.
+
+Dynamic uses of the two-channel comparison:
+- **Adaptive correction clamping**: reduce max correction if the
+  correction channel exceeds the gap channel (DO can't absorb it)
+- **DO health monitoring**: aging crystals show increasing correction
+  noise before catastrophic failure
+- **Per-epoch confidence weighting**: epochs with large corrections
+  get lower confidence for downstream consumers (PTP clients, TICC)
+- **Correction scheduling**: skip corrections whose noise cost
+  exceeds their benefit (Δfreq × Δt < DO noise floor → don't bother)
 
 **Benefits over one-time freerun**:
 - Continuously current (tracks temperature-dependent noise changes)
