@@ -2278,6 +2278,23 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         if mode_gain_floor is not None:
             gain_scale = max(gain_scale, mode_gain_floor)
 
+        # In TICC+qErr-drive mode, adapt gain based on error magnitude.
+        # The TICC+qErr reference noise (178 ps) is far below the DO floor
+        # (0.92 ns), so TINY corrections (< 1 ppb) are invisible.  But the
+        # bootstrap leaves a ~5 µs phase offset that needs aggressive pull-in.
+        # Solution: interpolate kp between pull-in gain and settled gain
+        # based on error magnitude.  Settled gain keeps corrections < 1 ppb
+        # when the error is < 5 ns (the adjfine noise test showed < 1 ppb
+        # corrections add unmeasurable noise to the DO).
+        if args.ticc_drive and abs(avg_error) < 500:
+            # Error is small enough for gentle gains.  Scale kp down
+            # proportionally to error magnitude: at 500 ns use full kp,
+            # at 5 ns use kp/100.  This keeps corrections below 1 ppb
+            # when settled while still pulling in from moderate errors.
+            error_ratio = max(abs(avg_error), 5.0) / 500.0
+            adaptive_scale = max(0.01, min(1.0, error_ratio))
+            gain_scale *= adaptive_scale
+
         servo.kp = BASE_KP * gain_scale
         servo.ki = BASE_KI * gain_scale
 
