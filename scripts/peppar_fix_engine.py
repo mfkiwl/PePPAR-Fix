@@ -2373,15 +2373,18 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             adaptive_scale = max(0.01, min(1.0, error_ratio))
             gain_scale *= adaptive_scale
 
-        servo.kp = BASE_KP * gain_scale
-        servo.ki = BASE_KI * gain_scale
+        is_ekf = getattr(args, 'do_freq_est', False)
 
-        if getattr(args, 'do_freq_est', False) and ticc_diff_raw_ns is not None:
-            # DOFreqEst EKF: pass raw TICC (no qErr) + PPP dt_rx
+        if is_ekf and ticc_diff_raw_ns is not None:
+            # DOFreqEst EKF: pass raw TICC (no qErr) + PPP dt_rx.
+            # The EKF has its own LQR gain — skip PI gain adaptation,
+            # landing mode, and anti-windup (those are PI-specific).
             adjfine_ppb = -servo.update(
                 ticc_diff_raw_ns, dt=float(n_samples),
                 dt_rx_ns=dt_rx_ns, dt_rx_sigma_ns=dt_rx_sigma)
         else:
+            servo.kp = BASE_KP * gain_scale
+            servo.ki = BASE_KI * gain_scale
             adjfine_ppb = -servo.update(avg_error, dt=float(n_samples))
         max_track_ppb = min(
             ctx['caps']['max_adj'],
@@ -2394,15 +2397,15 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 math.copysign(max_track_ppb, adjfine_ppb),
             )
             adjfine_ppb = math.copysign(max_track_ppb, adjfine_ppb)
-        if args.ticc_drive and best.name == 'TICC' and ctx.get('tracking_mode') == 'landing':
+        if not is_ekf and args.ticc_drive and best.name == 'TICC' and ctx.get('tracking_mode') == 'landing':
             landing_floor_ppb = abs(avg_error) / max(1e-6, args.ticc_landing_horizon_s)
             landing_floor_ppb = min(max_track_ppb, landing_floor_ppb)
             desired_sign = math.copysign(1.0, -avg_error) if avg_error != 0 else 1.0
             if abs(adjfine_ppb) < landing_floor_ppb:
                 adjfine_ppb = math.copysign(landing_floor_ppb, desired_sign)
         # Anti-windup: if adjfine is at the rail, reset integral
-        # to prevent windup-driven oscillation
-        if abs(adjfine_ppb) >= max_track_ppb * 0.95:
+        # to prevent windup-driven oscillation (PI servo only)
+        if not is_ekf and abs(adjfine_ppb) >= max_track_ppb * 0.95:
             servo.integral = -adjfine_ppb / servo.ki if servo.ki != 0 else 0
             log.warning(f'  Anti-windup: adj={adjfine_ppb:+.0f}ppb at rail, integral reset')
         if not args.freerun:
@@ -2412,7 +2415,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
 
         scheduler.update_drift_rate(time.monotonic(), adjfine_ppb)
         scheduler.compute_adaptive_interval(avg_confidence)
-        if args.ticc_drive and best.name == 'TICC' and ctx.get('tracking_mode') == 'landing':
+        if not is_ekf and args.ticc_drive and best.name == 'TICC' and ctx.get('tracking_mode') == 'landing':
             scheduler.interval = 1
 
         if n_epochs % 10 == 0:
