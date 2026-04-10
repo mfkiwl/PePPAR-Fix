@@ -186,9 +186,15 @@ class KalmanServo:
         # u = -L @ x gives the total adjfine to apply.
         # L[0] × phase: proportional correction for phase error.
         # L[1] × freq: full cancellation of estimated TCXO drift.
-        # The adjfine IS u — no further transformation needed.
+        #
+        # SIGN CONVENTION: the engine calls adjfine = -servo.update(),
+        # expecting update() to return a value with the OPPOSITE sign
+        # of the desired adjfine (PIServo convention: positive output
+        # = "clock is ahead, slow down" = negative adjfine).  So we
+        # return the negative of our computed adjfine here, and the
+        # engine's negation makes it correct.
         u = -(self.L @ self.x).item()
-        adjfine = u
+        adjfine = -u  # engine will negate this back
 
         # Clamp
         adjfine = max(-self.max_ppb, min(self.max_ppb, adjfine))
