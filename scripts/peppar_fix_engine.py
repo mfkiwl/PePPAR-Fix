@@ -2205,7 +2205,21 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         # effective reference noise drops to ~178 ps (the TICC+qErr
         # floor), well below the DO, so the servo can actually improve it.
         ticc_diff_raw_ns = ticc_diff_ns  # preserve for DOFreqEst EKF
-        if qerr_ns is not None:
+        # PPP-derived qErr: compute from dt_rx carrier-phase estimate
+        # (~0.1 ns precision) instead of TIM-TP qErr (~0.5 ns).
+        # Requires converged PPP (dt_rx_sigma < 1 ns).
+        ppp_qerr_ns = None
+        if (getattr(args, 'ppp_qerr', False) and dt_rx_ns is not None
+                and dt_rx_sigma is not None and dt_rx_sigma < 1.0):
+            tick_ns = 8.0  # 125 MHz
+            ppp_qerr_ns = dt_rx_ns - round(dt_rx_ns / tick_ns) * tick_ns
+        if ppp_qerr_ns is not None:
+            ticc_diff_ns = ticc_diff_ns + ppp_qerr_ns
+            if n_epochs % 10 == 0 and qerr_ns is not None:
+                log.info("  [%d] PPP qErr=%.3f vs TIM-TP qErr=%.3f (diff=%.3f ns)",
+                         n_epochs, ppp_qerr_ns, qerr_ns,
+                         ppp_qerr_ns - qerr_ns)
+        elif qerr_ns is not None:
             ticc_diff_ns = ticc_diff_ns + qerr_ns
         sources = ticc_only_error_source(ticc_diff_ns, args.ticc_confidence_ns)
         corr_age_for_inflation = None  # not applicable in TICC-drive mode
@@ -3194,6 +3208,9 @@ Two-phase operation:
                             "(default: 100000 for OCXO, 500000 for TCXO)")
     servo.add_argument("--no-qerr", action="store_true",
                        help="Disable qErr correction (PPS-only discipline)")
+    servo.add_argument("--ppp-qerr", action="store_true",
+                       help="Use PPP carrier-phase dt_rx for qErr correction "
+                            "instead of TIM-TP qErr (~0.1 ns vs ~0.5 ns)")
     servo.add_argument("--no-ppp", action="store_true",
                        help="Disable PPP carrier-phase correction "
                             "(PPS+qErr only, no PPS+PPP source)")
