@@ -167,12 +167,21 @@ class KalmanServo:
         self.freq = initial_freq
         self._last_u = 0.0
 
-    def update(self, offset_ns, dt=1.0):
+    def update(self, offset_ns, dt=1.0,
+              carrier_ns=None, carrier_sigma_ns=None):
         """Process one measurement. Returns frequency adjustment in ppb.
 
         Args:
-            offset_ns: measured phase offset (ns), averaged over dt epochs.
+            offset_ns: measured phase offset (ns) from TICC+qErr or EXTTS.
             dt: seconds since last correction (discipline interval).
+            carrier_ns: carrier-phase prediction of phase error (ns).
+                From CarrierPhaseTracker.compute_error().  When provided
+                alongside carrier_sigma_ns, the Kalman fuses both the
+                hardware measurement (TICC) and the carrier prediction
+                in a single update step — two independent observations
+                of the same phase state, each weighted by its noise.
+            carrier_sigma_ns: 1-sigma uncertainty of the carrier prediction.
+                Typically dt_rx_sigma_ns from the PPP filter (~0.1 ns).
 
         Returns:
             Frequency in ppb to apply via adjfine.
@@ -202,7 +211,7 @@ class KalmanServo:
         x_pred = self.F @ self.x + self.B.flatten() * self._last_u
         P_pred = self.F @ self.P @ self.F.T + self.Q * dt
 
-        # ── Kalman update ──
+        # ── Kalman update: primary measurement (TICC+qErr) ──
         z = offset_ns
         innovation = z - (self.H @ x_pred).item()
         S = (self.H @ P_pred @ self.H.T + self.R).item()
@@ -210,6 +219,25 @@ class KalmanServo:
 
         self.x = x_pred + K.flatten() * innovation
         self.P = P_pred - np.outer(K.flatten(), K.flatten()) * S
+
+        # ── Kalman update: carrier fusion (optional second measurement) ──
+        # When both carrier_ns and carrier_sigma_ns are provided, fuse
+        # the carrier-phase prediction as a second independent observation
+        # of the phase state.  This is a sequential Kalman update — the
+        # posterior from the TICC update becomes the prior for the Carrier
+        # update.  Mathematically equivalent to a single update with a
+        # stacked measurement vector, but simpler to implement.
+        #
+        # The carrier measurement model is the same as TICC: H = [1, 0]
+        # (observes phase).  The noise is carrier_sigma_ns² (PPP filter
+        # uncertainty, typically ~0.1 ns — 20× lower than TICC+qErr).
+        if carrier_ns is not None and carrier_sigma_ns is not None:
+            R_c = np.array([[carrier_sigma_ns ** 2]])
+            innov_c = carrier_ns - (self.H @ self.x).item()
+            S_c = (self.H @ self.P @ self.H.T + R_c).item()
+            K_c = (self.P @ self.H.T) / S_c
+            self.x = self.x + K_c.flatten() * innov_c
+            self.P = self.P - np.outer(K_c.flatten(), K_c.flatten()) * S_c
 
         # ── LQR control ──
         # u = -L @ x gives the total adjfine to apply.

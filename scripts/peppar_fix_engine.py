@@ -1430,12 +1430,15 @@ def _setup_servo(args, known_ecef, qerr_store):
             r_weight=args.kalman_r_weight,
             dead_zone_ppb=args.kalman_dead_zone,
         )
+        carrier_fusion = (not getattr(args, 'no_carrier', False)
+                          and args.ticc_drive)
         log.info("Kalman servo: sigma_meas=%.3f ns, sigma_phase=0.92 ns, "
                  "sigma_freq=%.4f ppb, q_weight=%.2f, r_weight=%.2f, "
-                 "dead_zone=%.2f ppb, initial_freq=%.1f ppb",
+                 "dead_zone=%.2f ppb, carrier_fusion=%s, "
+                 "initial_freq=%.1f ppb",
                  sigma_meas, args.kalman_sigma_freq,
                  args.kalman_q_weight, args.kalman_r_weight,
-                 args.kalman_dead_zone, current_adj)
+                 args.kalman_dead_zone, carrier_fusion, current_adj)
     else:
         servo = PIServo(args.track_kp, args.track_ki, max_ppb=caps['max_adj'],
                         initial_freq=current_adj)
@@ -2077,6 +2080,17 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             carrier_tracker.update_drift_estimate(
                 dt_rx_ns, pps_error_ns, ctx['adjfine_ppb'])
 
+    # Carrier prediction for Kalman fusion (computed early, before servo call)
+    _carrier_for_fusion = None
+    _carrier_sigma_for_fusion = None
+    if (carrier_tracker is not None and carrier_tracker.initialized
+            and dt_rx_ns is not None and dt_rx_sigma is not None
+            and not getattr(args, 'no_carrier', False)):
+        _ce = carrier_tracker.compute_error(dt_rx_ns)
+        if _ce is not None:
+            _carrier_for_fusion = _ce
+            _carrier_sigma_for_fusion = dt_rx_sigma
+
     pps_var_ns2 = qerr_alignment["pps_var"].diff_variance()
     pps_qerr_plus_var_ns2 = qerr_alignment["pps_qerr_plus_var"].diff_variance()
     pps_qerr_minus_var_ns2 = qerr_alignment["pps_qerr_minus_var"].diff_variance()
@@ -2319,7 +2333,15 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         servo.kp = BASE_KP * gain_scale
         servo.ki = BASE_KI * gain_scale
 
-        adjfine_ppb = -servo.update(avg_error, dt=float(n_samples))
+        if (getattr(args, 'kalman_servo', False)
+                and _carrier_for_fusion is not None
+                and not getattr(args, 'no_carrier', False)):
+            adjfine_ppb = -servo.update(
+                avg_error, dt=float(n_samples),
+                carrier_ns=_carrier_for_fusion,
+                carrier_sigma_ns=_carrier_sigma_for_fusion)
+        else:
+            adjfine_ppb = -servo.update(avg_error, dt=float(n_samples))
         max_track_ppb = min(
             ctx['caps']['max_adj'],
             args.track_max_ppb if args.track_max_ppb is not None else ctx['caps']['max_adj'],
