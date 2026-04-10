@@ -98,8 +98,15 @@ class DOFreqEst:
         # Measurement noise
         self.R_ticc = np.array([[sigma_ticc_ns ** 2]])
 
-        # Initial covariance
-        self.P = np.diag([1e6, 100.0**2, 1000.0**2, 100.0**2])
+        # Initial covariance — tuned to bootstrap knowledge:
+        # x[0]: dt_rx from drift file, ~100 ns stale from TCXO drift
+        # x[1]: TCXO rate, poorly known (temperature dependent)
+        # x[2]: PHC phase, ~5000 ns (bootstrap glide not converged yet)
+        # x[3]: crystal freq, well-known from bootstrap adjfine (~1 ppb)
+        if initial_dt_rx_ns is not None:
+            self.P = np.diag([100.0**2, 10.0**2, 5000.0**2, 1.0**2])
+        else:
+            self.P = np.diag([1e6, 100.0**2, 1000.0**2, 100.0**2])
 
         # LQR: only PHC states are controllable
         # L[2] = phase gain, L[3] = freq cancellation
@@ -175,6 +182,10 @@ class DOFreqEst:
         # is near zero and doesn't corrupt the TCXO state.
         if self._need_phc_seed:
             self.x[2] = -offset_ns - _qerr(self.x[0], self.tick_ns)
+            # Reduce P[2,2] to match TICC measurement accuracy (~3 ns).
+            # This prevents TICC innovations from leaking too much into
+            # x[3] via P[2,3] correlation.
+            self.P[2, 2] = 10.0 ** 2
             self._need_phc_seed = False
 
         # ── Adaptive Q: boost during pull-in ──
