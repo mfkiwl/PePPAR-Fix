@@ -136,7 +136,7 @@ def _set_pin_function_sysfs(ptp_dev, pin_name, func, channel):
 _E810_PIN_NAMES = {0: "0", 1: "1", 2: "2", 3: "3", 4: "4"}
 
 
-def _enable_pps_out(ptp, args):
+def _enable_pps_out(ptp, args, stepped=False):
     """Enable PEROUT (PPS OUT) if configured.
 
     Must be called after any PHC phase step — stepping the PHC
@@ -144,6 +144,16 @@ def _enable_pps_out(ptp, args):
 
     Pin programming: tries PTP_PIN_SETFUNC ioctl first (i226), then
     sysfs fallback (E810 ice driver rejects the ioctl but accepts sysfs).
+
+    i226 PEROUT half-period bug (2026-04-10): when ADJ_SETOFFSET shifts
+    the PHC time and then enable_perout programs Target Time mode, the
+    hardware fires at 500 ms instead of 0 ms approximately 90% of the
+    time.  This is a half-period phase ambiguity in the i226's Target
+    Time comparator.  The workaround: when we know a time step just
+    happened (stepped=True), program PEROUT once to let the hardware
+    settle, wait 2 seconds, then disable and re-program.  The second
+    programming always works because there's no time discontinuity
+    between it and the enable.
     """
     if args.pps_out_pin < 0:
         return
@@ -166,6 +176,14 @@ def _enable_pps_out(ptp, args):
         # Cancel any stale PEROUT, then re-enable
         ptp.disable_perout(args.pps_out_channel)
         ptp.enable_perout(args.pps_out_channel)
+
+        # i226 half-period workaround: re-program after a delay
+        if stepped:
+            log.info("PPS OUT: post-step reprogram (i226 half-period workaround)")
+            time.sleep(2)
+            ptp.disable_perout(args.pps_out_channel)
+            ptp.enable_perout(args.pps_out_channel)
+
         log.info("PPS OUT enabled: pin %d, PEROUT channel %d",
                  args.pps_out_pin, args.pps_out_channel)
     except OSError as e:
@@ -748,6 +766,7 @@ def main():
                      tcxo_freq_corr_ppb, n_dt)
 
     phi_0 = phase_error_ns
+    did_step = False
 
     if not phase_sane:
         # Step: apply the PPS-measured phase error as a relative correction.
@@ -756,6 +775,7 @@ def main():
         try:
             log.info("Stepping PHC by %+.0f ns (ADJ_SETOFFSET)", -phase_error_ns)
             ptp.adj_setoffset(-phase_error_ns)
+            did_step = True
         except OSError as e:
             log.warning("ADJ_SETOFFSET failed (%s), falling back to optimal stopping",
                         e)
@@ -771,6 +791,7 @@ def main():
             log.info("Step: residual=%+.0f ns, attempts=%d, %s (limit=%.1fs)",
                      residual, attempts, "ACCEPTED" if met else "DEADLINE",
                      args.phc_optimal_stop_limit_s)
+            did_step = True
 
         # Verify: measure true residual φ₀ from the next PPS edge.
         # read_one_rising_edge filters out the i226 dual-edge falling
@@ -887,7 +908,7 @@ def main():
             # Don't teardown actuator — engine inherits write_freq mode.
             cm_i2c.close()
 
-            _enable_pps_out(ptp, args)
+            _enable_pps_out(ptp, args, stepped=did_step)
             ptp.close()
             log.info("PHC bootstrap complete (ClockMatrix) — servo may start")
             return 0
@@ -906,7 +927,7 @@ def main():
     save_drift(args.drift_file, base_freq, args.ptp_dev, tcxo_freq_corr_ppb)
     log.info("Drift file updated: %s (base=%.1f ppb)", args.drift_file, base_freq)
 
-    _enable_pps_out(ptp, args)
+    _enable_pps_out(ptp, args, stepped=did_step)
     ptp.close()
     log.info("PHC bootstrap complete — servo may start")
     return 0
