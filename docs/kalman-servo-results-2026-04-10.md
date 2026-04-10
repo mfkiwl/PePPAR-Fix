@@ -40,22 +40,46 @@ Adaptive Q: 10x sigma_freq during pull-in (|phase| > 50 ns), tapering
 to 1x when settled (|phase| < 10 ns).  Enables fast convergence with
 sigma_freq=0.001 without sacrificing long-tau stability.
 
-## TDEV Results (TimeHat, 15-min runs)
+## TDEV Results (TimeHat)
 
 Best configuration: Kalman with default parameters (sf=0.01, no dead zone).
 
-| tau (s) | Kalman chA (ns) | PPS chB (ns) | Ratio | DO floor |
-|--------:|----------------:|-------------:|------:|----------|
-| 1       | **0.750**       | 3.110        | 0.24  | 0.920    |
-| 2       | **1.065**       | 2.006        | 0.53  | 0.920    |
-| 5       | **1.628**       | 2.238        | 0.73  | 0.920    |
-| 10      | 2.163           | 2.572        | 0.84  | 0.920    |
-| 20      | 2.916           | 2.562        | 1.14  |          |
-| 50      | 2.864           | 2.261        | 1.27  |          |
-| 100     | 5.712           | 2.672        | 2.14  |          |
+### 1-hour run (3300 epochs, definitive)
 
-Crossover at tau ~15s.  Above that, servo adds wander.  2-hour runs
-in progress to assess long-tau behavior with better statistics.
+| tau (s) | Kalman chA (ns) | PPS chB (ns) | Ratio | Notes |
+|--------:|----------------:|-------------:|------:|-------|
+| 1       | **1.12**        | 2.17         | 0.52  | Kalman wins 2x |
+| 2       | **1.09**        | 2.67         | 0.41  | Kalman wins 2.4x |
+| 5       | **1.63**        | 2.25         | 0.72  | Kalman wins 1.4x |
+| 10      | 2.64            | 2.30         | 1.15  | Crossover |
+| 20      | 3.71            | 2.36         | 1.57  | PPS wins |
+| 50      | 4.58            | 2.36         | 1.94  | |
+| 100     | 5.37            | 2.43         | 2.21  | |
+| 200     | 5.60            | 2.54         | 2.20  | Plateau |
+| 300     | 5.37            | 2.66         | 2.02  | |
+| 500     | 6.10            | 2.71         | 2.25  | |
+
+Crossover at tau ~8s.  Long-tau TDEV plateaus at ~5-6 ns (does not
+diverge).  DO free-running floor = 0.92 ns at tau=1s.
+
+### MadHat comparison (no heatsink on TCXO)
+
+| tau (s) | MH Kalman (ns) | MH PPS (ns) | TH Kalman (ns) |
+|--------:|---------------:|------------:|---------------:|
+| 1       | 2.61           | 2.25        | 1.12           |
+| 5       | 8.74           | 2.37        | 1.63           |
+| 100     | 17.30          | 3.49        | 5.37           |
+
+MadHat (no TCXO heatsink): adjfine std = 4.0 ppb (10x worse than
+TimeHat's 0.9 ppb).  TDEV(1s) = 2.6 ns, barely beating PPS.  The
+TCXO temperature sensitivity dominates the noise budget.  Heatsink
+installation planned.
+
+### Early 15-min runs (for reference)
+
+Best 15-min TDEV(1s) = 0.75 ns (run kalman-base).  The 1-hour value
+of 1.12 ns is the more reliable number: the 15-min result benefited
+from a favorable noise realization during its short settled window.
 
 ## Pull-in Behavior
 
