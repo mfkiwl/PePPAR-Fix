@@ -1423,7 +1423,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         servo = KalmanServo(
             sigma_meas_ns=sigma_meas,
             sigma_phase_ns=0.92,   # DO floor from adjfine noise test
-            sigma_freq_ppb=0.01,   # TCXO frequency random walk
+            sigma_freq_ppb=args.kalman_sigma_freq,
             max_ppb=caps['max_adj'],
             initial_freq=current_adj,
             q_weight=args.kalman_q_weight,
@@ -1431,9 +1431,10 @@ def _setup_servo(args, known_ecef, qerr_store):
             dead_zone_ppb=args.kalman_dead_zone,
         )
         log.info("Kalman servo: sigma_meas=%.3f ns, sigma_phase=0.92 ns, "
-                 "sigma_freq=0.01 ppb, q_weight=%.2f, r_weight=%.2f, "
+                 "sigma_freq=%.4f ppb, q_weight=%.2f, r_weight=%.2f, "
                  "dead_zone=%.2f ppb, initial_freq=%.1f ppb",
-                 sigma_meas, args.kalman_q_weight, args.kalman_r_weight,
+                 sigma_meas, args.kalman_sigma_freq,
+                 args.kalman_q_weight, args.kalman_r_weight,
                  args.kalman_dead_zone, current_adj)
     else:
         servo = PIServo(args.track_kp, args.track_ki, max_ppb=caps['max_adj'],
@@ -3030,6 +3031,10 @@ Two-phase operation:
                        help="Minimum adjfine change (ppb) to actually apply. "
                             "Below this, hold previous value to reduce noise. "
                             "Suggested: 0.5 (below DO floor)")
+    servo.add_argument("--kalman-sigma-freq", type=float, default=0.01,
+                       help="DO frequency random walk (ppb/epoch). Lower = "
+                            "more stable frequency estimate, less wander. "
+                            "Default 0.01 from ADEV characterization.")
     servo.add_argument("--track-kp", type=float, default=0.3,
                        help="PI servo Kp gain (default: 0.3)")
     servo.add_argument("--track-ki", type=float, default=0.1,
