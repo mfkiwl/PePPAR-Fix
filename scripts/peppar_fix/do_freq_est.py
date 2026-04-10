@@ -223,6 +223,17 @@ class DOFreqEst:
 
         adjfine = max(-self.max_ppb, min(self.max_ppb, adjfine))
 
+        import logging
+        _log = logging.getLogger("DOFreqEst")
+        _log.info("  EKF: x=[%.1f, %.3f, %.1f, %.3f] "
+                  "innov_ticc=%.3f u=%.3f adjfine=%.3f "
+                  "last_u=%.3f dt=%.1f z_ticc=%.3f h=%.3f "
+                  "ppp=%s",
+                  self.x[0], self.x[1], self.x[2], self.x[3],
+                  innov_ticc, u, adjfine,
+                  self._last_u, dt, z_ticc, h_pred,
+                  f"{dt_rx_ns:.1f}" if dt_rx_ns is not None else "None")
+
         self._last_u = u
         self.freq = adjfine
         return self.freq
