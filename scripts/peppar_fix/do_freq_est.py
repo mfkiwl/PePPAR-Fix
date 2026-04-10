@@ -116,19 +116,27 @@ class DOFreqEst:
 
         z_ticc = -φ_phc - qerr(φ_tcxo)
 
-        The engine computes ticc_diff_ns = -(PEROUT - PPS) = -φ_phc - qerr.
+        When TCXO not yet initialized, treat as z_ticc = -φ_phc
+        (no qerr correction — degrades to 2-state equivalent).
         """
-        return -x[2] - _qerr(x[0], self.tick_ns)
+        if self._tcxo_initialized:
+            return -x[2] - _qerr(x[0], self.tick_ns)
+        else:
+            return -x[2]
 
     def _H_ticc(self, x):
         """Jacobian of h_ticc at x.
 
-        Between tick boundaries: ∂qerr/∂φ_tcxo = 1.
-        At tick boundaries: qerr jumps by ±tick, but the Jacobian is
-        still approximately 1 for the EKF (the tick crossing is rare
-        when PPP constrains φ_tcxo to < tick/2 uncertainty).
+        When TCXO is initialized (PPP has provided dt_rx):
+            H = [-1, 0, -1, 0] — full coupling, EKF resolves tick.
+        When TCXO is NOT initialized:
+            H = [0, 0, -1, 0] — degrade to 2-state (TICC observes
+            φ_phc only, ignoring unknown TCXO contribution).
         """
-        return np.array([[-1.0, 0.0, -1.0, 0.0]])
+        if self._tcxo_initialized:
+            return np.array([[-1.0, 0.0, -1.0, 0.0]])
+        else:
+            return np.array([[0.0, 0.0, -1.0, 0.0]])
 
     def update(self, offset_ns, dt=1.0,
                dt_rx_ns=None, dt_rx_sigma_ns=None):
