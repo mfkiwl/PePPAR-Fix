@@ -44,42 +44,55 @@ sigma_freq=0.001 without sacrificing long-tau stability.
 
 Best configuration: Kalman with default parameters (sf=0.01, no dead zone).
 
-### 1-hour run (3300 epochs, definitive)
+### 2-hour run (7200 epochs, definitive)
 
 | tau (s) | Kalman chA (ns) | PPS chB (ns) | Ratio | Notes |
 |--------:|----------------:|-------------:|------:|-------|
-| 1       | **1.12**        | 2.17         | 0.52  | Kalman wins 2x |
-| 2       | **1.09**        | 2.67         | 0.41  | Kalman wins 2.4x |
-| 5       | **1.63**        | 2.25         | 0.72  | Kalman wins 1.4x |
-| 10      | 2.64            | 2.30         | 1.15  | Crossover |
-| 20      | 3.71            | 2.36         | 1.57  | PPS wins |
-| 50      | 4.58            | 2.36         | 1.94  | |
-| 100     | 5.37            | 2.43         | 2.21  | |
-| 200     | 5.60            | 2.54         | 2.20  | Plateau |
-| 300     | 5.37            | 2.66         | 2.02  | |
-| 500     | 6.10            | 2.71         | 2.25  | |
+| 1       | **1.01**        | 2.14         | 0.47  | Kalman wins 2.1x |
+| 2       | **1.07**        | 2.44         | 0.44  | Kalman wins 2.3x |
+| 5       | **1.58**        | 2.35         | 0.67  | Kalman wins 1.5x |
+| 10      | 2.50            | 2.31         | 1.08  | Crossover |
+| 20      | 3.66            | 2.43         | 1.51  | PPS wins |
+| 50      | 4.96            | 2.41         | 2.06  | |
+| 100     | 5.59            | 2.35         | 2.37  | |
+| 200     | 6.31            | 2.52         | 2.51  | Plateau |
+| 500     | 6.67            | 3.11         | 2.14  | |
+| 1000    | 6.67            | 2.87         | 2.32  | |
+| 2000    | 5.77            | 2.91         | 1.99  | Improving |
 
-Crossover at tau ~8s.  Long-tau TDEV plateaus at ~5-6 ns (does not
-diverge).  DO free-running floor = 0.92 ns at tau=1s.
+Crossover at tau ~8s.  Long-tau TDEV plateaus at ~5.5-6.7 ns (does
+not diverge).  At tau=2000s the Kalman starts to improve — the servo
+is pulling the long-term average toward GPS time.  DO free-running
+floor = 0.92 ns at tau=1s.
 
-### MadHat comparison (no heatsink on TCXO)
+### MadHat comparison (no heatsink on TCXO, 2-hour run)
 
 | tau (s) | MH Kalman (ns) | MH PPS (ns) | TH Kalman (ns) |
 |--------:|---------------:|------------:|---------------:|
-| 1       | 2.61           | 2.25        | 1.12           |
-| 5       | 8.74           | 2.37        | 1.63           |
-| 100     | 17.30          | 3.49        | 5.37           |
+| 1       | 2.50           | 2.18        | **1.01**       |
+| 5       | 8.57           | 2.38        | **1.58**       |
+| 100     | 17.22          | 3.03        | 5.59           |
+| 1000    | 19.43          | 4.07        | 6.67           |
 
-MadHat (no TCXO heatsink): adjfine std = 4.0 ppb (10x worse than
-TimeHat's 0.9 ppb).  TDEV(1s) = 2.6 ns, barely beating PPS.  The
-TCXO temperature sensitivity dominates the noise budget.  Heatsink
-installation planned.
+MadHat (no TCXO heatsink): adjfine std = 3.6 ppb (4x worse than
+TimeHat's 0.9 ppb).  TDEV(1s) = 2.50 ns, doesn't beat PPS at any
+tau.  The TCXO temperature sensitivity dominates the noise budget.
+Heatsink installation planned.
+
+### Carrier Phase tracker (running, not yet driving)
+
+The CarrierPhaseTracker ran for the full 2 hours on both hosts,
+accumulating adjfine corrections and tracking the inter-oscillator
+drift rate.  TimeHat Carrier error: +24.3 ± 1.2 ns (6900 epochs).
+MadHat Carrier error: -340.0 ± 3.1 ns — large offset indicating
+the drift rate estimate hasn't fully converged.  Carrier is not yet
+winning the source competition (TICC at 3 ns confidence dominates)
+but is tracking steadily.
 
 ### Early 15-min runs (for reference)
 
-Best 15-min TDEV(1s) = 0.75 ns (run kalman-base).  The 1-hour value
-of 1.12 ns is the more reliable number: the 15-min result benefited
-from a favorable noise realization during its short settled window.
+Best 15-min TDEV(1s) = 0.75 ns (run kalman-base).  The 2-hour value
+of 1.01 ns is the definitive number.
 
 ## Pull-in Behavior
 
