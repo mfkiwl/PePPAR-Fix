@@ -2357,11 +2357,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         servo.ki = BASE_KI * gain_scale
 
         if getattr(args, 'do_freq_est', False):
-            adjfine_ppb = -servo.update(
-                avg_error, dt=float(n_samples),
-                dt_rx_ns=dt_rx_ns, dt_rx_sigma_ns=dt_rx_sigma)
-        else:
-            if getattr(args, 'do_freq_est', False) and ticc_diff_raw_ns is not None:
+        if getattr(args, 'do_freq_est', False) and ticc_diff_raw_ns is not None:
             # DOFreqEst EKF: pass raw TICC (no qErr) + PPP dt_rx
             adjfine_ppb = -servo.update(
                 ticc_diff_raw_ns, dt=float(n_samples),
