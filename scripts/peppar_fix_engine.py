@@ -2110,6 +2110,16 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                     (now - ref_last) if ref_last is not None else -1.0,
                 )
             return "no_ticc"
+        # Apply qErr correction to the TICC measurement before using it
+        # as the servo error.  The raw TICC chA-chB diff includes the
+        # F9T PPS quantization noise (~2.3 ns) on the chB (reference)
+        # side.  Without correction, the servo faithfully tracks that
+        # noise and injects it into the DO — making the output WORSE
+        # than the DO's free-running 1.17 ns.  With correction, the
+        # effective reference noise drops to ~178 ps (the TICC+qErr
+        # floor), well below the DO, so the servo can actually improve it.
+        if qerr_ns is not None:
+            ticc_diff_ns = ticc_diff_ns + qerr_ns
         sources = ticc_only_error_source(ticc_diff_ns, args.ticc_confidence_ns)
         corr_age_for_inflation = None  # not applicable in TICC-drive mode
     else:
