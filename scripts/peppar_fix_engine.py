@@ -2356,7 +2356,6 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         servo.kp = BASE_KP * gain_scale
         servo.ki = BASE_KI * gain_scale
 
-        if getattr(args, 'do_freq_est', False):
         if getattr(args, 'do_freq_est', False) and ticc_diff_raw_ns is not None:
             # DOFreqEst EKF: pass raw TICC (no qErr) + PPP dt_rx
             adjfine_ppb = -servo.update(
