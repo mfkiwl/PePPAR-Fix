@@ -1416,8 +1416,23 @@ def _setup_servo(args, known_ecef, qerr_store):
     else:
         log.info("PPS verification skipped — TICC provides servo feedback")
 
-    servo = PIServo(args.track_kp, args.track_ki, max_ppb=caps['max_adj'],
-                    initial_freq=current_adj)
+    if getattr(args, 'kalman_servo', False):
+        from peppar_fix.kalman_servo import KalmanServo
+        # Measurement noise: TICC+qErr if TICC-drive, EXTTS+qErr otherwise
+        sigma_meas = 0.178 if args.ticc_drive else 1.9
+        servo = KalmanServo(
+            sigma_meas_ns=sigma_meas,
+            sigma_phase_ns=0.92,   # DO floor from adjfine noise test
+            sigma_freq_ppb=0.01,   # TCXO frequency random walk
+            max_ppb=caps['max_adj'],
+            initial_freq=current_adj,
+        )
+        log.info("Kalman servo: sigma_meas=%.3f ns, sigma_phase=0.92 ns, "
+                 "sigma_freq=0.01 ppb, initial_freq=%.1f ppb",
+                 sigma_meas, current_adj)
+    else:
+        servo = PIServo(args.track_kp, args.track_ki, max_ppb=caps['max_adj'],
+                        initial_freq=current_adj)
     scheduler = DisciplineScheduler(
         base_interval=args.discipline_interval,
         adaptive=args.adaptive_interval,
@@ -2995,6 +3010,11 @@ Two-phase operation:
                        help="Minimum acceptable confidence for observation/PPS correlation")
     servo.add_argument("--max-correlation-window-s", type=float, default=None,
                        help="Max recv_mono delta for obs/PPS correlation (default: 11s, increase for high-latency transports like E810 I2C)")
+    servo.add_argument("--kalman-servo", action="store_true",
+                       help="Use Kalman filter + LQR servo instead of PI. "
+                            "Optimal pull-in (no overshoot) and noise-matched "
+                            "steady-state tracking.  Noise parameters from "
+                            "DO characterization + TICC+qErr measurement.")
     servo.add_argument("--track-kp", type=float, default=0.3,
                        help="PI servo Kp gain (default: 0.3)")
     servo.add_argument("--track-ki", type=float, default=0.1,

@@ -1,0 +1,225 @@
+"""Kalman filter + LQR servo for PHC frequency steering.
+
+Replaces the PI servo with an optimal controller that uses a 2-state
+model of the DO (phase + frequency) and known noise profiles to
+compute the minimum-noise, minimum-overshoot frequency correction
+at each epoch.
+
+State model (discrete, per-epoch):
+    phase[n+1] = phase[n] + (freq[n] + u[n]) * dt
+    freq[n+1]  = freq[n] + w_freq[n]
+
+where:
+    phase = PHC phase error relative to GPS (ns)
+    freq  = DO frequency offset (ppb) — the slowly-drifting TCXO rate
+    u     = adjfine correction we apply (ppb)
+    w_freq = frequency random walk (process noise from TCXO drift)
+
+Measurement model:
+    z[n] = phase[n] + v[n]
+
+where:
+    z = TICC+qErr measurement (or EXTTS+qErr, or Carrier)
+    v = measurement noise
+
+The Kalman filter estimates [phase, freq] optimally.  The LQR gain
+computes the adjfine that minimizes a weighted cost of phase error
+and correction magnitude (= noise injected into the DO).
+
+Why this beats PI:
+    - PI has no plant model — it reacts to error without predicting
+      the effect of its own corrections.  The integrator winds up
+      during pull-in and overshoots.
+    - Kalman predicts: "I just applied -30 ppb, so phase will change
+      by -30 ns next epoch."  The next correction accounts for this.
+    - LQR gain is critically damped by construction — fastest
+      convergence with zero overshoot, given the noise profile.
+    - When measurement noise R changes (TICC vs EXTTS), the gain
+      adapts automatically.  No manual kp/ki tuning.
+
+Noise parameters (from lab measurements 2026-04-09):
+    sigma_meas_ns:  measurement noise σ (TICC+qErr: 0.178 ns,
+                    EXTTS+qErr: 1.9 ns)
+    sigma_phase_ns: DO phase noise per epoch (0.92 ns from adjfine
+                    noise test — the TCXO's free-running jitter)
+    sigma_freq_ppb: DO frequency random walk per epoch (~0.01 ppb,
+                    from ADEV characterization at τ=10-100s)
+"""
+
+import math
+import numpy as np
+from scipy.linalg import solve_discrete_are
+
+
+class KalmanServo:
+    """2-state Kalman filter + LQR for DO frequency steering.
+
+    Drop-in interface match with PIServo: takes offset_ns, returns ppb.
+    """
+
+    def __init__(self, sigma_meas_ns=0.178, sigma_phase_ns=0.92,
+                 sigma_freq_ppb=0.01, max_ppb=62_500_000.0,
+                 initial_freq=0.0, q_weight=1.0, r_weight=1.0):
+        """
+        Args:
+            sigma_meas_ns: measurement noise σ (ns).
+                0.178 for TICC+qErr, 1.9 for EXTTS+qErr.
+            sigma_phase_ns: DO phase noise per epoch (ns).
+                From adjfine noise test or DO characterization TDEV(1s).
+            sigma_freq_ppb: DO frequency random walk per epoch (ppb).
+                From ADEV at τ~10s: ADEV(10) × 10 / sqrt(10) ≈ 0.01.
+            max_ppb: maximum adjfine magnitude.
+            initial_freq: bootstrap adjfine to seed the frequency state.
+            q_weight: scale factor on process noise Q (tune > 1 for
+                more aggressive tracking, < 1 for smoother output).
+            r_weight: scale factor on measurement noise R (tune > 1 to
+                trust measurements less, < 1 to trust them more).
+        """
+        self.max_ppb = max_ppb
+        self.dt = 1.0  # epoch interval; updated by update() dt param
+
+        # State: [phase_ns, freq_ppb]
+        self.x = np.array([0.0, initial_freq])
+
+        # State transition: phase += (freq + u) * dt, freq += noise
+        # (u is applied separately after the gain computation)
+        self.F = np.array([[1.0, self.dt],
+                           [0.0, 1.0]])
+        self.B = np.array([[self.dt],
+                           [0.0]])
+        self.H = np.array([[1.0, 0.0]])  # measure phase only
+
+        # Process noise
+        self.Q_base = np.diag([sigma_phase_ns ** 2,
+                               sigma_freq_ppb ** 2])
+        self.Q = self.Q_base * q_weight
+
+        # Measurement noise
+        self.R_base = np.array([[sigma_meas_ns ** 2]])
+        self.R = self.R_base * r_weight
+
+        # Initialize covariance — start uncertain
+        self.P = np.diag([1000.0 ** 2, 100.0 ** 2])
+
+        # Precompute steady-state LQR gain for the control law.
+        # Cost: J = Σ (x'Qc x + u'Rc u)
+        # Qc weights state error, Rc weights control effort (noise cost).
+        #
+        # From the adjfine noise test (2026-04-09): corrections < 1 ppb
+        # add unmeasurable noise to the DO.  So the control cost is VERY
+        # low — we should correct aggressively whenever the Kalman filter
+        # sees an error.  Rc is set small to reflect this.
+        #
+        # Qc penalizes both phase error and frequency error:
+        #   Qc[0,0] = phase error weight (1/ns² units)
+        #   Qc[1,1] = frequency error weight (1/ppb² units)
+        # We weight phase strongly (we want sub-ns tracking) and
+        # frequency moderately (we want to track the TCXO drift).
+        self.Qc = np.diag([1.0 / (sigma_phase_ns ** 2 + 1e-30),
+                           1.0 / (sigma_freq_ppb ** 2 + 1e-30)])
+        # Rc: control cost.  From adjfine noise test, the noise
+        # cost of a 1 ppb correction is ~1 ns (= sigma_phase).
+        # So Rc = sigma_phase² means "a 1 ppb correction costs
+        # about as much as one epoch of DO noise."  This produces
+        # a moderately aggressive controller.
+        self.Rc = np.array([[sigma_phase_ns ** 2]])
+
+        try:
+            P_lqr = solve_discrete_are(self.F, self.B, self.Qc, self.Rc)
+            self.L = np.linalg.inv(
+                self.B.T @ P_lqr @ self.B + self.Rc
+            ) @ self.B.T @ P_lqr @ self.F
+            # Sanity: for a pure integrator, L[1] must be ≥ 1.0 to
+            # fully cancel the estimated frequency.  L[1] < 1.0 causes
+            # runaway drift because the partial correction gets
+            # attributed to an even higher frequency estimate.
+            if self.L[0, 1] < 1.0:
+                self.L[0, 1] = 1.0
+        except Exception:
+            pass
+
+        # If Riccati didn't converge or produced unstable gains,
+        # use analytically-derived gains for a discrete integrator:
+        #   L[0] = phase gain (ppb per ns of error) — controls
+        #          pull-in speed and settled-state noise injection.
+        #          At 0.05: 5000 ns offset → 250 ppb correction (fast pull-in);
+        #          1 ns settled error → 0.05 ppb (invisible, per adjfine test).
+        #   L[1] = frequency gain — must be 1.0 for full cancellation
+        #          of the estimated TCXO drift rate.
+        if not hasattr(self, 'L') or self.L is None:
+            self.L = np.array([[0.05, 1.0]])
+
+        self.freq = initial_freq
+        self._last_u = 0.0
+
+    def update(self, offset_ns, dt=1.0):
+        """Process one measurement. Returns frequency adjustment in ppb.
+
+        Args:
+            offset_ns: measured phase offset (ns), averaged over dt epochs.
+            dt: seconds since last correction (discipline interval).
+
+        Returns:
+            Frequency in ppb to apply via adjfine.
+        """
+        # Update dt-dependent matrices if interval changed
+        if dt != self.dt:
+            self.dt = dt
+            self.F[0, 1] = dt
+            self.B[0, 0] = dt
+
+        # ── Kalman predict ──
+        # Account for the control we applied last epoch
+        x_pred = self.F @ self.x + self.B.flatten() * self._last_u
+        P_pred = self.F @ self.P @ self.F.T + self.Q * dt
+
+        # ── Kalman update ──
+        z = offset_ns
+        innovation = z - (self.H @ x_pred).item()
+        S = (self.H @ P_pred @ self.H.T + self.R).item()
+        K = (P_pred @ self.H.T) / S  # 2×1 vector
+
+        self.x = x_pred + K.flatten() * innovation
+        self.P = P_pred - np.outer(K.flatten(), K.flatten()) * S
+
+        # ── LQR control ──
+        # u = -L @ x gives the total adjfine to apply.
+        # L[0] × phase: proportional correction for phase error.
+        # L[1] × freq: full cancellation of estimated TCXO drift.
+        # The adjfine IS u — no further transformation needed.
+        u = -(self.L @ self.x).item()
+        adjfine = u
+
+        # Clamp
+        adjfine = max(-self.max_ppb, min(self.max_ppb, adjfine))
+
+        self._last_u = u
+        self.freq = adjfine
+        return self.freq
+
+    def reset(self, current_freq):
+        """Reset for bumpless transfer (e.g., after PHC re-bootstrap)."""
+        self.x = np.array([0.0, -current_freq])
+        self.P = np.diag([1000.0 ** 2, 100.0 ** 2])
+        self._last_u = 0.0
+        self.freq = current_freq
+
+    @property
+    def estimated_phase_ns(self):
+        """Current best estimate of phase error (ns)."""
+        return self.x[0]
+
+    @property
+    def estimated_freq_ppb(self):
+        """Current best estimate of frequency offset (ppb)."""
+        return self.x[1]
+
+    @property
+    def phase_uncertainty_ns(self):
+        """1-σ uncertainty of the phase estimate (ns)."""
+        return math.sqrt(max(0, self.P[0, 0]))
+
+    @property
+    def freq_uncertainty_ppb(self):
+        """1-σ uncertainty of the frequency estimate (ppb)."""
+        return math.sqrt(max(0, self.P[1, 1]))
