@@ -136,7 +136,7 @@ def _set_pin_function_sysfs(ptp_dev, pin_name, func, channel):
 _E810_PIN_NAMES = {0: "0", 1: "1", 2: "2", 3: "3", 4: "4"}
 
 
-def _enable_pps_out(ptp, args, stepped=False):
+def _enable_pps_out(ptp, args):
     """Enable PEROUT (PPS OUT) if configured.
 
     Must be called after any PHC phase step — stepping the PHC
@@ -144,16 +144,6 @@ def _enable_pps_out(ptp, args, stepped=False):
 
     Pin programming: tries PTP_PIN_SETFUNC ioctl first (i226), then
     sysfs fallback (E810 ice driver rejects the ioctl but accepts sysfs).
-
-    i226 PEROUT half-period bug (2026-04-10): when ADJ_SETOFFSET shifts
-    the PHC time and then enable_perout programs Target Time mode, the
-    hardware fires at 500 ms instead of 0 ms approximately 90% of the
-    time.  This is a half-period phase ambiguity in the i226's Target
-    Time comparator.  The workaround: when we know a time step just
-    happened (stepped=True), program PEROUT once to let the hardware
-    settle, wait 2 seconds, then disable and re-program.  The second
-    programming always works because there's no time discontinuity
-    between it and the enable.
     """
     if args.pps_out_pin < 0:
         return
@@ -173,17 +163,25 @@ def _enable_pps_out(ptp, args, stepped=False):
             pin_name = _E810_PIN_NAMES.get(args.pps_out_pin, str(args.pps_out_pin))
             _set_pin_function_sysfs(args.ptp_dev, pin_name,
                                     PTP_PF_PEROUT, args.pps_out_channel)
-        # Cancel any stale PEROUT, then re-enable
+        # i226 PEROUT half-period workaround (2026-04-10):
+        #
+        # The i226 Target Time PEROUT can latch onto the wrong half-period
+        # after a PHC time step (ADJ_SETOFFSET/clock_settime).  Per kernel
+        # netdev: stepping the PHC while PEROUT is active causes the
+        # hardware to oscillate at 62.5 MHz or lock up.  The corrupted
+        # state persists across simple disable/enable cycles.
+        #
+        # Fix: disable, program once (lets hardware see the current PHC
+        # time), wait 2 seconds (one full PEROUT period), then disable
+        # and re-program.  The second programming always fires correctly.
+        # This matches the kernel-recommended sequence: stop output,
+        # reprogram clock, restart output — with the added second cycle
+        # to clear any stale hardware state from a previous session.
         ptp.disable_perout(args.pps_out_channel)
         ptp.enable_perout(args.pps_out_channel)
-
-        # i226 half-period workaround: re-program after a delay
-        if stepped:
-            log.info("PPS OUT: post-step reprogram (i226 half-period workaround)")
-            time.sleep(2)
-            ptp.disable_perout(args.pps_out_channel)
-            ptp.enable_perout(args.pps_out_channel)
-
+        time.sleep(2)
+        ptp.disable_perout(args.pps_out_channel)
+        ptp.enable_perout(args.pps_out_channel)
         log.info("PPS OUT enabled: pin %d, PEROUT channel %d",
                  args.pps_out_pin, args.pps_out_channel)
     except OSError as e:
@@ -772,6 +770,14 @@ def main():
         # Step: apply the PPS-measured phase error as a relative correction.
         # ADJ_SETOFFSET is precise on both i226 and E810 — no readback or
         # system clock cross-referencing needed.  Verify via the next PPS.
+        #
+        # i226 PEROUT safety: disable any pre-existing PEROUT before stepping.
+        # Per kernel netdev consensus, stepping the PHC while PEROUT is active
+        # causes the hardware to oscillate at 62.5 MHz or lock up.  The
+        # resulting corrupted state persists across disable/enable cycles.
+        if args.pps_out_pin >= 0:
+            ptp.disable_perout(args.pps_out_channel)
+            log.info("Disabled PEROUT before PHC step")
         try:
             log.info("Stepping PHC by %+.0f ns (ADJ_SETOFFSET)", -phase_error_ns)
             ptp.adj_setoffset(-phase_error_ns)
@@ -908,7 +914,7 @@ def main():
             # Don't teardown actuator — engine inherits write_freq mode.
             cm_i2c.close()
 
-            _enable_pps_out(ptp, args, stepped=did_step)
+            _enable_pps_out(ptp, args)
             ptp.close()
             log.info("PHC bootstrap complete (ClockMatrix) — servo may start")
             return 0
@@ -927,7 +933,7 @@ def main():
     save_drift(args.drift_file, base_freq, args.ptp_dev, tcxo_freq_corr_ppb)
     log.info("Drift file updated: %s (base=%.1f ppb)", args.drift_file, base_freq)
 
-    _enable_pps_out(ptp, args, stepped=did_step)
+    _enable_pps_out(ptp, args)
     ptp.close()
     log.info("PHC bootstrap complete — servo may start")
     return 0
