@@ -168,20 +168,19 @@ class KalmanServo:
         self._last_u = 0.0
 
     def update(self, offset_ns, dt=1.0,
-              carrier_ns=None, carrier_sigma_ns=None):
+              delta_dt_rx_ns=None, dt_rx_sigma_ns=None):
         """Process one measurement. Returns frequency adjustment in ppb.
 
         Args:
             offset_ns: measured phase offset (ns) from TICC+qErr or EXTTS.
             dt: seconds since last correction (discipline interval).
-            carrier_ns: carrier-phase prediction of phase error (ns).
-                From CarrierPhaseTracker.compute_error().  When provided
-                alongside carrier_sigma_ns, the Kalman fuses both the
-                hardware measurement (TICC) and the carrier prediction
-                in a single update step — two independent observations
-                of the same phase state, each weighted by its noise.
-            carrier_sigma_ns: 1-sigma uncertainty of the carrier prediction.
-                Typically dt_rx_sigma_ns from the PPP filter (~0.1 ns).
+            delta_dt_rx_ns: time-differenced PPP dt_rx (ns).
+                = dt_rx[n] - dt_rx[n-1]: how much the TCXO-to-GPS offset
+                changed in one epoch.  This constrains the frequency state
+                without introducing absolute bias (the differencing cancels
+                the inter-oscillator drift rate D).
+            dt_rx_sigma_ns: 1-sigma uncertainty of dt_rx from PPP (~0.1 ns).
+                The differenced measurement noise is sqrt(2) * dt_rx_sigma.
 
         Returns:
             Frequency in ppb to apply via adjfine.
@@ -220,24 +219,40 @@ class KalmanServo:
         self.x = x_pred + K.flatten() * innovation
         self.P = P_pred - np.outer(K.flatten(), K.flatten()) * S
 
-        # ── Kalman update: carrier fusion (optional second measurement) ──
-        # When both carrier_ns and carrier_sigma_ns are provided, fuse
-        # the carrier-phase prediction as a second independent observation
-        # of the phase state.  This is a sequential Kalman update — the
-        # posterior from the TICC update becomes the prior for the Carrier
-        # update.  Mathematically equivalent to a single update with a
-        # stacked measurement vector, but simpler to implement.
+        # ── Kalman update: time-differenced dt_rx (frequency constraint) ──
+        # Δdt_rx = dt_rx[n] - dt_rx[n-1] measures how much the TCXO-to-GPS
+        # offset changed in one epoch.  For the PHC, the expected phase
+        # change is (adjfine + freq_drift) * dt.  The TCXO changed by
+        # Δdt_rx.  So the TICC measurement should have changed by:
+        #   Δticc_expected = (adjfine + freq_drift) * dt - Δdt_rx
         #
-        # The carrier measurement model is the same as TICC: H = [1, 0]
-        # (observes phase).  The noise is carrier_sigma_ns² (PPP filter
-        # uncertainty, typically ~0.1 ns — 20× lower than TICC+qErr).
-        if carrier_ns is not None and carrier_sigma_ns is not None:
-            R_c = np.array([[carrier_sigma_ns ** 2]])
-            innov_c = carrier_ns - (self.H @ self.x).item()
-            S_c = (self.H @ self.P @ self.H.T + R_c).item()
-            K_c = (self.P @ self.H.T) / S_c
-            self.x = self.x + K_c.flatten() * innov_c
-            self.P = self.P - np.outer(K_c.flatten(), K_c.flatten()) * S_c
+        # Rearranging: Δdt_rx + Δticc_expected = (adjfine + freq_drift) * dt
+        # This constrains freq_drift.  The measurement model:
+        #   z_freq = Δdt_rx / dt  (observed TCXO rate, ppb)
+        #   H_freq = [0, 1]      (observes frequency state)
+        #   expected = freq state (the PHC crystal drift the filter tracks)
+        #
+        # But we need to account for the fact that the filter's freq state
+        # tracks the PHC drift, while Δdt_rx tracks the TCXO.  The
+        # difference is the inter-oscillator rate.  Since the filter
+        # already accounts for adjfine in the predict step (via B*u),
+        # the innovation is:
+        #   innovation = -(Δdt_rx / dt) - freq_state
+        # because Δdt_rx > 0 means the TCXO fell behind GPS (its phase
+        # increased), which looks like the PHC got relatively ahead
+        # (negative contribution to the PHC frequency error we track).
+        #
+        # Noise: sqrt(2) * dt_rx_sigma (differencing two independent
+        # samples), converted to ppb by dividing by dt.
+        if delta_dt_rx_ns is not None and dt_rx_sigma_ns is not None:
+            H_freq = np.array([[0.0, 1.0]])  # observes frequency
+            freq_obs = -delta_dt_rx_ns / dt  # TCXO rate → PHC freq constraint
+            R_freq = np.array([[(dt_rx_sigma_ns * math.sqrt(2) / dt) ** 2]])
+            innov_f = freq_obs - (H_freq @ self.x).item()
+            S_f = (H_freq @ self.P @ H_freq.T + R_freq).item()
+            K_f = (self.P @ H_freq.T) / S_f
+            self.x = self.x + K_f.flatten() * innov_f
+            self.P = self.P - np.outer(K_f.flatten(), K_f.flatten()) * S_f
 
         # ── LQR control ──
         # u = -L @ x gives the total adjfine to apply.

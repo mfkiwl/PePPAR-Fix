@@ -106,26 +106,93 @@ The sources aren't actually competing for the same thing:
 These are the **predict** and **update** steps of a single estimator,
 not competitors.  The FrequencyIntegrator predicts; the PPS/qErr/TICC
 measurements update.  The source competition's winner-take-all
-evolves into measurement fusion:
+evolves into measurement fusion.
 
-```python
-# Predict
-phase += adjfine_ppb * dt_s
-phase_sigma += process_noise  # DO instability
+### The 4-state DOFreqEst filter (target architecture)
 
-# Update from all available measurements, weighted by confidence
-for measurement in [PPS, qErr_refined_PPS, TICC]:
-    innovation = measurement.value - predicted_phase
-    gain = phase_sigma² / (phase_sigma² + measurement.sigma²)
-    phase += gain * innovation
-    phase_sigma *= sqrt(1 - gain)
+The fundamental insight (2026-04-10): the PHC phase — the thing we're
+trying to control — is **never directly observed**.  We only observe
+it indirectly through the difference (δ_phc − δ_tcxo) via PPS edges
+timestamped on the PHC/TICC.  Meanwhile, carrier-phase measurements
+give us δ_tcxo via the PPP filter.  Satellite clocks couple to our DO
+**through** the receiver's TCXO.
+
+The correct state space has four hidden variables:
+
+| State | Meaning | Observed by |
+|---|---|---|
+| δ_tcxo | F9T TCXO phase vs GPS | PPP dt_rx (~0.1 ns) |
+| f_tcxo | F9T TCXO frequency drift | d(dt_rx)/dt |
+| δ_phc | DO/PHC phase vs GPS | only via (δ_phc − δ_tcxo) |
+| f_phc | DO crystal drift rate | adjfine residuals |
+
+Process model (linear, standard Kalman):
+
+```
+δ_tcxo[n+1] = δ_tcxo[n] + f_tcxo[n] · dt + w_tcxo
+f_tcxo[n+1] = f_tcxo[n] + w_f_tcxo
+
+δ_phc[n+1]  = δ_phc[n] + (f_phc[n] + adjfine[n]) · dt + w_phc
+f_phc[n+1]  = f_phc[n] + w_f_phc
 ```
 
-Every source contributes what it knows, weighted by its confidence.
-No winner-take-all.  The graceful degradation cascade (sigma inflation
-when NTRIP goes stale) still works — stale measurements get wider σ,
-their gain shrinks toward zero, and the predict step dominates.
-That's holdover, falling out naturally from the fusion math.
+Measurement model:
+
+```
+z_ppp  = δ_tcxo + v_ppp              (PPP dt_rx, ~0.1 ns)
+z_ticc = (δ_phc − δ_tcxo) + v_ticc  (TICC+qErr, ~0.178 ns)
+```
+
+The PPS edges serve as **ambiguity resolution**: every second, the
+PPS says "the TCXO thinks it's the GPS second boundary" and the TICC
+says "the PHC reads this."  That pins (δ_phc − δ_tcxo).  Between PPS
+edges, carrier phase tracks δ_tcxo with 0.1 ns precision.  The filter
+propagates that through the coupling to constrain δ_phc.
+
+No separate drift rate D.  No cascade of estimators.  No
+CarrierPhaseTracker accumulating adjfine with growing bias.  The
+inter-oscillator coupling falls out of the filter states naturally.
+
+adjfine is a **known input** to f_phc (we set it), not an estimated
+state.  The filter only estimates the crystal drift component.
+
+All noise parameters are lab-measured: TCXO TDEV (0.92 ns), PHC
+TDEV, TICC floor (0.06 ns), PPP sigma (~0.1 ns), TCXO frequency
+random walk (0.01 ppb/epoch), DO frequency random walk.
+
+### Stepping stone: time-differenced dt_rx (implemented first)
+
+The 4-state filter is the target, but a simpler stepping stone gives
+most of the benefit: inject **time-differenced** Δdt_rx as a
+frequency measurement into the existing 2-state Kalman servo.
+
+Δdt_rx = dt_rx[n] − dt_rx[n−1] measures how much the TCXO-to-GPS
+offset changed in one epoch.  This constrains the Kalman's frequency
+state (how fast the PHC is drifting) without introducing any absolute
+bias — the differencing cancels the unconverged drift rate D that
+caused the absolute-carrier fusion to fail (2026-04-10 experiment:
+Carrier's 0.1 ns sigma + 24 ns bias → Kalman trusted biased Carrier
+30× more than truthful TICC → divergence).
+
+Time-differencing throws away absolute phase knowledge (which the
+TICC already provides) and keeps only the frequency information from
+PPP.  This is suboptimal compared to the 4-state filter (which
+extracts both phase and frequency from dt_rx), but robust to model
+errors.  The 4-state filter subsumes the time-differenced approach:
+its update-predict cycle implicitly time-differences while also
+using the absolute information.
+
+### Graceful degradation
+
+In all fusion architectures, the sigma-inflation mechanism still
+works.  When NTRIP corrections go stale:
+- PPP dt_rx sigma inflates → its Kalman gain shrinks toward zero
+- TICC+qErr (no NTRIP dependency) continues at full weight
+- The filter naturally enters holdover: predict step dominates,
+  last-known frequency sustains the DO
+
+No winner-take-all.  No explicit mode switch.  Holdover falls out
+of the math.
 
 ## State machines and seed verification
 

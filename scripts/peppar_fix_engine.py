@@ -2080,16 +2080,22 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             carrier_tracker.update_drift_estimate(
                 dt_rx_ns, pps_error_ns, ctx['adjfine_ppb'])
 
-    # Carrier prediction for Kalman fusion (computed early, before servo call)
-    _carrier_for_fusion = None
-    _carrier_sigma_for_fusion = None
-    if (carrier_tracker is not None and carrier_tracker.initialized
-            and dt_rx_ns is not None and dt_rx_sigma is not None
+    # Time-differenced dt_rx for Kalman frequency fusion.
+    # Δdt_rx = dt_rx[n] - dt_rx[n-1]: how much the TCXO-to-GPS offset
+    # changed.  Constrains the Kalman's frequency state without absolute
+    # bias.  Stored in ctx so we can track the previous value.
+    _delta_dt_rx_ns = None
+    _dt_rx_sigma_for_fusion = None
+    if (dt_rx_ns is not None and dt_rx_sigma is not None
             and not getattr(args, 'no_carrier', False)):
-        _ce = carrier_tracker.compute_error(dt_rx_ns)
-        if _ce is not None:
-            _carrier_for_fusion = _ce
-            _carrier_sigma_for_fusion = dt_rx_sigma
+        prev_dt_rx = ctx.get('_prev_dt_rx_ns')
+        if prev_dt_rx is not None:
+            delta = dt_rx_ns - prev_dt_rx
+            # Sanity: reject jumps > 5 µs (filter divergence / cycle slip)
+            if abs(delta) < 5000.0:
+                _delta_dt_rx_ns = delta
+                _dt_rx_sigma_for_fusion = dt_rx_sigma
+        ctx['_prev_dt_rx_ns'] = dt_rx_ns
 
     pps_var_ns2 = qerr_alignment["pps_var"].diff_variance()
     pps_qerr_plus_var_ns2 = qerr_alignment["pps_qerr_plus_var"].diff_variance()
@@ -2334,12 +2340,11 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         servo.ki = BASE_KI * gain_scale
 
         if (getattr(args, 'kalman_servo', False)
-                and _carrier_for_fusion is not None
-                and not getattr(args, 'no_carrier', False)):
+                and _delta_dt_rx_ns is not None):
             adjfine_ppb = -servo.update(
                 avg_error, dt=float(n_samples),
-                carrier_ns=_carrier_for_fusion,
-                carrier_sigma_ns=_carrier_sigma_for_fusion)
+                delta_dt_rx_ns=_delta_dt_rx_ns,
+                dt_rx_sigma_ns=_dt_rx_sigma_for_fusion)
         else:
             adjfine_ppb = -servo.update(avg_error, dt=float(n_samples))
         max_track_ppb = min(
