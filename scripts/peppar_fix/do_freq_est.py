@@ -194,7 +194,24 @@ class DOFreqEst:
         x_pred = self.F @ self.x + self.B * self._last_u
         P_pred = self.F @ self.P @ self.F.T + Q_scaled * dt
 
-        # ── EKF update: raw TICC (nonlinear) ──
+        # ── Sequential updates: PPP first, then TICC ──
+        # Order matters!  TICC H=[-1,0,-1,0] creates P[0,2] correlation.
+        # If PPP H=[1,0,0,0] runs after TICC, K_ppp[2] = P[2,0]/S ≈ -1,
+        # which applies the PPP innovation to x[2] and destroys the PHC
+        # state.  PPP first keeps P[0,2]=0 so K_ppp[2]=0.  Then TICC
+        # correctly directs its innovation to x[2] (since PPP pinned x[0]).
+
+        # ── Kalman update 1: PPP dt_rx (linear) ──
+        if dt_rx_ns is not None and dt_rx_sigma_ns is not None:
+            R_ppp = np.array([[dt_rx_sigma_ns ** 2]])
+            innov_ppp = dt_rx_ns - (self.H_ppp @ x_pred).item()
+            S_ppp = (self.H_ppp @ P_pred @ self.H_ppp.T + R_ppp).item()
+            K_ppp = (P_pred @ self.H_ppp.T) / S_ppp
+
+            x_pred = x_pred + K_ppp.flatten() * innov_ppp
+            P_pred = P_pred - np.outer(K_ppp.flatten(), K_ppp.flatten()) * S_ppp
+
+        # ── Kalman update 2: raw TICC (nonlinear) ──
         z_ticc = offset_ns
         h_pred = self._h_ticc(x_pred)
         innov_ticc = z_ticc - h_pred
@@ -204,16 +221,6 @@ class DOFreqEst:
 
         self.x = x_pred + K_ticc.flatten() * innov_ticc
         self.P = P_pred - np.outer(K_ticc.flatten(), K_ticc.flatten()) * S_ticc
-
-        # ── Kalman update: PPP dt_rx (linear, sequential) ──
-        if dt_rx_ns is not None and dt_rx_sigma_ns is not None:
-            R_ppp = np.array([[dt_rx_sigma_ns ** 2]])
-            innov_ppp = dt_rx_ns - (self.H_ppp @ self.x).item()
-            S_ppp = (self.H_ppp @ self.P @ self.H_ppp.T + R_ppp).item()
-            K_ppp = (self.P @ self.H_ppp.T) / S_ppp
-
-            self.x = self.x + K_ppp.flatten() * innov_ppp
-            self.P = self.P - np.outer(K_ppp.flatten(), K_ppp.flatten()) * S_ppp
 
         # ── LQR control ──
         # Only L[2] (φ_phc) and L[3] (f_phc) are nonzero.
