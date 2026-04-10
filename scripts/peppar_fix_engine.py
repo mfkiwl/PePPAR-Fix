@@ -1428,12 +1428,13 @@ def _setup_servo(args, known_ecef, qerr_store):
             initial_freq=current_adj,
             q_weight=args.kalman_q_weight,
             r_weight=args.kalman_r_weight,
+            dead_zone_ppb=args.kalman_dead_zone,
         )
         log.info("Kalman servo: sigma_meas=%.3f ns, sigma_phase=0.92 ns, "
                  "sigma_freq=0.01 ppb, q_weight=%.2f, r_weight=%.2f, "
-                 "initial_freq=%.1f ppb",
+                 "dead_zone=%.2f ppb, initial_freq=%.1f ppb",
                  sigma_meas, args.kalman_q_weight, args.kalman_r_weight,
-                 current_adj)
+                 args.kalman_dead_zone, current_adj)
     else:
         servo = PIServo(args.track_kp, args.track_ki, max_ppb=caps['max_adj'],
                         initial_freq=current_adj)
@@ -3025,6 +3026,10 @@ Two-phase operation:
     servo.add_argument("--kalman-r-weight", type=float, default=1.0,
                        help="Kalman measurement noise R scale (>1 = trust "
                             "measurements less, <1 = trust them more)")
+    servo.add_argument("--kalman-dead-zone", type=float, default=0.0,
+                       help="Minimum adjfine change (ppb) to actually apply. "
+                            "Below this, hold previous value to reduce noise. "
+                            "Suggested: 0.5 (below DO floor)")
     servo.add_argument("--track-kp", type=float, default=0.3,
                        help="PI servo Kp gain (default: 0.3)")
     servo.add_argument("--track-ki", type=float, default=0.1,

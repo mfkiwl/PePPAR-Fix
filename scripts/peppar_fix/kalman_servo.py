@@ -59,7 +59,8 @@ class KalmanServo:
 
     def __init__(self, sigma_meas_ns=0.178, sigma_phase_ns=0.92,
                  sigma_freq_ppb=0.01, max_ppb=62_500_000.0,
-                 initial_freq=0.0, q_weight=1.0, r_weight=1.0):
+                 initial_freq=0.0, q_weight=1.0, r_weight=1.0,
+                 dead_zone_ppb=0.0):
         """
         Args:
             sigma_meas_ns: measurement noise σ (ns).
@@ -74,8 +75,14 @@ class KalmanServo:
                 more aggressive tracking, < 1 for smoother output).
             r_weight: scale factor on measurement noise R (tune > 1 to
                 trust measurements less, < 1 to trust them more).
+            dead_zone_ppb: minimum adjfine change to actually apply.
+                Below this, hold the previous adjfine to avoid injecting
+                noise for negligible corrections.  From adjfine noise
+                characterization: corrections < 0.92 ppb add noise below
+                the DO floor.  Default 0 (no dead zone).
         """
         self.max_ppb = max_ppb
+        self.dead_zone_ppb = dead_zone_ppb
         self.dt = 1.0  # epoch interval; updated by update() dt param
 
         # State: [phase_ns, freq_ppb]
@@ -198,6 +205,15 @@ class KalmanServo:
 
         # Clamp
         adjfine = max(-self.max_ppb, min(self.max_ppb, adjfine))
+
+        # Dead zone: if the change from current adjfine is below the
+        # threshold, hold the previous value.  This prevents random-walk
+        # noise accumulation from sub-floor corrections.  The Kalman
+        # filter still updates its state normally (so the estimate stays
+        # optimal), but the actuator doesn't move.
+        if self.dead_zone_ppb > 0 and abs(adjfine - self.freq) < self.dead_zone_ppb:
+            adjfine = self.freq
+            u = -adjfine  # keep _last_u consistent
 
         self._last_u = u
         self.freq = adjfine
