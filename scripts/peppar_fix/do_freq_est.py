@@ -62,7 +62,10 @@ class DOFreqEst:
         self.dt = 1.0
 
         # State: [φ_tcxo, f_tcxo, φ_phc, f_phc]
-        self.x = np.array([0.0, 0.0, 0.0, 0.0])
+        # f_phc = crystal drift = negative of bootstrap adjfine.
+        # Steady state: φ_phc += (f_phc + adjfine) * dt = 0 when
+        # adjfine = -f_phc = initial_freq.
+        self.x = np.array([0.0, 0.0, 0.0, -initial_freq])
 
         # F matrix
         self.F = np.array([
@@ -101,7 +104,11 @@ class DOFreqEst:
         self.L = np.array([0.0, 0.0, 0.05, 1.0])
 
         self.freq = initial_freq
-        self._last_u = 0.0
+        # _last_u is the LQR u value.  Engine applies u as adjfine
+        # (after double negation: servo returns -u, engine negates).
+        # At startup, bootstrap set adjfine = initial_freq, so
+        # the last applied u = initial_freq.
+        self._last_u = initial_freq
         self._tcxo_initialized = False
 
     def _h_ticc(self, x):
