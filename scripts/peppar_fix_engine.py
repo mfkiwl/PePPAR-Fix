@@ -1416,7 +1416,24 @@ def _setup_servo(args, known_ecef, qerr_store):
     else:
         log.info("PPS verification skipped — TICC provides servo feedback")
 
-    if getattr(args, 'kalman_servo', False):
+    if getattr(args, 'do_freq_est', False):
+        from peppar_fix.do_freq_est import DOFreqEst
+        sigma_ticc = 0.178 if args.ticc_drive else 1.9
+        servo = DOFreqEst(
+            sigma_ticc_ns=sigma_ticc,
+            sigma_phc_phase_ns=0.92,
+            sigma_phc_freq_ppb=args.kalman_sigma_freq,
+            sigma_tcxo_phase_ns=2.0,    # F9T PPS TDEV(1s)
+            sigma_tcxo_freq_ppb=0.1,    # F9T TCXO drift rate
+            max_ppb=caps['max_adj'],
+            initial_freq=current_adj,
+        )
+        log.info("DOFreqEst 4-state: sigma_ticc=%.3f ns, "
+                 "sigma_phc=[0.92 ns, %.4f ppb], "
+                 "sigma_tcxo=[2.0 ns, 0.1 ppb], "
+                 "initial_freq=%.1f ppb",
+                 sigma_ticc, args.kalman_sigma_freq, current_adj)
+    elif getattr(args, 'kalman_servo', False):
         from peppar_fix.kalman_servo import KalmanServo
         # Measurement noise: TICC+qErr if TICC-drive, EXTTS+qErr otherwise
         sigma_meas = 0.178 if args.ticc_drive else 1.9
@@ -2337,7 +2354,12 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         servo.kp = BASE_KP * gain_scale
         servo.ki = BASE_KI * gain_scale
 
-        adjfine_ppb = -servo.update(avg_error, dt=float(n_samples))
+        if getattr(args, 'do_freq_est', False):
+            adjfine_ppb = -servo.update(
+                avg_error, dt=float(n_samples),
+                dt_rx_ns=dt_rx_ns, dt_rx_sigma_ns=dt_rx_sigma)
+        else:
+            adjfine_ppb = -servo.update(avg_error, dt=float(n_samples))
         max_track_ppb = min(
             ctx['caps']['max_adj'],
             args.track_max_ppb if args.track_max_ppb is not None else ctx['caps']['max_adj'],
@@ -3035,10 +3057,15 @@ Two-phase operation:
     servo.add_argument("--max-correlation-window-s", type=float, default=None,
                        help="Max recv_mono delta for obs/PPS correlation (default: 11s, increase for high-latency transports like E810 I2C)")
     servo.add_argument("--kalman-servo", action="store_true",
-                       help="Use Kalman filter + LQR servo instead of PI. "
+                       help="Use 2-state Kalman filter + LQR servo instead of PI. "
                             "Optimal pull-in (no overshoot) and noise-matched "
                             "steady-state tracking.  Noise parameters from "
                             "DO characterization + TICC+qErr measurement.")
+    servo.add_argument("--do-freq-est", action="store_true",
+                       help="Use 4-state DOFreqEst (architecture vision). "
+                            "Fuses TICC+qErr with PPP dt_rx in a single filter "
+                            "that models both oscillators (TCXO + DO).  Supersedes "
+                            "--kalman-servo when both are given.")
     servo.add_argument("--kalman-q-weight", type=float, default=1.0,
                        help="Kalman process noise Q scale (>1 = more aggressive "
                             "tracking, <1 = smoother output)")
