@@ -2047,6 +2047,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     # monotonic clock avoids all GPS TOW / receiver clock bias issues.
     qerr_ns, qerr_offset_s = qerr_store.match_pps_mono(pps_event.recv_mono)
     ticc_diff_ns = None
+    ticc_diff_raw_ns = None
     ticc_age_s = None
     ticc_confidence = None
     if ticc_tracker is not None:
@@ -2174,6 +2175,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         # than the DO's free-running 1.17 ns.  With correction, the
         # effective reference noise drops to ~178 ps (the TICC+qErr
         # floor), well below the DO, so the servo can actually improve it.
+        ticc_diff_raw_ns = ticc_diff_ns  # preserve for DOFreqEst EKF
         if qerr_ns is not None:
             ticc_diff_ns = ticc_diff_ns + qerr_ns
         sources = ticc_only_error_source(ticc_diff_ns, args.ticc_confidence_ns)
@@ -2357,6 +2359,12 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         if getattr(args, 'do_freq_est', False):
             adjfine_ppb = -servo.update(
                 avg_error, dt=float(n_samples),
+                dt_rx_ns=dt_rx_ns, dt_rx_sigma_ns=dt_rx_sigma)
+        else:
+            if getattr(args, 'do_freq_est', False) and ticc_diff_raw_ns is not None:
+            # DOFreqEst EKF: pass raw TICC (no qErr) + PPP dt_rx
+            adjfine_ppb = -servo.update(
+                ticc_diff_raw_ns, dt=float(n_samples),
                 dt_rx_ns=dt_rx_ns, dt_rx_sigma_ns=dt_rx_sigma)
         else:
             adjfine_ppb = -servo.update(avg_error, dt=float(n_samples))

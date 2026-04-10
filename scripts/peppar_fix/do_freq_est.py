@@ -1,117 +1,86 @@
-"""4-state DOFreqEst — Disciplined Oscillator Frequency Estimator.
+"""4-state DOFreqEst — EKF fusing raw TICC with PPP carrier phase.
 
-Fuses TICC+qErr measurements with PPP carrier-phase dt_rx in a single
-Kalman filter that explicitly models both oscillators (F9T TCXO and
-i226 DO/PHC).  This is the measurement fusion from architecture-vision.md.
+Models both oscillators (TCXO + PHC) and the 125 MHz tick quantization
+that links them through PPS edges.  No external qErr correction needed.
 
-State vector (4 states):
-    x = [δ_tcxo, f_tcxo, δ_phc, f_phc]
+State vector:
+    x = [φ_tcxo, f_tcxo, φ_phc, f_phc]
 
-    δ_tcxo: F9T TCXO phase offset from GPS (ns)
+    φ_tcxo: F9T TCXO phase offset from GPS (ns) — tracked from dt_rx
     f_tcxo: F9T TCXO frequency drift rate (ppb)
-    δ_phc:  DO/PHC phase offset from GPS (ns) — what we steer to zero
-    f_phc:  DO crystal frequency drift rate (ppb) — the unknown
+    φ_phc:  DO/PHC phase error from GPS (ns) — steered to zero
+    f_phc:  DO crystal frequency drift rate (ppb)
 
-Process model (discrete, per-epoch):
-    δ_tcxo[n+1] = δ_tcxo[n] + f_tcxo[n] · dt + w_tcxo
-    f_tcxo[n+1] = f_tcxo[n] + w_f_tcxo
-    δ_phc[n+1]  = δ_phc[n] + (f_phc[n] + u[n]) · dt + w_phc
-    f_phc[n+1]  = f_phc[n] + w_f_phc
+Process model (linear):
+    φ_tcxo += f_tcxo · dt
+    f_tcxo += w_f_tcxo  (random walk)
+    φ_phc  += (f_phc + adjfine) · dt
+    f_phc  += w_f_phc  (random walk)
 
-    u[n] = adjfine correction we apply (ppb)
+Measurements:
+    z_ppp  = φ_tcxo + v_ppp                    (PPP dt_rx, ~0.1 ns, linear)
+    z_ticc = −φ_phc − qerr(φ_tcxo) + v_ticc   (raw TICC, nonlinear via tick)
 
-Measurement model:
-    z_ppp[n]  = δ_tcxo[n] + v_ppp       (PPP dt_rx, ~0.1 ns)
-    z_ticc[n] = δ_phc[n] - δ_tcxo[n] + v_ticc  (TICC+qErr, ~0.178 ns)
+    qerr(φ) = φ − round(φ / tick) · tick       (sub-tick TCXO phase)
 
-Why 4 states instead of 2:
-    The 2-state [phase, freq] filter conflates f_phc and f_tcxo into
-    a single frequency state.  This prevents using PPP carrier-phase
-    information: dt_rx observes f_tcxo, but the 2-state freq tracks
-    (f_phc - f_tcxo).  Injecting a measurement of one component when
-    the state represents their difference breaks convergence.
+The nonlinearity is in qerr(): the 125 MHz tick quantization that
+determines where the PPS edge fires.  PPP constrains φ_tcxo to ~0.1 ns,
+resolving the tick ambiguity — analogous to integer ambiguity resolution
+in PPP-AR.  The filter performs qErr correction internally at PPP
+precision, which should be better than TIM-TP qErr.
 
-    With explicit separation, dt_rx constrains δ_tcxo and f_tcxo,
-    TICC constrains (δ_phc - δ_tcxo), and the filter estimates all
-    four states optimally.  The inter-oscillator coupling falls out
-    of the math.
+Between tick boundaries (98.75% of epochs when PPP sigma = 0.1 ns):
+    ∂qerr/∂φ_tcxo = 1, so H_ticc = [−1, 0, −1, 0]
 
-    Satellite clocks couple to the DO *through* the TCXO: PPP carrier
-    phase → δ_tcxo → (via PPS/TICC coupling) → δ_phc.
-
-Why this is better than the 2-state Kalman + CarrierPhaseTracker:
-    The CarrierPhaseTracker estimates the drift rate D = f_phc - f_tcxo
-    separately, accumulating adjfine corrections in a running sum.
-    This cascade introduces bias that the servo can't correct.  The
-    4-state filter estimates all parameters jointly — no cascade, no
-    accumulated bias, no separate D estimation.
-
-PPS as ambiguity resolution:
-    The PPS edges serve the same role as integer ambiguity resolution
-    in PPP-AR.  The carrier phase gives continuous ~0.1 ns tracking of
-    δ_tcxo, but with an unknown absolute offset.  Every second, the
-    PPS edge says "the TCXO thinks it's the GPS second boundary" and
-    the TICC says "and the PHC reads this."  That pins (δ_phc - δ_tcxo)
-    absolutely, resolving the ambiguity.
-
-Noise parameters (from lab measurements 2026-04-09/10):
-    sigma_ticc_ns:    TICC+qErr measurement noise (0.178 ns)
-    sigma_phc_phase:  DO phase noise per epoch (0.92 ns)
-    sigma_phc_freq:   DO frequency random walk (~0.01 ppb)
-    sigma_tcxo_phase: F9T TCXO phase noise per epoch (~2.0 ns)
-    sigma_tcxo_freq:  F9T TCXO frequency random walk (~0.1 ppb)
+This couples the TCXO and PHC states in the measurement — the key
+insight that makes 4-state fusion work where 2-state failed.
 """
 
 import math
 import numpy as np
 
 
-class DOFreqEst:
-    """4-state Kalman filter + LQR for DO frequency steering.
+def _qerr(phi_tcxo_ns, tick_ns=8.0):
+    """Compute qErr from TCXO phase: sub-tick residual."""
+    return phi_tcxo_ns - round(phi_tcxo_ns / tick_ns) * tick_ns
 
-    Drop-in interface with KalmanServo/PIServo: update() takes offset_ns,
-    returns ppb.  Additionally accepts dt_rx_ns and dt_rx_sigma_ns for
-    the PPP carrier-phase measurement.
+
+class DOFreqEst:
+    """4-state EKF + LQR for DO frequency steering.
+
+    Drop-in interface: update() takes offset_ns (raw TICC, no qErr),
+    returns ppb.  Also takes dt_rx_ns for PPP carrier-phase fusion.
     """
 
     def __init__(self, sigma_ticc_ns=0.178,
                  sigma_phc_phase_ns=0.92, sigma_phc_freq_ppb=0.01,
                  sigma_tcxo_phase_ns=2.0, sigma_tcxo_freq_ppb=0.1,
+                 tick_ns=8.0,
                  max_ppb=62_500_000.0, initial_freq=0.0):
-        """
-        Args:
-            sigma_ticc_ns: TICC+qErr measurement noise (ns).
-            sigma_phc_phase_ns: DO phase noise per epoch (ns).
-            sigma_phc_freq_ppb: DO frequency random walk per epoch (ppb).
-            sigma_tcxo_phase_ns: F9T TCXO phase noise per epoch (ns).
-            sigma_tcxo_freq_ppb: F9T TCXO frequency random walk (ppb).
-            max_ppb: maximum adjfine magnitude.
-            initial_freq: bootstrap adjfine to seed the PHC frequency.
-        """
         self.max_ppb = max_ppb
+        self.tick_ns = tick_ns
         self.dt = 1.0
 
-        # State: [δ_tcxo, f_tcxo, δ_phc, f_phc]
-        # Initialize: TCXO at PPP's dt_rx (unknown until first measurement),
-        # PHC at TICC offset, frequencies at zero (filter will learn).
+        # State: [φ_tcxo, f_tcxo, φ_phc, f_phc]
         self.x = np.array([0.0, 0.0, 0.0, 0.0])
 
-        # State transition matrix
+        # F matrix
         self.F = np.array([
-            [1.0, self.dt, 0.0, 0.0],   # δ_tcxo += f_tcxo * dt
-            [0.0, 1.0,     0.0, 0.0],   # f_tcxo (random walk)
-            [0.0, 0.0,     1.0, self.dt],  # δ_phc += (f_phc + u) * dt
-            [0.0, 0.0,     0.0, 1.0],   # f_phc (random walk)
+            [1.0, self.dt, 0.0, 0.0],
+            [0.0, 1.0,     0.0, 0.0],
+            [0.0, 0.0,     1.0, self.dt],
+            [0.0, 0.0,     0.0, 1.0],
         ])
 
-        # Control input matrix: adjfine affects only δ_phc
+        # B: adjfine only affects φ_phc
         self.B = np.array([0.0, 0.0, self.dt, 0.0])
 
-        # Measurement matrices
-        # PPP dt_rx observes δ_tcxo: H_ppp = [1, 0, 0, 0]
+        # Measurement: PPP (linear)
         self.H_ppp = np.array([[1.0, 0.0, 0.0, 0.0]])
-        # TICC observes (δ_phc - δ_tcxo): H_ticc = [-1, 0, 1, 0]
-        self.H_ticc = np.array([[-1.0, 0.0, 1.0, 0.0]])
+
+        # Measurement: TICC (EKF — Jacobian computed at each step)
+        # Between tick boundaries: H_ticc ≈ [-1, 0, -1, 0]
+        # This is the linearization of h(x) = -x[2] - qerr(x[0])
 
         # Process noise
         self.Q = np.diag([
@@ -123,82 +92,94 @@ class DOFreqEst:
 
         # Measurement noise
         self.R_ticc = np.array([[sigma_ticc_ns ** 2]])
-        # R_ppp is set dynamically from dt_rx_sigma_ns each epoch
 
-        # Initial covariance — start uncertain
-        self.P = np.diag([1000.0**2, 100.0**2, 1000.0**2, 100.0**2])
+        # Initial covariance
+        self.P = np.diag([1e6, 100.0**2, 1000.0**2, 100.0**2])
 
-        # LQR gain: we want to minimize δ_phc (state index 2) and
-        # cancel f_phc (state index 3).  The control u only enters
-        # through B = [0, 0, dt, 0], so only the PHC states are
-        # controllable.  Use a simple analytical gain:
-        #   L_phase (ppb per ns of δ_phc error) = 0.05
-        #   L_freq (full cancellation of f_phc) = 1.0
-        # Same as the 2-state Kalman's proven gains.
+        # LQR: only PHC states are controllable
+        # L[2] = phase gain, L[3] = freq cancellation
         self.L = np.array([0.0, 0.0, 0.05, 1.0])
 
         self.freq = initial_freq
         self._last_u = 0.0
-        self._initialized_tcxo = False
+        self._tcxo_initialized = False
+
+    def _h_ticc(self, x):
+        """Nonlinear TICC measurement function.
+
+        z_ticc = -φ_phc - qerr(φ_tcxo)
+
+        The engine computes ticc_diff_ns = -(PEROUT - PPS) = -φ_phc - qerr.
+        """
+        return -x[2] - _qerr(x[0], self.tick_ns)
+
+    def _H_ticc(self, x):
+        """Jacobian of h_ticc at x.
+
+        Between tick boundaries: ∂qerr/∂φ_tcxo = 1.
+        At tick boundaries: qerr jumps by ±tick, but the Jacobian is
+        still approximately 1 for the EKF (the tick crossing is rare
+        when PPP constrains φ_tcxo to < tick/2 uncertainty).
+        """
+        return np.array([[-1.0, 0.0, -1.0, 0.0]])
 
     def update(self, offset_ns, dt=1.0,
                dt_rx_ns=None, dt_rx_sigma_ns=None):
-        """Process one epoch. Returns frequency adjustment in ppb.
+        """Process one epoch.
 
         Args:
-            offset_ns: TICC+qErr measurement of (δ_phc - δ_tcxo) in ns.
+            offset_ns: RAW ticc_diff_ns (before qErr correction).
+                = -(PEROUT - PPS) = -φ_phc - qerr(φ_tcxo) + noise.
             dt: seconds since last correction.
-            dt_rx_ns: PPP carrier-phase dt_rx (ns).  Observes δ_tcxo.
-                When None, only the TICC measurement is used (graceful
-                degradation — the filter runs as a 2-state equivalent).
+            dt_rx_ns: PPP carrier-phase dt_rx (ns).
             dt_rx_sigma_ns: 1-sigma uncertainty of dt_rx (~0.1 ns).
 
         Returns:
             Frequency in ppb to apply via adjfine.
         """
-        # Update dt-dependent matrices if interval changed
         if dt != self.dt:
             self.dt = dt
-            self.F[0, 1] = dt  # δ_tcxo += f_tcxo * dt
-            self.F[2, 3] = dt  # δ_phc += f_phc * dt
-            self.B[2] = dt     # adjfine affects δ_phc
+            self.F[0, 1] = dt
+            self.F[2, 3] = dt
+            self.B[2] = dt
 
         # ── Initialize TCXO state from first dt_rx ──
-        # On the first dt_rx, set δ_tcxo to dt_rx so the filter starts
-        # with a reasonable absolute offset.  Without this, the TICC
-        # measurement (δ_phc - δ_tcxo) can't separate the two phases.
-        if not self._initialized_tcxo and dt_rx_ns is not None:
+        if not self._tcxo_initialized and dt_rx_ns is not None:
             self.x[0] = dt_rx_ns
-            # δ_phc = TICC + δ_tcxo (from the first measurement)
-            self.x[2] = offset_ns + dt_rx_ns
-            self._initialized_tcxo = True
+            # Recover φ_phc from raw TICC: z = -φ_phc - qerr(φ_tcxo)
+            # → φ_phc = -z - qerr(φ_tcxo)
+            self.x[2] = -offset_ns - _qerr(dt_rx_ns, self.tick_ns)
+            self._tcxo_initialized = True
 
         # ── Adaptive Q: boost during pull-in ──
-        phc_phase_abs = abs(self.x[2])
-        if phc_phase_abs > 50.0:
+        phc_abs = abs(self.x[2])
+        if phc_abs > 50.0:
             q_scale = 10.0
-        elif phc_phase_abs < 10.0:
+        elif phc_abs < 10.0:
             q_scale = 1.0
         else:
-            q_scale = 1.0 + 9.0 * (phc_phase_abs - 10.0) / 40.0
-        Q_scaled = self.Q * q_scale
+            q_scale = 1.0 + 9.0 * (phc_abs - 10.0) / 40.0
+        Q_scaled = self.Q.copy()
+        # Only boost PHC states during pull-in (TCXO states converge from PPP)
+        Q_scaled[2, 2] *= q_scale
+        Q_scaled[3, 3] *= q_scale
 
-        # ── Kalman predict ──
+        # ── EKF predict ──
         x_pred = self.F @ self.x + self.B * self._last_u
         P_pred = self.F @ self.P @ self.F.T + Q_scaled * dt
 
-        # ── Kalman update: TICC measurement ──
-        # z_ticc = (δ_phc - δ_tcxo) + noise
+        # ── EKF update: raw TICC (nonlinear) ──
         z_ticc = offset_ns
-        innov_ticc = z_ticc - (self.H_ticc @ x_pred).item()
-        S_ticc = (self.H_ticc @ P_pred @ self.H_ticc.T + self.R_ticc).item()
-        K_ticc = (P_pred @ self.H_ticc.T) / S_ticc
+        h_pred = self._h_ticc(x_pred)
+        innov_ticc = z_ticc - h_pred
+        H_ticc = self._H_ticc(x_pred)
+        S_ticc = (H_ticc @ P_pred @ H_ticc.T + self.R_ticc).item()
+        K_ticc = (P_pred @ H_ticc.T) / S_ticc
 
         self.x = x_pred + K_ticc.flatten() * innov_ticc
         self.P = P_pred - np.outer(K_ticc.flatten(), K_ticc.flatten()) * S_ticc
 
-        # ── Kalman update: PPP dt_rx (sequential, when available) ──
-        # z_ppp = δ_tcxo + noise
+        # ── Kalman update: PPP dt_rx (linear, sequential) ──
         if dt_rx_ns is not None and dt_rx_sigma_ns is not None:
             R_ppp = np.array([[dt_rx_sigma_ns ** 2]])
             innov_ppp = dt_rx_ns - (self.H_ppp @ self.x).item()
@@ -209,17 +190,11 @@ class DOFreqEst:
             self.P = self.P - np.outer(K_ppp.flatten(), K_ppp.flatten()) * S_ppp
 
         # ── LQR control ──
-        # u = -L @ x: only L[2] and L[3] are nonzero (PHC states).
-        # L[2] * δ_phc: proportional correction for PHC phase error.
-        # L[3] * f_phc: full cancellation of estimated crystal drift.
-        #
-        # Sign convention (matching KalmanServo):
-        # u is the raw control.  We return -u as adjfine because the
-        # engine calls adjfine = -servo.update().
+        # Only L[2] (φ_phc) and L[3] (f_phc) are nonzero.
+        # Sign convention: return -u, engine applies -(-u) = u.
         u = -(self.L @ self.x)
-        adjfine = -u  # engine will negate this back
+        adjfine = -u
 
-        # Clamp
         adjfine = max(-self.max_ppb, min(self.max_ppb, adjfine))
 
         self._last_u = u
@@ -227,39 +202,32 @@ class DOFreqEst:
         return self.freq
 
     def reset(self, current_freq):
-        """Reset for bumpless transfer (e.g., after PHC re-bootstrap)."""
         self.x = np.array([0.0, 0.0, 0.0, 0.0])
-        self.P = np.diag([1000.0**2, 100.0**2, 1000.0**2, 100.0**2])
+        self.P = np.diag([1e6, 100.0**2, 1000.0**2, 100.0**2])
         self._last_u = 0.0
-        self._initialized_tcxo = False
+        self._tcxo_initialized = False
         self.freq = current_freq
 
     @property
     def estimated_phase_ns(self):
-        """Current best estimate of PHC phase error (ns)."""
         return self.x[2]
 
     @property
     def estimated_freq_ppb(self):
-        """Current best estimate of PHC frequency drift (ppb)."""
         return self.x[3]
 
     @property
     def estimated_tcxo_phase_ns(self):
-        """Current best estimate of TCXO phase offset (ns)."""
         return self.x[0]
 
     @property
     def estimated_tcxo_freq_ppb(self):
-        """Current best estimate of TCXO frequency drift (ppb)."""
         return self.x[1]
 
     @property
     def phase_uncertainty_ns(self):
-        """1-sigma uncertainty of δ_phc (ns)."""
         return math.sqrt(max(0, self.P[2, 2]))
 
     @property
     def freq_uncertainty_ppb(self):
-        """1-sigma uncertainty of f_phc (ppb)."""
         return math.sqrt(max(0, self.P[3, 3]))
