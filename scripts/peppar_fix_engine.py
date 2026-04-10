@@ -2205,21 +2205,32 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         # effective reference noise drops to ~178 ps (the TICC+qErr
         # floor), well below the DO, so the servo can actually improve it.
         ticc_diff_raw_ns = ticc_diff_ns  # preserve for DOFreqEst EKF
-        # PPP-derived qErr: compute from dt_rx carrier-phase estimate
-        # (~0.1 ns precision) instead of TIM-TP qErr (~0.5 ns).
-        # Requires converged PPP (dt_rx_sigma < 1 ns).
-        ppp_qerr_ns = None
-        if (getattr(args, 'ppp_qerr', False) and dt_rx_ns is not None
-                and dt_rx_sigma is not None and dt_rx_sigma < 1.0):
-            tick_ns = 8.0  # 125 MHz
-            ppp_qerr_ns = dt_rx_ns - round(dt_rx_ns / tick_ns) * tick_ns
-        if ppp_qerr_ns is not None:
-            ticc_diff_ns = ticc_diff_ns + ppp_qerr_ns
-            if n_epochs % 10 == 0 and qerr_ns is not None:
-                log.info("  [%d] PPP qErr=%.3f vs TIM-TP qErr=%.3f (diff=%.3f ns)",
-                         n_epochs, ppp_qerr_ns, qerr_ns,
-                         ppp_qerr_ns - qerr_ns)
-        elif qerr_ns is not None:
+        # PPP-derived qErr: use carrier-phase dt_rx (~0.1 ns) instead of
+        # TIM-TP qErr (~0.5 ns).  Needs calibration against TIM-TP first
+        # to resolve the tick ambiguity (constant offset mod 8 ns).
+        ppp_qerr_used = False
+        if getattr(args, 'ppp_qerr', False):
+            ppp_cal = ctx['ppp_cal']
+            # Calibrate against TIM-TP during first ~10 converged epochs
+            if (not ppp_cal.calibrated and qerr_ns is not None
+                    and dt_rx_sigma is not None and dt_rx_sigma < 1.0):
+                done = ppp_cal.add_sample(dt_rx_ns, qerr_ns)
+                if done:
+                    log.info("  PPP qErr calibration done: offset=%.3f ns "
+                             "(%d samples)", ppp_cal.offset_ns, ppp_cal._n)
+            # Once calibrated, use PPP qerr with calibration offset
+            if (ppp_cal.calibrated and dt_rx_ns is not None
+                    and dt_rx_sigma is not None and dt_rx_sigma < 1.0):
+                from peppar_fix.error_sources import ppp_qerr as _ppp_qerr
+                ppp_qerr_ns = _ppp_qerr(dt_rx_ns, cal_offset_ns=ppp_cal.offset_ns)
+                ticc_diff_ns = ticc_diff_ns + ppp_qerr_ns
+                ppp_qerr_used = True
+                if n_epochs % 10 == 0 and qerr_ns is not None:
+                    log.info("  [%d] PPP qErr=%.3f vs TIM-TP qErr=%.3f "
+                             "(diff=%.3f ns, cal=%.3f)",
+                             n_epochs, ppp_qerr_ns, qerr_ns,
+                             ppp_qerr_ns - qerr_ns, ppp_cal.offset_ns)
+        if not ppp_qerr_used and qerr_ns is not None:
             ticc_diff_ns = ticc_diff_ns + qerr_ns
         sources = ticc_only_error_source(ticc_diff_ns, args.ticc_confidence_ns)
         corr_age_for_inflation = None  # not applicable in TICC-drive mode
