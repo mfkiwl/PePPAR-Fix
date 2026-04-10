@@ -96,10 +96,18 @@ class KalmanServo:
                            [0.0]])
         self.H = np.array([[1.0, 0.0]])  # measure phase only
 
-        # Process noise
+        # Process noise — adaptive: start with 10× sigma_freq for fast
+        # pull-in, taper to sigma_freq once phase error is small.
+        self._sigma_phase_ns = sigma_phase_ns
+        self._sigma_freq_ppb = sigma_freq_ppb
+        self._q_weight = q_weight
         self.Q_base = np.diag([sigma_phase_ns ** 2,
                                sigma_freq_ppb ** 2])
-        self.Q = self.Q_base * q_weight
+        # Start with boosted Q for pull-in (10× freq tracking)
+        self._Q_pullin = np.diag([sigma_phase_ns ** 2,
+                                  (sigma_freq_ppb * 10) ** 2]) * q_weight
+        self._Q_settled = self.Q_base * q_weight
+        self.Q = self._Q_pullin  # start aggressive
 
         # Measurement noise
         self.R_base = np.array([[sigma_meas_ns ** 2]])
@@ -174,6 +182,20 @@ class KalmanServo:
             self.dt = dt
             self.F[0, 1] = dt
             self.B[0, 0] = dt
+
+        # ── Adaptive Q: taper from pull-in to settled ──
+        # When |phase error| > 50 ns, use pull-in Q (10× freq tracking).
+        # When |phase error| < 10 ns, use settled Q (nominal).
+        # Smooth blend in between.
+        phase_abs = abs(self.x[0])
+        if phase_abs > 50.0:
+            self.Q = self._Q_pullin
+        elif phase_abs < 10.0:
+            self.Q = self._Q_settled
+        else:
+            # Linear blend between 10 and 50 ns
+            alpha = (phase_abs - 10.0) / 40.0  # 0 at 10ns, 1 at 50ns
+            self.Q = (1 - alpha) * self._Q_settled + alpha * self._Q_pullin
 
         # ── Kalman predict ──
         # Account for the control we applied last epoch
