@@ -116,6 +116,11 @@ class DOFreqEst:
         # causes divergence.  If dt_rx wasn't available at construction,
         # stay in 2-state mode permanently (no mid-run switch).
         self._tcxo_initialized = initial_dt_rx_ns is not None
+        # PHC phase (x[2]) must be seeded from the first TICC measurement
+        # before any Kalman update.  Without this, x[2]=0 creates a huge
+        # innovation that the coupled H=[-1,0,-1,0] splits between x[0]
+        # and x[2], corrupting the TCXO state.
+        self._need_phc_seed = self._tcxo_initialized
 
     def _h_ticc(self, x):
         """Nonlinear TICC measurement function.
@@ -163,6 +168,14 @@ class DOFreqEst:
             self.F[0, 1] = dt
             self.F[2, 3] = dt
             self.B[2] = dt
+
+        # ── Seed φ_phc from first TICC measurement ──
+        # z_ticc = -φ_phc - qerr(φ_tcxo) → φ_phc = -z - qerr(φ_tcxo)
+        # Must happen before any Kalman update so the first innovation
+        # is near zero and doesn't corrupt the TCXO state.
+        if self._need_phc_seed:
+            self.x[2] = -offset_ns - _qerr(self.x[0], self.tick_ns)
+            self._need_phc_seed = False
 
         # ── Adaptive Q: boost during pull-in ──
         phc_abs = abs(self.x[2])
