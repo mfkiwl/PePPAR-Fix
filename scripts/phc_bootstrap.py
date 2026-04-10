@@ -60,7 +60,8 @@ def load_drift(path):
         return None
 
 
-def save_drift(path, adjfine_ppb, phc_dev, tcxo_freq_corr_ppb=None):
+def save_drift(path, adjfine_ppb, phc_dev, tcxo_freq_corr_ppb=None,
+               dt_rx_ns=None):
     data = {
         "adjfine_ppb": adjfine_ppb,
         "phc": phc_dev,
@@ -68,6 +69,8 @@ def save_drift(path, adjfine_ppb, phc_dev, tcxo_freq_corr_ppb=None):
     }
     if tcxo_freq_corr_ppb is not None:
         data["tcxo_freq_corr_ppb"] = tcxo_freq_corr_ppb
+    if dt_rx_ns is not None:
+        data["dt_rx_ns"] = dt_rx_ns
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
@@ -906,9 +909,10 @@ def main():
                      target_freq, base_freq, glide_offset)
 
             # Save base frequency to drift file
-            save_drift(args.drift_file, base_freq, args.ptp_dev, tcxo_freq_corr_ppb)
-            log.info("Drift file updated: %s (base=%.1f ppb)",
-                     args.drift_file, base_freq)
+            save_drift(args.drift_file, base_freq, args.ptp_dev,
+                       tcxo_freq_corr_ppb, dt_rx_ns=dt_rx_ns)
+            log.info("Drift file updated: %s (base=%.1f ppb, dt_rx=%.1f ns)",
+                     args.drift_file, base_freq, dt_rx_ns)
 
             # Don't close cm_i2c — the engine will reopen its own handle.
             # Don't teardown actuator — engine inherits write_freq mode.
@@ -930,8 +934,10 @@ def main():
     ptp.adjfine(target_freq)
 
     # Save base frequency to drift file (not the transient glide offset)
-    save_drift(args.drift_file, base_freq, args.ptp_dev, tcxo_freq_corr_ppb)
-    log.info("Drift file updated: %s (base=%.1f ppb)", args.drift_file, base_freq)
+    save_drift(args.drift_file, base_freq, args.ptp_dev, tcxo_freq_corr_ppb,
+               dt_rx_ns=dt_rx_ns)
+    log.info("Drift file updated: %s (base=%.1f ppb, dt_rx=%.1f ns)",
+             args.drift_file, base_freq, dt_rx_ns)
 
     _enable_pps_out(ptp, args)
     ptp.close()

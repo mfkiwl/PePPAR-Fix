@@ -56,7 +56,8 @@ class DOFreqEst:
                  sigma_phc_phase_ns=0.92, sigma_phc_freq_ppb=0.01,
                  sigma_tcxo_phase_ns=2.0, sigma_tcxo_freq_ppb=0.1,
                  tick_ns=8.0,
-                 max_ppb=62_500_000.0, initial_freq=0.0):
+                 max_ppb=62_500_000.0, initial_freq=0.0,
+                 initial_dt_rx_ns=None):
         self.max_ppb = max_ppb
         self.tick_ns = tick_ns
         self.dt = 1.0
@@ -65,7 +66,8 @@ class DOFreqEst:
         # f_phc = crystal drift = negative of bootstrap adjfine.
         # Steady state: φ_phc += (f_phc + adjfine) * dt = 0 when
         # adjfine = -f_phc = initial_freq.
-        self.x = np.array([0.0, 0.0, 0.0, -initial_freq])
+        phi_tcxo_init = initial_dt_rx_ns if initial_dt_rx_ns is not None else 0.0
+        self.x = np.array([phi_tcxo_init, 0.0, 0.0, -initial_freq])
 
         # F matrix
         self.F = np.array([
@@ -109,7 +111,11 @@ class DOFreqEst:
         # At startup, bootstrap set adjfine = initial_freq, so
         # the last applied u = initial_freq.
         self._last_u = initial_freq
-        self._tcxo_initialized = False
+        # TCXO state must be initialized at construction from bootstrap
+        # dt_rx to avoid a mid-run measurement model transition that
+        # causes divergence.  If dt_rx wasn't available at construction,
+        # stay in 2-state mode permanently (no mid-run switch).
+        self._tcxo_initialized = initial_dt_rx_ns is not None
 
     def _h_ticc(self, x):
         """Nonlinear TICC measurement function.
@@ -157,14 +163,6 @@ class DOFreqEst:
             self.F[0, 1] = dt
             self.F[2, 3] = dt
             self.B[2] = dt
-
-        # ── Initialize TCXO state from first dt_rx ──
-        if not self._tcxo_initialized and dt_rx_ns is not None:
-            self.x[0] = dt_rx_ns
-            # Recover φ_phc from raw TICC: z = -φ_phc - qerr(φ_tcxo)
-            # → φ_phc = -z - qerr(φ_tcxo)
-            self.x[2] = -offset_ns - _qerr(dt_rx_ns, self.tick_ns)
-            self._tcxo_initialized = True
 
         # ── Adaptive Q: boost during pull-in ──
         phc_abs = abs(self.x[2])

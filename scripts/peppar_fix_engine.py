@@ -1195,6 +1195,9 @@ def _save_osc_freq_corr(ctx):
         if (carrier_tracker is not None and carrier_tracker._n_d > 0
                 and carrier_tracker.drift_rate_ppb != 0):
             data['tcxo_freq_corr_ppb'] = adjfine - carrier_tracker.drift_rate_ppb
+        # Update dt_rx_ns for next DOFreqEst initialization
+        if ctx.get('_prev_dt_rx_ns') is not None:
+            data['dt_rx_ns'] = ctx['_prev_dt_rx_ns']
         os.makedirs(os.path.dirname(drift_path) or '.', exist_ok=True)
         with open(drift_path, 'w') as f:
             json.dump(data, f, indent=2)
@@ -1419,6 +1422,21 @@ def _setup_servo(args, known_ecef, qerr_store):
     if getattr(args, 'do_freq_est', False):
         from peppar_fix.do_freq_est import DOFreqEst
         sigma_ticc = 0.178 if args.ticc_drive else 1.9
+        # Seed TCXO phase from bootstrap dt_rx so the filter starts in
+        # full 4-state mode from epoch 1 (no mid-run transition).
+        drift_path = getattr(args, 'drift_file', None) or 'data/drift.json'
+        bootstrap_dt_rx_ns = None
+        try:
+            with open(drift_path) as f:
+                drift_data = json.load(f)
+            bootstrap_dt_rx_ns = drift_data.get('dt_rx_ns')
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        if bootstrap_dt_rx_ns is not None:
+            log.info("DOFreqEst: seeding φ_tcxo from bootstrap dt_rx=%.1f ns",
+                     bootstrap_dt_rx_ns)
+        else:
+            log.warning("DOFreqEst: no bootstrap dt_rx — running 2-state only")
         servo = DOFreqEst(
             sigma_ticc_ns=sigma_ticc,
             sigma_phc_phase_ns=0.92,
@@ -1427,12 +1445,14 @@ def _setup_servo(args, known_ecef, qerr_store):
             sigma_tcxo_freq_ppb=0.1,    # F9T TCXO drift rate
             max_ppb=caps['max_adj'],
             initial_freq=current_adj,
+            initial_dt_rx_ns=bootstrap_dt_rx_ns,
         )
         log.info("DOFreqEst 4-state: sigma_ticc=%.3f ns, "
                  "sigma_phc=[0.92 ns, %.4f ppb], "
                  "sigma_tcxo=[2.0 ns, 0.1 ppb], "
-                 "initial_freq=%.1f ppb",
-                 sigma_ticc, args.kalman_sigma_freq, current_adj)
+                 "initial_freq=%.1f ppb, tcxo_init=%s",
+                 sigma_ticc, args.kalman_sigma_freq, current_adj,
+                 bootstrap_dt_rx_ns is not None)
     elif getattr(args, 'kalman_servo', False):
         from peppar_fix.kalman_servo import KalmanServo
         # Measurement noise: TICC+qErr if TICC-drive, EXTTS+qErr otherwise
