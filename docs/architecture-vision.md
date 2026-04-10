@@ -108,79 +108,97 @@ not competitors.  The FrequencyIntegrator predicts; the PPS/qErr/TICC
 measurements update.  The source competition's winner-take-all
 evolves into measurement fusion.
 
-### The 4-state DOFreqEst filter (target architecture)
+### DOFreqEst: the fusion filter (target architecture)
 
-The fundamental insight (2026-04-10): the PHC phase — the thing we're
-trying to control — is **never directly observed**.  We only observe
-it indirectly through the difference (δ_phc − δ_tcxo) via PPS edges
-timestamped on the PHC/TICC.  Meanwhile, carrier-phase measurements
-give us δ_tcxo via the PPP filter.  Satellite clocks couple to our DO
-**through** the receiver's TCXO.
+**The fundamental insight** (2026-04-10): satellite clocks couple to
+our DO *through* the receiver's TCXO.  PPP carrier phase gives ~0.1 ns
+tracking of the TCXO-to-GPS relationship.  PPS edges (timestamped by
+the TICC on the PHC clock) give the TCXO-to-PHC relationship.
+Together, they triangulate the PHC-to-GPS relationship.
 
-The correct state space has four hidden variables:
+**The measurement model subtlety** (also 2026-04-10, learned the hard
+way through three failed fusion attempts):
 
-| State | Meaning | Observed by |
-|---|---|---|
-| δ_tcxo | F9T TCXO phase vs GPS | PPP dt_rx (~0.1 ns) |
-| f_tcxo | F9T TCXO frequency drift | d(dt_rx)/dt |
-| δ_phc | DO/PHC phase vs GPS | only via (δ_phc − δ_tcxo) |
-| f_phc | DO crystal drift rate | adjfine residuals |
+The raw TICC measurement *does* observe (δ_phc − δ_tcxo_quantized):
+TICC chA (PEROUT, from PHC) minus chB (PPS, from TCXO).  But qErr
+correction removes the TCXO quantization noise, leaving approximately
+φ_phc — a direct observation of the PHC phase error.  After qErr
+correction, the TCXO coupling in the measurement is gone.
 
-Process model (linear, standard Kalman):
-
+This means a naive 4-state filter with:
 ```
-δ_tcxo[n+1] = δ_tcxo[n] + f_tcxo[n] · dt + w_tcxo
-f_tcxo[n+1] = f_tcxo[n] + w_f_tcxo
-
-δ_phc[n+1]  = δ_phc[n] + (f_phc[n] + adjfine[n]) · dt + w_phc
-f_phc[n+1]  = f_phc[n] + w_f_phc
+z_ticc_corrected = φ_phc + noise       (H = [0, 0, 1, 0])
+z_ppp            = φ_tcxo + noise       (H = [1, 0, 0, 0])
 ```
+decomposes into two independent 2-state filters.  The PPP measurement
+constrains φ_tcxo but *can't help* φ_phc.  The states are decoupled.
 
-Measurement model:
-
+**The real coupling lives in the raw TICC measurement** (before qErr):
 ```
-z_ppp  = δ_tcxo + v_ppp              (PPP dt_rx, ~0.1 ns)
-z_ticc = (δ_phc − δ_tcxo) + v_ticc  (TICC+qErr, ~0.178 ns)
+z_ticc_raw = φ_phc − φ_tcxo_quantized + noise_ticc
 ```
+where φ_tcxo_quantized = φ_tcxo rounded to the nearest 8 ns tick.
+The quantization is a nonlinear operation (modular arithmetic).
+Combined with:
+```
+z_ppp = φ_tcxo + noise_ppp
+```
+these two measurements *together* constrain φ_phc better than either
+alone — PPP resolves the quantization ambiguity, giving an effective
+qErr correction at PPP precision (~0.1 ns) rather than TIM-TP
+precision (~1 ps reported but limited by TCXO noise).
 
-The PPS edges serve as **ambiguity resolution**: every second, the
-PPS says "the TCXO thinks it's the GPS second boundary" and the TICC
-says "the PHC reads this."  That pins (δ_phc − δ_tcxo).  Between PPS
-edges, carrier phase tracks δ_tcxo with 0.1 ns precision.  The filter
-propagates that through the coupling to constrain δ_phc.
+This requires an EKF (or particle filter) because the 125 MHz tick
+quantization model is nonlinear.  It's analogous to PPP-AR: the
+continuous carrier phase (dt_rx) provides the float solution, and
+the PPS tick model provides the integer constraint.
 
-No separate drift rate D.  No cascade of estimators.  No
-CarrierPhaseTracker accumulating adjfine with growing bias.  The
-inter-oscillator coupling falls out of the filter states naturally.
+**Implementation path:**
 
-adjfine is a **known input** to f_phc (we set it), not an estimated
-state.  The filter only estimates the crystal drift component.
+1. **Current (working)**: 2-state Kalman with TICC+qErr as sole
+   measurement.  TDEV(1s) = 1.01 ns.  The qErr correction is done
+   externally (TIM-TP from the F9T), and the residual ~0.178 ns
+   measurement noise is the TICC+qErr floor.
 
-All noise parameters are lab-measured: TCXO TDEV (0.92 ns), PHC
-TDEV, TICC floor (0.06 ns), PPP sigma (~0.1 ns), TCXO frequency
-random walk (0.01 ppb/epoch), DO frequency random walk.
+2. **Next step**: EKF that models the 125 MHz tick quantization
+   explicitly.  Raw TICC + PPP dt_rx as joint measurements.  The
+   filter performs qErr resolution internally using PPP precision
+   instead of relying on TIM-TP.  This should push the effective
+   measurement noise below 0.178 ns toward the PPP floor (~0.1 ns).
 
-### Stepping stone: time-differenced dt_rx (implemented first)
+3. **Full DOFreqEst**: add the FrequencyIntegrator (adjfine history)
+   as a process model enhancement, enabling the filter to predict
+   between PPS edges using the known adjfine corrections.
 
-The 4-state filter is the target, but a simpler stepping stone gives
-most of the benefit: inject **time-differenced** Δdt_rx as a
-frequency measurement into the existing 2-state Kalman servo.
+### What we tried and why it failed (2026-04-10)
 
-Δdt_rx = dt_rx[n] − dt_rx[n−1] measures how much the TCXO-to-GPS
-offset changed in one epoch.  This constrains the Kalman's frequency
-state (how fast the PHC is drifting) without introducing any absolute
-bias — the differencing cancels the unconverged drift rate D that
-caused the absolute-carrier fusion to fail (2026-04-10 experiment:
-Carrier's 0.1 ns sigma + 24 ns bias → Kalman trusted biased Carrier
-30× more than truthful TICC → divergence).
+Three fusion attempts, three failures, each illuminating:
 
-Time-differencing throws away absolute phase knowledge (which the
-TICC already provides) and keeps only the frequency information from
-PPP.  This is suboptimal compared to the 4-state filter (which
-extracts both phase and frequency from dt_rx), but robust to model
-errors.  The 4-state filter subsumes the time-differenced approach:
-its update-predict cycle implicitly time-differences while also
-using the absolute information.
+1. **Absolute carrier fusion** (commit 33c3b03): injected Carrier
+   prediction (from CarrierPhaseTracker) as a second phase measurement.
+   Failed because the Carrier had +24 ns systematic bias from
+   unconverged drift rate D.  With carrier_sigma=0.1 ns, the Kalman
+   trusted the biased Carrier 30× more than the truthful TICC.
+
+2. **Time-differenced dt_rx** (commit e6e15e9): injected Δdt_rx as a
+   frequency measurement to avoid the absolute bias.  Failed because
+   the 2-state filter's frequency state = (f_phc − f_tcxo) — it
+   conflates the two oscillators.  Δdt_rx observes f_tcxo alone, so
+   injecting it as a measurement of the combined state pushes f_phc
+   toward zero, stalling convergence.
+
+3. **Naive 4-state filter** (commit d4725f0): separated the oscillator
+   states but used the wrong measurement model (H_ticc = [-1,0,1,0]
+   for TICC+qErr, which treats the corrected TICC as still coupled).
+   Also set δ_tcxo = dt_rx (millions of ns) in the initialization,
+   producing insane LQR corrections.  When corrected to H = [0,0,1,0],
+   the filter decomposes into two independent 2-state filters — PPP
+   can't help the PHC because there's no coupling in the measurements.
+
+**The lesson**: fusion requires coupling in the measurement model.
+The coupling exists in the raw TICC (before qErr), not in the
+corrected TICC.  The raw-TICC EKF with explicit tick quantization
+is the correct architecture.
 
 ### Graceful degradation
 
