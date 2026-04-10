@@ -57,17 +57,20 @@ class DOFreqEst:
                  sigma_tcxo_phase_ns=2.0, sigma_tcxo_freq_ppb=0.1,
                  tick_ns=8.0,
                  max_ppb=62_500_000.0, initial_freq=0.0,
-                 initial_dt_rx_ns=None):
+                 initial_dt_rx_ns=None, base_freq=None):
         self.max_ppb = max_ppb
         self.tick_ns = tick_ns
         self.dt = 1.0
 
         # State: [φ_tcxo, f_tcxo, φ_phc, f_phc]
-        # f_phc = crystal drift = negative of bootstrap adjfine.
-        # Steady state: φ_phc += (f_phc + adjfine) * dt = 0 when
-        # adjfine = -f_phc = initial_freq.
+        # f_phc = crystal drift = negative of steady-state adjfine.
+        # initial_freq = base_freq + glide (what bootstrap applied).
+        # x[3] must use base_freq (the crystal's true drift), not
+        # initial_freq (which includes the transient glide offset).
+        # _last_u uses initial_freq (the actual applied adjfine).
         phi_tcxo_init = initial_dt_rx_ns if initial_dt_rx_ns is not None else 0.0
-        self.x = np.array([phi_tcxo_init, 0.0, 0.0, -initial_freq])
+        crystal_freq = base_freq if base_freq is not None else initial_freq
+        self.x = np.array([phi_tcxo_init, 0.0, 0.0, -crystal_freq])
 
         # F matrix
         self.F = np.array([

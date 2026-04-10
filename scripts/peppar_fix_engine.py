@@ -1426,10 +1426,12 @@ def _setup_servo(args, known_ecef, qerr_store):
         # full 4-state mode from epoch 1 (no mid-run transition).
         drift_path = getattr(args, 'drift_file', None) or 'data/drift.json'
         bootstrap_dt_rx_ns = None
+        bootstrap_base_freq = None
         try:
             with open(drift_path) as f:
                 drift_data = json.load(f)
             bootstrap_dt_rx_ns = drift_data.get('dt_rx_ns')
+            bootstrap_base_freq = drift_data.get('adjfine_ppb')
         except (FileNotFoundError, json.JSONDecodeError):
             pass
         if bootstrap_dt_rx_ns is not None:
@@ -1437,6 +1439,11 @@ def _setup_servo(args, known_ecef, qerr_store):
                      bootstrap_dt_rx_ns)
         else:
             log.warning("DOFreqEst: no bootstrap dt_rx — running 2-state only")
+        if bootstrap_base_freq is not None:
+            log.info("DOFreqEst: crystal freq from drift file: %.1f ppb "
+                     "(current_adj=%.1f, glide=%.1f)",
+                     bootstrap_base_freq, current_adj,
+                     current_adj - bootstrap_base_freq)
         servo = DOFreqEst(
             sigma_ticc_ns=sigma_ticc,
             sigma_phc_phase_ns=0.92,
@@ -1446,12 +1453,14 @@ def _setup_servo(args, known_ecef, qerr_store):
             max_ppb=caps['max_adj'],
             initial_freq=current_adj,
             initial_dt_rx_ns=bootstrap_dt_rx_ns,
+            base_freq=bootstrap_base_freq,
         )
         log.info("DOFreqEst 4-state: sigma_ticc=%.3f ns, "
                  "sigma_phc=[0.92 ns, %.4f ppb], "
                  "sigma_tcxo=[2.0 ns, 0.1 ppb], "
-                 "initial_freq=%.1f ppb, tcxo_init=%s",
+                 "initial_freq=%.1f ppb, base_freq=%s, tcxo_init=%s",
                  sigma_ticc, args.kalman_sigma_freq, current_adj,
+                 f"{bootstrap_base_freq:.1f}" if bootstrap_base_freq else "None",
                  bootstrap_dt_rx_ns is not None)
     elif getattr(args, 'kalman_servo', False):
         from peppar_fix.kalman_servo import KalmanServo
