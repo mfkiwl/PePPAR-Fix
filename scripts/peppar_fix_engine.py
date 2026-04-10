@@ -2080,21 +2080,19 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             carrier_tracker.update_drift_estimate(
                 dt_rx_ns, pps_error_ns, ctx['adjfine_ppb'])
 
-    # Time-differenced dt_rx for Kalman frequency fusion.
-    # Δdt_rx = dt_rx[n] - dt_rx[n-1]: how much the TCXO-to-GPS offset
-    # changed.  Constrains the Kalman's frequency state without absolute
-    # bias.  Stored in ctx so we can track the previous value.
+    # Time-differenced dt_rx tracking (for future 4-state filter).
+    # The 2-state Kalman's frequency state conflates f_phc_drift and
+    # f_tcxo, so Δdt_rx (which observes f_tcxo alone) can't be injected
+    # as a frequency measurement without breaking the state semantics.
+    # The 4-state DOFreqEst filter (see architecture-vision.md) will
+    # properly separate these.  For now, just track Δdt_rx for logging.
     _delta_dt_rx_ns = None
-    _dt_rx_sigma_for_fusion = None
-    if (dt_rx_ns is not None and dt_rx_sigma is not None
-            and not getattr(args, 'no_carrier', False)):
+    if dt_rx_ns is not None:
         prev_dt_rx = ctx.get('_prev_dt_rx_ns')
         if prev_dt_rx is not None:
             delta = dt_rx_ns - prev_dt_rx
-            # Sanity: reject jumps > 5 µs (filter divergence / cycle slip)
             if abs(delta) < 5000.0:
                 _delta_dt_rx_ns = delta
-                _dt_rx_sigma_for_fusion = dt_rx_sigma
         ctx['_prev_dt_rx_ns'] = dt_rx_ns
 
     pps_var_ns2 = qerr_alignment["pps_var"].diff_variance()
@@ -2339,14 +2337,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         servo.kp = BASE_KP * gain_scale
         servo.ki = BASE_KI * gain_scale
 
-        if (getattr(args, 'kalman_servo', False)
-                and _delta_dt_rx_ns is not None):
-            adjfine_ppb = -servo.update(
-                avg_error, dt=float(n_samples),
-                delta_dt_rx_ns=_delta_dt_rx_ns,
-                dt_rx_sigma_ns=_dt_rx_sigma_for_fusion)
-        else:
-            adjfine_ppb = -servo.update(avg_error, dt=float(n_samples))
+        adjfine_ppb = -servo.update(avg_error, dt=float(n_samples))
         max_track_ppb = min(
             ctx['caps']['max_adj'],
             args.track_max_ppb if args.track_max_ppb is not None else ctx['caps']['max_adj'],
