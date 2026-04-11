@@ -1,38 +1,41 @@
 """4-state DOFreqEst — EKF fusing raw TICC with PPP carrier phase.
 
-Models both oscillators (TCXO + PHC) and the 125 MHz tick quantization
-that links them through PPS edges.  No external qErr correction needed.
+See docs/glossary.md for term definitions (DO, rx TCXO, qerr, etc.).
+
+Models both oscillators (rx TCXO + DO) and the 125 MHz tick
+quantization that links them through PPS edges.  No external qErr
+correction needed.
 
 State vector:
-    x = [φ_tcxo, f_tcxo, φ_phc, f_phc]
+    x = [φ_rx, f_rx, φ_do, f_do]
 
-    φ_tcxo: F9T TCXO phase offset from GPS (ns) — tracked from dt_rx
-    f_tcxo: F9T TCXO frequency drift rate (ppb)
-    φ_phc:  DO/PHC phase error from GPS (ns) — steered to zero
-    f_phc:  DO crystal frequency drift rate (ppb)
+    φ_rx:  rx TCXO phase offset from GPS (ns) — tracked from dt_rx
+    f_rx:  rx TCXO frequency drift rate (ppb)
+    φ_do:  DO phase error from GPS (ns) — steered to zero
+    f_do:  DO crystal frequency drift rate (ppb)
 
 Process model (linear):
-    φ_tcxo += f_tcxo · dt
-    f_tcxo += w_f_tcxo  (random walk)
-    φ_phc  += (f_phc + adjfine) · dt
-    f_phc  += w_f_phc  (random walk)
+    φ_rx += f_rx · dt
+    f_rx += w_f_rx  (random walk)
+    φ_do += (f_do + adjfine) · dt
+    f_do += w_f_do  (random walk)
 
 Measurements:
-    z_ppp  = φ_tcxo + v_ppp                    (PPP dt_rx, ~0.1 ns, linear)
-    z_ticc = −φ_phc − qerr(φ_tcxo) + v_ticc   (raw TICC, nonlinear via tick)
+    z_ppp  = φ_rx + v_ppp                    (PPP dt_rx, ~0.1 ns, linear)
+    z_ticc = −φ_do − qerr(φ_rx) + v_ticc    (raw TICC, nonlinear via tick)
 
-    qerr(φ) = φ − round(φ / tick) · tick       (sub-tick TCXO phase)
+    qerr(φ) = φ − round(φ / tick) · tick    (sub-tick rx TCXO phase)
 
-The nonlinearity is in qerr(): the 125 MHz tick quantization that
-determines where the PPS edge fires.  PPP constrains φ_tcxo to ~0.1 ns,
+The nonlinearity is in qerr(): the rx TCXO's 125 MHz tick quantization
+that determines where gnss_pps fires.  PPP constrains φ_rx to ~0.1 ns,
 resolving the tick ambiguity — analogous to integer ambiguity resolution
 in PPP-AR.  The filter performs qErr correction internally at PPP
 precision, which should be better than TIM-TP qErr.
 
 Between tick boundaries (98.75% of epochs when PPP sigma = 0.1 ns):
-    ∂qerr/∂φ_tcxo = 1, so H_ticc = [−1, 0, −1, 0]
+    ∂qerr/∂φ_rx = 1, so H_ticc = [−1, 0, −1, 0]
 
-This couples the TCXO and PHC states in the measurement — the key
+This couples the rx TCXO and DO states in the measurement — the key
 insight that makes 4-state fusion work where 2-state failed.
 """
 
@@ -41,7 +44,7 @@ import numpy as np
 
 
 def _qerr(phi_tcxo_ns, tick_ns=8.0):
-    """Compute qErr from TCXO phase: sub-tick residual."""
+    """Compute qErr from rx TCXO phase: sub-tick residual."""
     return phi_tcxo_ns - round(phi_tcxo_ns / tick_ns) * tick_ns
 
 
@@ -62,10 +65,10 @@ class DOFreqEst:
         self.tick_ns = tick_ns
         self.dt = 1.0
 
-        # State: [φ_tcxo, f_tcxo, φ_phc, f_phc]
-        # f_phc = crystal drift = negative of steady-state adjfine.
+        # State: [φ_rx, f_rx, φ_do, f_do]
+        # f_do = DO crystal drift = negative of steady-state adjfine.
         # initial_freq = base_freq + glide (what bootstrap applied).
-        # x[3] must use base_freq (the crystal's true drift), not
+        # x[3] must use base_freq (the DO's true drift), not
         # initial_freq (which includes the transient glide offset).
         # _last_u uses initial_freq (the actual applied adjfine).
         phi_tcxo_init = initial_dt_rx_ns if initial_dt_rx_ns is not None else 0.0
@@ -102,10 +105,10 @@ class DOFreqEst:
         self.R_ticc = np.array([[sigma_ticc_ns ** 2]])
 
         # Initial covariance — tuned to bootstrap knowledge:
-        # x[0]: dt_rx from drift file, ~100 ns stale from TCXO drift
-        # x[1]: TCXO rate, poorly known (temperature dependent)
-        # x[2]: PHC phase, ~5000 ns (bootstrap glide not converged yet)
-        # x[3]: crystal freq, well-known from bootstrap adjfine (~1 ppb)
+        # x[0]: dt_rx from drift file, ~100 ns stale from rx TCXO drift
+        # x[1]: rx TCXO rate, poorly known (temperature dependent)
+        # x[2]: DO phase, ~5000 ns (bootstrap glide not converged yet)
+        # x[3]: DO crystal freq, well-known from bootstrap adjfine (~1 ppb)
         if initial_dt_rx_ns is not None:
             self.P = np.diag([100.0**2, 10.0**2, 5000.0**2, 1.0**2])
         else:
@@ -121,15 +124,15 @@ class DOFreqEst:
         # At startup, bootstrap set adjfine = initial_freq, so
         # the last applied u = initial_freq.
         self._last_u = initial_freq
-        # TCXO state must be initialized at construction from bootstrap
+        # rx TCXO state must be initialized at construction from bootstrap
         # dt_rx to avoid a mid-run measurement model transition that
         # causes divergence.  If dt_rx wasn't available at construction,
         # stay in 2-state mode permanently (no mid-run switch).
         self._tcxo_initialized = initial_dt_rx_ns is not None
-        # PHC phase (x[2]) must be seeded from the first TICC measurement
+        # DO phase (x[2]) must be seeded from the first TICC measurement
         # before any Kalman update.  Without this, x[2]=0 creates a huge
         # innovation that the coupled H=[-1,0,-1,0] splits between x[0]
-        # and x[2], corrupting the TCXO state.
+        # and x[2], corrupting the rx TCXO state.
         self._need_phc_seed = self._tcxo_initialized
 
     def _h_ticc(self, x):
@@ -137,7 +140,7 @@ class DOFreqEst:
 
         z_ticc = -φ_phc - qerr(φ_tcxo)
 
-        When TCXO not yet initialized, treat as z_ticc = -φ_phc
+        When rx TCXO not yet initialized, treat as z_ticc = -φ_do
         (no qerr correction — degrades to 2-state equivalent).
         """
         if self._tcxo_initialized:
@@ -148,11 +151,11 @@ class DOFreqEst:
     def _H_ticc(self, x):
         """Jacobian of h_ticc at x.
 
-        When TCXO is initialized (PPP has provided dt_rx):
+        When rx TCXO is initialized (PPP has provided dt_rx):
             H = [-1, 0, -1, 0] — full coupling, EKF resolves tick.
-        When TCXO is NOT initialized:
+        When rx TCXO is NOT initialized:
             H = [0, 0, -1, 0] — degrade to 2-state (TICC observes
-            φ_phc only, ignoring unknown TCXO contribution).
+            φ_do only, ignoring unknown rx TCXO contribution).
         """
         if self._tcxo_initialized:
             return np.array([[-1.0, 0.0, -1.0, 0.0]])
@@ -182,7 +185,7 @@ class DOFreqEst:
         # ── Seed φ_phc from first TICC measurement ──
         # z_ticc = -φ_phc - qerr(φ_tcxo) → φ_phc = -z - qerr(φ_tcxo)
         # Must happen before any Kalman update so the first innovation
-        # is near zero and doesn't corrupt the TCXO state.
+        # is near zero and doesn't corrupt the rx TCXO state.
         if self._need_phc_seed:
             self.x[2] = -offset_ns - _qerr(self.x[0], self.tick_ns)
             # Reduce P[2,2] to match TICC measurement accuracy (~3 ns).
@@ -200,7 +203,7 @@ class DOFreqEst:
         else:
             q_scale = 1.0 + 9.0 * (phc_abs - 10.0) / 40.0
         Q_scaled = self.Q.copy()
-        # Only boost PHC states during pull-in (TCXO states converge from PPP)
+        # Only boost DO states during pull-in (rx TCXO states converge from PPP)
         Q_scaled[2, 2] *= q_scale
         Q_scaled[3, 3] *= q_scale
 

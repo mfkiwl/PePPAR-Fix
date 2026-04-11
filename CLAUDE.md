@@ -306,6 +306,21 @@ for the duration of your work.
 
 ## Key Technical Context
 
+### Terminology — DO vs PHC, rx TCXO vs bare TCXO
+
+**Read `docs/glossary.md`** for definitions of all domain terms.
+
+Critical naming rules:
+
+- **DO** (Disciplined Oscillator): the crystal being steered.  Use
+  "DO" in any context that isn't PHC-specific.
+- **PHC**: use only when referring to the Linux PTP Hardware Clock
+  API (`adjfine`, `clock_settime`, `EXTTS`).  Not all DOs are PHCs.
+- **rx TCXO**: the TCXO inside the GNSS receiver (F9T).  Never use
+  bare "TCXO" — it's ambiguous with the DO's crystal on i226 hosts.
+- **gnss_pps** / **do_pps**: the two PPS streams.  PPS error =
+  gnss_pps − do_pps (positive = DO is late).
+
 ### Stream correlation via CLOCK_MONOTONIC — read this first
 
 **Read `docs/stream-timescale-correlation.md` before modifying any
@@ -425,6 +440,7 @@ here before changing anything in the areas they cover.
 | [ptp4l-supervision.md](docs/ptp4l-supervision.md) | Layered ptp4l clockClass supervision via systemd. Three layers: engine (Python UDS), wrapper (pmc command), systemd ExecStopPost. Covers clock-class mapping, ptp4l config, privilege model, and example unit file in `deploy/`. |
 | [extts-lifecycle.md](docs/extts-lifecycle.md) | EXTTS (PPS IN/OUT) initialization lifecycle. Bootstrap owns pin programming; engine inherits and verifies. Covers PTP profile extension for IN+OUT pins, PEROUT for TICC, fd persistence, platform matrix (i226/E810), and phased migration path. |
 | [i226-perout-500ms-bug.md](docs/i226-perout-500ms-bug.md) | **Read before debugging PEROUT.** i226 PEROUT can fire at 500ms phase — hardware issue, confirmed with SatPulse. Some boards always land wrong regardless of software. Detection, workaround, affected hosts. |
+| [glossary.md](docs/glossary.md) | **Terminology reference.** DO vs PHC, rx TCXO vs bare TCXO, gnss_pps vs do_pps, all acronyms (EKF, LQR, TDEV, ADEV, TICC, PPP, SSR, etc.). |
 | [wr-gm-research.md](docs/wr-gm-research.md) | White Rabbit GM architecture review: softpll internals (helper/main/external PLLs), how GM uses PPS vs 10 MHz, qErr injection points, PEROUT at 10 MHz, two integration paths (PHC PEROUT vs OCXO+ClockMatrix). |
 | [ticc-baseline-2026-04-01.md](docs/ticc-baseline-2026-04-01.md) | F9T PPS baseline TDEV(1s)=2.3 ns (2h runs); i226 TCXO PEROUT TDEV(1s)=1.170 ns (0.2% spread); servo bandwidth implications; EXTTS quantization analysis. |
 | [ppp-ar-design.md](docs/ppp-ar-design.md) | Design for PPP-AR: phase bias sources, filter changes, ambiguity resolution algorithm, 4-phase implementation plan, 5 validation tests. |

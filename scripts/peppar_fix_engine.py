@@ -11,7 +11,7 @@ Phase 1 — Bootstrap (no known position):
 Phase 2 — Steady state (position known):
   FixedPosFilter estimates clock. Solution logged.
   Optional consumers:
-  - PHC servo (--servo /dev/ptp0): disciplines hardware clock from dt_rx
+  - DO servo (--servo /dev/ptp0): disciplines oscillator via PHC adjfine
   - NTRIP caster (--caster :2102): streams RTCM to clients (future)
 
 Usage:
@@ -1471,8 +1471,8 @@ def _setup_servo(args, known_ecef, qerr_store):
             sigma_ticc_ns=sigma_ticc,
             sigma_phc_phase_ns=0.92,
             sigma_phc_freq_ppb=args.kalman_sigma_freq,
-            sigma_tcxo_phase_ns=2.0,    # F9T PPS TDEV(1s)
-            sigma_tcxo_freq_ppb=0.1,    # F9T TCXO drift rate
+            sigma_tcxo_phase_ns=2.0,    # rx TCXO (F9T) PPS TDEV(1s)
+            sigma_tcxo_freq_ppb=0.1,    # rx TCXO drift rate
             max_ppb=caps['max_adj'],
             initial_freq=current_adj,
             initial_dt_rx_ns=bootstrap_dt_rx_ns,
