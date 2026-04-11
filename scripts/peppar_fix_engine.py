@@ -2131,13 +2131,15 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             ticc_age_s = max(0.0, time.monotonic() - ticc_measurement.recv_mono)
             ticc_confidence = ticc_measurement.confidence
             # Match qErr to the TICC measurement's PPS edge — separate
-            # from the EXTTS match.  The TICC reports ~50 ms after the
-            # PPS, TIM-TP arrived ~0.9s before it.  Total offset ≈ 0.95s.
-            # Do NOT override qerr_for_extts_pps_ns — that's for the EXTTS qVIR.
+            # from the EXTTS match.  The expected offset between TIM-TP
+            # arrival and TICC receipt depends on USB latency and which
+            # PPS epoch ticc_tracker.latest() returns.  Auto-calibrated
+            # at startup via qVIR feedback (see _calibrate_ticc_qerr_offset).
             # See docs/stream-timescale-correlation.md "TICC–qErr correlation".
+            ticc_qerr_offset = ctx.get('ticc_qerr_expected_offset_s', 0.95)
             qerr_for_ticc_pps_ns, _ = qerr_store.match_pps_mono(
                 ticc_measurement.recv_mono,
-                expected_offset_s=0.95, tolerance_s=0.2)
+                expected_offset_s=ticc_qerr_offset, tolerance_s=0.2)
     if qerr_for_extts_pps_ns is None and n_epochs % 10 == 0:
         log.info("  [%s] qErr match miss (mono)", n_epochs)
     elif qerr_for_extts_pps_ns is not None and n_epochs % 10 == 0:
@@ -2242,6 +2244,37 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             lvl("  [%s] TICC qVIR: Δvar(ticc)/Δvar(ticc+qErr) = %.2f (%s)",
                 n_epochs, ticc_qerr_ratio, label)
 
+    # Auto-calibrate TICC qerr offset: if qVIR_ticc is poor after 50
+    # epochs, the expected_offset is wrong for this host.  Try the
+    # adjacent TIM-TP (±1 second) by shifting the offset.
+    if (n_epochs == 50 and ticc_qerr_ratio is not None
+            and ticc_qerr_ratio < 1.5
+            and not ctx.get('ticc_qerr_offset_calibrated')):
+        current = ctx.get('ticc_qerr_expected_offset_s', 0.95)
+        alt = current + 1.0  # try the NEXT TIM-TP (1 second later)
+        log.warning("TICC qVIR=%.2f at epoch %d — trying alternative "
+                    "offset %.2fs → %.2fs",
+                    ticc_qerr_ratio, n_epochs, current, alt)
+        ctx['ticc_qerr_expected_offset_s'] = alt
+        # Reset the TICC qVIR trackers
+        qerr_alignment["ticc_var"] = RunningVarianceWindow()
+        qerr_alignment["ticc_qerr_plus_var"] = RunningVarianceWindow()
+        qerr_alignment["ticc_qerr_minus_var"] = RunningVarianceWindow()
+    elif (n_epochs == 100 and ticc_qerr_ratio is not None
+            and not ctx.get('ticc_qerr_offset_calibrated')):
+        if ticc_qerr_ratio >= 1.5:
+            ctx['ticc_qerr_offset_calibrated'] = True
+            log.info("TICC qerr offset calibrated: %.2fs (qVIR=%.2f)",
+                     ctx.get('ticc_qerr_expected_offset_s', 0.95),
+                     ticc_qerr_ratio)
+        else:
+            log.error("TICC qVIR=%.2f after offset recalibration — "
+                      "qErr correction will not help on this host. "
+                      "Falling back to uncorrected TICC.",
+                      ticc_qerr_ratio)
+            ctx['ticc_qerr_offset_calibrated'] = True
+            ctx['ticc_qerr_disabled'] = True
+
     if args.ticc_drive:
         if pps_err_ticc_ns is None:
             if skip_stats is not None:
@@ -2316,12 +2349,11 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                                  pps_corr_ppp_ns - qerr_for_extts_pps_ns,
                                  raw_ppp - qerr_for_extts_pps_ns,
                                  len(dt_rx_buf))
-        if not pps_corr_applied and qerr_for_ticc_pps_ns is not None:
-            pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_ticc_pps_ns
-        elif not pps_corr_applied and qerr_for_extts_pps_ns is not None:
-            # Fallback: no TICC-specific qerr match, use EXTTS match.
-            # This may be wrong-epoch — the TICC qVIR will catch it.
-            pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_extts_pps_ns
+        if not pps_corr_applied and not ctx.get('ticc_qerr_disabled'):
+            if qerr_for_ticc_pps_ns is not None:
+                pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_ticc_pps_ns
+            elif qerr_for_extts_pps_ns is not None:
+                pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_extts_pps_ns
         sources = ticc_only_error_source(pps_err_ticc_qerr_ns, args.ticc_confidence_ns)
         corr_age_for_inflation = None  # not applicable in TICC-drive mode
     else:
