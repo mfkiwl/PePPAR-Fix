@@ -40,8 +40,9 @@ listed first.
 | **PPS** | Pulse Per Second.  A 1 Hz signal edge used as a timing reference.  Two PPS streams in the system: `gnss_pps` (F9T output) and `do_pps` (PHC PEROUT). |
 | **gnss_pps** | The F9T's PPS output.  Fires at the nearest 125 MHz tick to the GPS second.  Subject to 8 ns quantization (qerr). |
 | **do_pps** | The DO's PPS output (PEROUT on i226, SMA on E810).  What the servo disciplines. |
-| **qerr** | Quantization error.  The sub-8 ns offset between the true GPS second and the tick where gnss_pps actually fires.  Predicted by TIM-TP. |
-| **TIM-TP** | u-blox UBX-TIM-TP message.  Predicts the qerr of the **next** PPS edge.  Arrives ~0.9 s before the PPS it describes. |
+| **qErr** | Quantization error.  The sub-8 ns offset between the true GPS second and the rx TCXO tick where gnss_pps actually fires.  Reported by TIM-TP.  This is a **physical quantization** — the PPS edge snaps to a discrete 125 MHz tick grid.  Do not use "qErr" for PPP-derived corrections (those correct for rx TCXO drift, not tick quantization). |
+| **PPS correction** | Any correction applied to a PPS measurement to improve its accuracy.  Two types: **qErr** (TIM-TP, corrects tick quantization, discrete ±4 ns) and **PPP drift-model correction** (from smoothed dt_rx, corrects rx TCXO drift, continuous ~0.1 ns).  CLI: `--no-qerr` disables qErr; `--pps-corr ppp` selects PPP drift-model instead of TIM-TP qErr. |
+| **TIM-TP** | u-blox UBX-TIM-TP message.  Predicts the qErr of the **next** PPS edge.  Arrives ~0.9 s before the PPS it describes. |
 | **TAI** | International Atomic Time.  Continuous timescale (no leap seconds).  TAI - UTC = 37 s as of 2026. |
 | **sawtooth** | The periodic phase modulation of gnss_pps caused by the rx TCXO beating against GPS time.  Alternates between "smooth ramp" and "jumpy" regimes. |
 | **holdover** | Free-running the DO when the GNSS reference is lost.  The DO drifts at its last-known rate. |

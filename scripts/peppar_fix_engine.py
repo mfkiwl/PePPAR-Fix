@@ -2284,8 +2284,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         # These are different values with different noise properties;
         # never conflate them in a single variable.
         pps_err_ticc_qerr_ns = pps_err_ticc_ns  # start with raw
-        ppp_qerr_used = False
-        if getattr(args, 'ppp_qerr', False):
+        pps_corr_applied = False
+        if getattr(args, 'pps_corr', None) == 'ppp':
             ppp_cal = ctx['ppp_cal']
             dt_rx_buf = ctx['dt_rx_buffer']
             # Calibrate against TIM-TP during first ~10 converged epochs.
@@ -2305,20 +2305,20 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 from peppar_fix.error_sources import ppp_qerr as _ppp_qerr
                 smoothed = _dt_rx_trend_predict(dt_rx_buf)
                 if smoothed is not None:
-                    ppp_qerr_ns = _ppp_qerr(smoothed, cal_offset_ns=ppp_cal.offset_ns)
-                    pps_err_ticc_qerr_ns = pps_err_ticc_ns + ppp_qerr_ns
-                    ppp_qerr_used = True
+                    pps_corr_ppp_ns = _ppp_qerr(smoothed, cal_offset_ns=ppp_cal.offset_ns)
+                    pps_err_ticc_qerr_ns = pps_err_ticc_ns + pps_corr_ppp_ns
+                    pps_corr_applied = True
                     if n_epochs % 10 == 0 and qerr_for_extts_pps_ns is not None:
                         raw_ppp = _ppp_qerr(dt_rx_ns, cal_offset_ns=ppp_cal.offset_ns)
                         log.info("  [%d] smooth qErr=%.3f raw=%.3f TIM-TP=%.3f "
                                  "(smooth-TIM=%.3f, raw-TIM=%.3f, buf=%d)",
-                                 n_epochs, ppp_qerr_ns, raw_ppp, qerr_for_extts_pps_ns,
-                                 ppp_qerr_ns - qerr_for_extts_pps_ns,
+                                 n_epochs, pps_corr_ppp_ns, raw_ppp, qerr_for_extts_pps_ns,
+                                 pps_corr_ppp_ns - qerr_for_extts_pps_ns,
                                  raw_ppp - qerr_for_extts_pps_ns,
                                  len(dt_rx_buf))
-        if not ppp_qerr_used and qerr_for_ticc_pps_ns is not None:
+        if not pps_corr_applied and qerr_for_ticc_pps_ns is not None:
             pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_ticc_pps_ns
-        elif not ppp_qerr_used and qerr_for_extts_pps_ns is not None:
+        elif not pps_corr_applied and qerr_for_extts_pps_ns is not None:
             # Fallback: no TICC-specific qerr match, use EXTTS match.
             # This may be wrong-epoch — the TICC litmus will catch it.
             pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_extts_pps_ns
@@ -3309,9 +3309,12 @@ Two-phase operation:
                             "(default: 100000 for OCXO, 500000 for TCXO)")
     servo.add_argument("--no-qerr", action="store_true",
                        help="Disable qErr correction (PPS-only discipline)")
-    servo.add_argument("--ppp-qerr", action="store_true",
-                       help="Use PPP carrier-phase dt_rx for qErr correction "
-                            "instead of TIM-TP qErr (~0.1 ns vs ~0.5 ns)")
+    servo.add_argument("--pps-corr", choices=["timtp", "ppp"], default=None,
+                       help="PPS correction source: 'timtp' (default, TIM-TP qErr) "
+                            "or 'ppp' (smoothed dt_rx drift model). "
+                            "qErr corrects PPS quantization (discrete, ±4 ns). "
+                            "PPP correction models the rx TCXO drift from dt_rx "
+                            "(continuous, ~0.1 ns) — different physics, not qErr.")
     servo.add_argument("--no-ppp", action="store_true",
                        help="Disable PPP carrier-phase correction "
                             "(PPS+qErr only, no PPS+PPP source)")
