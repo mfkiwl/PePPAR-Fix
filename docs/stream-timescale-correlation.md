@@ -172,24 +172,35 @@ What it contains:
 
 This is a GNSS-receiver-side timing-quality input. It is not a host timestamp and it is not a PHC timestamp.
 
-Important semantic detail:
+This is a GNSS-receiver-side timing input.  It is not a host
+timestamp and it is not a PHC timestamp.  It **predicts** the
+quantization error on the **following** PPS edge — not the previous
+one.
 
-- `UBX-TIM-TP` describes the timing of the next timepulse, not the previous one
-- `qErr` therefore applies to the following PPS edge
+Reference (authoritative):
+
+- u-blox F9 TIM 2.20 Interface Description (UBX-21048598 R01),
+  §3.19.3 UBX-TIM-TP (0x0D 0x01), p. 184:
+  Message comment: “This message contains information on the timing
+  of the next pulse at the TIMEPULSE0 output.”
+  `qErr` field (byte offset 8, I4, ps): “Quantization error of time
+  pulse.”  Flag `qErrInvalid` (bit 4 of `flags`): indicates
+  validity.
+  https://content.u-blox.com/sites/default/files/u-blox-F9-TIM-2.20_InterfaceDescription_UBX-21048598.pdf
+
+Given USB serial latency (~100 ms from F9T UART through USB CDC ACM
+to userspace read), a TIM-TP message arrives nearly a full second
+before the PPS edge it describes.  This is the `expected_offset_s`
+in the monotonic-time matching: the TIM-TP read timestamp is ~0.9 s
+earlier than the PPS read timestamp.
 
 Live probing on `timehat` showed:
 
 - `RXM-RAWX.rcvTow ~= N.997`
 - the immediately preceding `TIM-TP.towMS == round(RXM-RAWX.rcvTow) * 1000`
 
-That is the right association for the PPS edge aligned with the RAWX epoch.
-
-Reference:
-
-- u-blox F9 TIM 2.20 Interface Description, `UBX-TIM-TP`:
-  “This message contains information on the timing of the next pulse at the
-  TIMEPULSE0 output.”
-  https://content.u-blox.com/sites/default/files/u-blox-F9-TIM-2.20_InterfaceDescription_UBX-21048598.pdf
+That is the right association for the PPS edge aligned with the RAWX
+epoch.
 
 ### 4. TICC stream
 
@@ -908,69 +919,118 @@ The current code distinguishes:
   - observations arrived but expired or failed policy checks before use
   - logged separately from true source silence
 
-## TICC–qErr epoch matching (2026-04-11 discovery)
+## The universal correlation principle: CLOCK_MONOTONIC
 
-### The problem
+### Why there is no alternative
 
-The TICC operates on its own timescale (seconds since boot).  It has
-no defined relationship to GPS time, UTC, PHC time, or any other
-timescale in the system.  The only shared timescale we can use to
-correlate TICC measurements with other streams is `CLOCK_MONOTONIC`:
-we log the host monotonic time when we read each TICC timestamp, and
-we log it when we read EXTTS, RAWX, TIM-TP, NTRIP, or anything else.
+A PPS edge is just a voltage transition.  It has no inherent meaning
+as a "GNSS epoch" — that meaning exists only because **we** correlate
+it with a GNSS time source.  We must establish this correlation by
+measurement.
 
-This relationship must be **discovered and maintained dynamically**.
-No static offset or index-matching works because:
+Every data stream in the system operates on its own timescale:
 
-- The TICC boots independently (reset on serial open unless HUPCL is
-  cleared — see `ticc.py`).
-- Messages can be dropped by any stream at any time (USB glitches,
-  kernel buffer overflows, CPU starvation, network congestion).
-- Multi-second lags can occur between when a physical event happens
-  and when we read its timestamp.
+- **TICC**: seconds since TICC boot (resets on serial port open
+  unless HUPCL is cleared — see `ticc.py`).  This makes the
+  independence from other timescales obvious.
+- **EXTTS / PHC**: timestamps against the PHC clock.  But the PHC
+  may have no established relationship to GPS, UTC, or wall time —
+  witness the 500 ms offset bugs from i226 PEROUT.  A PHC timestamp
+  is only meaningful if we've measured how the PHC relates to
+  something else.
+- **TIM-TP / RAWX**: timestamps in GPS TOW.  But these arrive over
+  USB serial with variable latency.  The GPS time in the message
+  tells us what the receiver thinks, not when we received it.
+- **NTRIP**: SSR corrections with their own timestamps, arriving
+  over the network with variable delay.
+
+The only timescale that all reads share is `CLOCK_MONOTONIC`.  When
+we read a TICC timestamp from serial port X, we log
+`time.monotonic()`.  When we read an EXTTS event through the PTP
+driver, we log `time.monotonic()`.  When we read a TIM-TP message
+from serial port Y, we log `time.monotonic()`.  These monotonic
+timestamps are the **sole** basis for correlating events across
+streams.
+
+### Establishing and maintaining the relationship
+
+At startup, during CPU starvation, or during network congestion,
+multi-second lags can occur between when a physical event happens
+and when we read its data.  Messages can be queued in kernel
+buffers, USB FIFOs, or userspace parsers.  Messages can be dropped
+entirely — USB glitches, kernel buffer overflows, serial overruns.
 
 **However**, when we read a timestamp and there are no queued
 timestamps behind it, we have a solid correlation point through
 `CLOCK_MONOTONIC` — the absence of queueing means the read happened
-close to the event.  This relationship can be established at startup
-and refined as we run, so that it survives dropped messages.
+close to the physical event.  This relationship can be established
+at startup and refined continuously as we run, so that it survives
+dropped messages and transient stalls.
 
-### TICC-to-qErr matching: the sign and the lag
+We cannot match by index (messages get dropped).  We cannot match by
+GPS TOW (the TICC has no concept of GPS time).  We cannot match by
+arrival order (queueing distorts order).  `CLOCK_MONOTONIC` is the
+only reliable shared reference.
 
-The TICC measurement of PPS chB includes the F9T's PPS quantization
-error (the sub-8 ns tick residual).  TIM-TP `qErr` reports this
-residual.  To correct the TICC measurement, we add qErr:
+## TICC–qErr correlation (2026-04-11 discovery)
+
+### What TIM-TP qErr predicts
+
+Per u-blox F9 TIM 2.20 Interface Description (UBX-21048598 R01),
+§3.19.3 (p. 184): "This message contains information on the timing
+of the **next** pulse at the TIMEPULSE0 output."  The `qErr` field
+(byte offset 8, I4, picoseconds) **predicts** the quantization error
+on the **following** PPS edge — the one that hasn't fired yet.
+
+Given USB serial latency, the TIM-TP message arrives at the host
+nearly a full elapsed second before the PPS edge it describes.
+This is what creates the ~0.9 s expected offset in the monotonic
+matching.
+
+### The sign
+
+The TICC measurement contains the F9T PPS quantization.  To remove
+it:
 
 ```
 corrected_ticc = ticc_diff_ns + qerr_ns
 ```
 
-**Sign**: `+qerr_ns`.  The TICC sees `-(PHC_phase) - qerr(TCXO)`.
+**Sign is `+` (plus).**  The TICC sees `-(PHC_phase) - qerr(TCXO)`.
 Adding `qerr` cancels the TCXO quantization, leaving `-(PHC_phase)`.
-Subtracting qerr or using the wrong epoch's qerr **makes TDEV
+Subtracting qerr or using the wrong PPS edge's qerr **makes TDEV
 worse**, not better.
 
-**Epoch matching**: The qerr must come from the **same PPS epoch**
-that the TICC measured.  Off-by-one is catastrophic: at ~22 ppb TCXO
-drift, the TCXO sweeps through one 8 ns tick every ~0.36 seconds.
-A 1-second mismatch means the qerr is ~2.75 ticks off — it becomes
-uncorrelated noise that the servo faithfully tracks into the PHC.
+### Why off-by-one is catastrophic
 
-### How the mismatch happens
+The qerr must correspond to the **same PPS edge** that the TICC
+measured.  "Same PPS edge" has no inherent meaning — it means the
+two reads (TICC data from serial port X, TIM-TP from serial port Y)
+were close enough in `CLOCK_MONOTONIC` that they refer to the same
+physical voltage transition, as established by the expected timing
+relationship.
 
-In TICC-drive mode, three events occur per PPS epoch N:
+Off-by-one (matching to an adjacent PPS edge) is catastrophic: at
+~22 ppb TCXO drift, the TCXO sweeps through one 8 ns tick every
+~0.36 seconds.  A 1-second mismatch means the qerr is ~2.75 ticks
+off — it becomes uncorrelated noise that the servo faithfully tracks
+into the PHC.
 
-1. **TIM-TP arrives** at `T_N - 0.9s` (describes epoch N's PPS)
-2. **PPS fires** at `T_N` → EXTTS event, TICC chB trigger
-3. **TICC reports** at `T_N + 0.05s` (USB serial latency)
+### How the mismatch happened
 
-The PPP observation for epoch N is processed at `~T_N + 1s` (the
-F9T outputs RAWX at `T_N + 0.9s`, then PPP filter runs).  At that
-point, `ticc_tracker.latest()` returns the **freshest** TICC
-measurement — which is from epoch **N+1** (arrived at `T_{N+1} + 0.05`).
+Three reads occur per PPS edge, each timestamped against
+`CLOCK_MONOTONIC`:
 
-If qerr is matched to the EXTTS PPS event (epoch N), but the TICC
-measurement is from epoch N+1, the qerr is one epoch behind.
+1. **TIM-TP read** at `mono_A` — predicts qErr for the next PPS edge
+2. **PPS fires** → EXTTS read at `mono_B` (≈ `mono_A + 0.9s`)
+3. **TICC read** at `mono_C` (≈ `mono_B + 0.05s`, USB serial latency)
+
+The PPP observation is processed at `~mono_B + 1s`.  At that point,
+`ticc_tracker.latest()` returns the **freshest** TICC measurement —
+which corresponds to the **next** PPS edge (its read arrived at
+`mono_C + 1s`).  If qerr was matched to the EXTTS PPS read
+(`mono_B`), but the TICC measurement corresponds to the next PPS
+edge, the qerr and TICC refer to different edges.
 
 ### The fix
 
@@ -986,10 +1046,12 @@ if ticc_qerr is not None:
     qerr_ns = ticc_qerr
 ```
 
-This ensures the qerr and TICC measurement refer to the same PPS
-epoch regardless of PPP processing delays.
+This uses `CLOCK_MONOTONIC` on both sides: the TICC read timestamp
+and the TIM-TP read timestamp.  The `expected_offset_s=0.95` encodes
+the measured timing relationship between TIM-TP arrival and TICC
+arrival for the same PPS edge.
 
-### Verification: the litmus test
+### The litmus test
 
 The qerr alignment litmus test computes the variance ratio:
 
@@ -998,28 +1060,45 @@ ratio = Δvar(raw) / Δvar(raw + qerr)
 ```
 
 - **ratio > 1.5**: qerr is working (reducing variance)
-- **ratio ≈ 1.0**: qerr is uncorrelated (no effect — likely wrong epoch)
-- **ratio < 1.0**: qerr is anticorrelated (adding noise — wrong sign or epoch)
+- **ratio ≈ 1.0**: qerr is uncorrelated (wrong edge — likely
+  off-by-one)
+- **ratio < 1.0**: qerr is anticorrelated (adding noise — wrong
+  sign or edge)
 
-**Both EXTTS+qErr and TICC+qErr should have their own litmus tests.**
-If either shows ratio < 1.5, the correlation is broken and the servo
-should stop using qerr until it's fixed.  Applying wrong qerr makes
+**Both EXTTS+qErr and TICC+qErr must have their own litmus tests.**
+If either shows ratio ≤ 1.0, the correlation is broken and the servo
+must stop using qerr immediately.  Applying wrong-edge qerr makes
 TDEV **worse** than raw PPS (3.3 ns vs 2.1 ns in the 2026-04-11
-incident).  This must be caught immediately, not discovered after an
-overnight run.
+incident).  This must be caught in real time — the whole reason the
+litmus exists is to prevent discovering a correlation failure after
+an overnight run.
 
-### Generalization
+## Code audit: non-CLOCK_MONOTONIC correlation (2026-04-11)
 
-This isn't specific to qErr and TICC.  **Any time-based correlation
-between streams with independent timescales** requires:
+All real-time correlation paths in the codebase use
+`CLOCK_MONOTONIC`.  Two methods use GPS TOW or TICC-internal time:
 
-1. A shared reference timescale (`CLOCK_MONOTONIC`)
-2. Timestamps taken as close as possible to the physical event
-3. Timestamps carried through the pipeline to the correlation point
-4. Dynamic discovery and maintenance of inter-timescale relationships
-5. A litmus test that detects correlation failure in real time
-6. Automatic fallback (disable the correction) when the litmus fails
+### QErrStore.match_gps_time() — GPS TOW matching
 
-The `CLOCK_MONOTONIC` ↔ `CLOCK_REALTIME` relationship is trivially
-available from `clock_gettime()`.  The TICC timescale ↔
-`CLOCK_MONOTONIC` relationship must be discovered from the data.
+`scripts/realtime_ppp.py:287-322`.  Matches qErr to GNSS epochs by
+GPS Time-of-Week.  Only called by `tools/rcvtow_dt_rx_probe.py`
+(offline analysis, not real-time servo).  Acceptable for offline use
+where both timestamps come from the same receiver and TOW is
+internally consistent.  **Must not be used for real-time
+cross-stream correlation.**
+
+### TiccPairTracker — TICC ref_sec matching
+
+`scripts/peppar_fix_engine.py:159-250`.  Pairs TICC chA and chB
+events by integer `ref_sec` (seconds since TICC boot).  This is
+safe because both channels share the same TICC timebase — there is
+no cross-timescale correlation.  It is matching **within** a single
+timescale, not across timescales.
+
+### Correct real-time paths
+
+- `QErrStore.match_pps_mono()` — `CLOCK_MONOTONIC` for qErr-to-PPS
+- `match_pps_event_from_history()` — `CLOCK_MONOTONIC` for
+  obs-to-PPS
+- TICC-to-qErr re-matching — `CLOCK_MONOTONIC` via
+  `match_pps_mono(ticc_measurement.recv_mono)`
