@@ -75,6 +75,29 @@ from peppar_fix.receiver import get_driver
 log = logging.getLogger("peppar-fix")
 
 
+def _dt_rx_trend_predict(buf):
+    """Linear regression on dt_rx buffer, predict at the latest epoch.
+
+    dt_rx drifts at ~22 ppb (~22 ns/s), so a linear fit over 30s gives
+    a smooth TCXO phase estimate that never hits tick boundaries.
+    Returns the smoothed dt_rx at the last sample's time, or None.
+    """
+    n = len(buf)
+    if n < 3:
+        return None
+    # Simple linear regression: y = a + b*t, t = 0..n-1, predict at t=n-1
+    sx = n * (n - 1) / 2
+    sxx = n * (n - 1) * (2 * n - 1) / 6
+    sy = sum(buf)
+    sxy = sum(i * v for i, v in enumerate(buf))
+    denom = n * sxx - sx * sx
+    if abs(denom) < 1e-10:
+        return sy / n
+    b = (n * sxy - sx * sy) / denom
+    a = (sy - b * sx) / n
+    return a + b * (n - 1)
+
+
 class RunningVarianceWindow:
     """Small rolling variance tracker for alignment litmus metrics."""
 
@@ -1716,6 +1739,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'compute_error_sources': compute_error_sources,
         'ticc_only_error_source': ticc_only_error_source,
         'ppp_cal': PPPCalibration(tick_ns=8.0, min_samples=10),
+        'dt_rx_buffer': deque(maxlen=30),
         'carrier_tracker': _init_carrier_tracker(args),
         'tracking_large_error_count': 0,
         'tracking_mode': 'pull_in',
@@ -2205,12 +2229,15 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         # effective reference noise drops to ~178 ps (the TICC+qErr
         # floor), well below the DO, so the servo can actually improve it.
         ticc_diff_raw_ns = ticc_diff_ns  # preserve for DOFreqEst EKF
-        # PPP-derived qErr: use carrier-phase dt_rx (~0.1 ns) instead of
-        # TIM-TP qErr (~0.5 ns).  Needs calibration against TIM-TP first
-        # to resolve the tick ambiguity (constant offset mod 8 ns).
+        # PPP-derived qErr: smooth dt_rx via linear regression over a
+        # sliding window, then compute qerr from the smoothed value.
+        # dt_rx is continuous (~22 ppb drift), so the trend never hits
+        # tick boundaries — unlike per-epoch qerr(dt_rx) which flips
+        # ±8 ns near boundaries during "jumpy" periods.
         ppp_qerr_used = False
         if getattr(args, 'ppp_qerr', False):
             ppp_cal = ctx['ppp_cal']
+            dt_rx_buf = ctx['dt_rx_buffer']
             # Calibrate against TIM-TP during first ~10 converged epochs
             if (not ppp_cal.calibrated and qerr_ns is not None
                     and dt_rx_sigma is not None and dt_rx_sigma < 1.0):
@@ -2218,18 +2245,25 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 if done:
                     log.info("  PPP qErr calibration done: offset=%.3f ns "
                              "(%d samples)", ppp_cal.offset_ns, ppp_cal._n)
-            # Once calibrated, use PPP qerr with calibration offset
-            if (ppp_cal.calibrated and dt_rx_ns is not None
-                    and dt_rx_sigma is not None and dt_rx_sigma < 1.0):
+            # Feed dt_rx into the sliding window
+            if dt_rx_ns is not None and dt_rx_sigma is not None and dt_rx_sigma < 1.0:
+                dt_rx_buf.append(dt_rx_ns)
+            # Once calibrated and buffer has enough samples, use smoothed qerr
+            if ppp_cal.calibrated and len(dt_rx_buf) >= 5:
                 from peppar_fix.error_sources import ppp_qerr as _ppp_qerr
-                ppp_qerr_ns = _ppp_qerr(dt_rx_ns, cal_offset_ns=ppp_cal.offset_ns)
-                ticc_diff_ns = ticc_diff_ns + ppp_qerr_ns
-                ppp_qerr_used = True
-                if n_epochs % 10 == 0 and qerr_ns is not None:
-                    log.info("  [%d] PPP qErr=%.3f vs TIM-TP qErr=%.3f "
-                             "(diff=%.3f ns, cal=%.3f)",
-                             n_epochs, ppp_qerr_ns, qerr_ns,
-                             ppp_qerr_ns - qerr_ns, ppp_cal.offset_ns)
+                smoothed = _dt_rx_trend_predict(dt_rx_buf)
+                if smoothed is not None:
+                    ppp_qerr_ns = _ppp_qerr(smoothed, cal_offset_ns=ppp_cal.offset_ns)
+                    ticc_diff_ns = ticc_diff_ns + ppp_qerr_ns
+                    ppp_qerr_used = True
+                    if n_epochs % 10 == 0 and qerr_ns is not None:
+                        raw_ppp = _ppp_qerr(dt_rx_ns, cal_offset_ns=ppp_cal.offset_ns)
+                        log.info("  [%d] smooth qErr=%.3f raw=%.3f TIM-TP=%.3f "
+                                 "(smooth-TIM=%.3f, raw-TIM=%.3f, buf=%d)",
+                                 n_epochs, ppp_qerr_ns, raw_ppp, qerr_ns,
+                                 ppp_qerr_ns - qerr_ns,
+                                 raw_ppp - qerr_ns,
+                                 len(dt_rx_buf))
         if not ppp_qerr_used and qerr_ns is not None:
             ticc_diff_ns = ticc_diff_ns + qerr_ns
         sources = ticc_only_error_source(ticc_diff_ns, args.ticc_confidence_ns)
