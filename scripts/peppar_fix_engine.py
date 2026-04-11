@@ -164,6 +164,7 @@ class TiccPairTracker:
         self.phc_channel = phc_channel
         self.ref_channel = ref_channel
         self._pending = {phc_channel: {}, ref_channel: {}}
+        self._ref_qerr = {}  # ref_sec → qerr_ns, matched at chB arrival
         self._latest = None
         self._lock = threading.Lock()
         self._last_seen = {phc_channel: None, ref_channel: None}
@@ -171,6 +172,11 @@ class TiccPairTracker:
         self._armed = False
         self._buffered_drops = 0
         self._boot_ref_sec_discard = 2
+
+    def set_pending_ref_qerr(self, ref_sec, qerr_ns):
+        """Store qerr matched to a ref (gnss_pps) edge before pairing."""
+        with self._lock:
+            self._ref_qerr[ref_sec] = qerr_ns
 
     def ingest(self, event):
         other = self.ref_channel if event.channel == self.phc_channel else self.phc_channel
@@ -185,6 +191,9 @@ class TiccPairTracker:
                     stale_keys = [k for k in channel.keys() if k < cutoff]
                     for key in stale_keys:
                         channel.pop(key, None)
+                stale_qerr = [k for k in self._ref_qerr if k < cutoff]
+                for key in stale_qerr:
+                    self._ref_qerr.pop(key, None)
                 return
 
             this_event = event
@@ -223,7 +232,7 @@ class TiccPairTracker:
                     getattr(phc_event, "correlation_confidence", 1.0) or 1.0,
                     getattr(ref_event, "correlation_confidence", 1.0) or 1.0,
                 ),
-                ref_qerr_ns=getattr(ref_event, '_matched_qerr_ns', None),
+                ref_qerr_ns=self._ref_qerr.pop(ref_event.ref_sec, None),
             )
 
     def latest(self, now_mono: float, max_age_s: float):
@@ -1654,9 +1663,8 @@ def _setup_servo(args, known_ecef, qerr_store):
                                 _qerr, _ = qerr_store.match_pps_mono(
                                     event.recv_mono,
                                     expected_offset_s=0.95, tolerance_s=0.2)
-                                event._matched_qerr_ns = _qerr
-                            else:
-                                event._matched_qerr_ns = None
+                                ticc_tracker.set_pending_ref_qerr(
+                                    event.ref_sec, _qerr)
 
                             ticc_tracker.ingest(event)
 
