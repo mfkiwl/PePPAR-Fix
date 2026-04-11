@@ -97,11 +97,11 @@ class PPPCalibration:
 
 
 class CarrierPhaseTracker:
-    """PHC phase error from PPP + measured inter-oscillator drift rate.
+    """DO phase error from PPP + measured inter-oscillator drift rate.
 
-    On most hardware, the PPP receiver (F9T) and the PHC use different
-    oscillators.  dt_rx from PPP measures the F9T TCXO drift from GPS;
-    the PHC drifts at a different rate.  We measure both rates directly
+    On most hardware, the PPP receiver (F9T) and the DO use different
+    oscillators.  dt_rx from PPP measures the rx TCXO drift from GPS;
+    the DO drifts at a different rate.  We measure both rates directly
     and use their difference (D) to correct the Carrier formula:
 
         carrier_error = (dt_rx - dt_rx_ref) + cumulative_adjfine + D * t
@@ -268,7 +268,7 @@ class CarrierPhaseTracker:
         self._anchored = True
 
     def compute_error(self, dt_rx_ns):
-        """Compute PHC phase error with inter-oscillator correction.
+        """Compute DO phase error with inter-oscillator correction.
 
         Returns None if not initialized.
         """

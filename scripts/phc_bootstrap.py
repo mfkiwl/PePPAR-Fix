@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""phc_bootstrap.py — PHC bootstrap.
+"""phc_bootstrap.py — DO bootstrap via PHC API.
 
-Requires a stored position file.  Measures PHC frequency from PPS,
-runs a short PPP clock solution, then evaluates PHC phase and
+See docs/glossary.md for term definitions (DO, PHC, rx TCXO, etc.).
+
+Requires a stored position file.  Measures DO frequency from PPS,
+runs a short PPP clock solution, then evaluates DO phase and
 frequency.  Intervenes only if they disagree with GNSS-derived
 estimates: optimal stopping for the best achievable phase step,
 then a glide slope for smooth servo handoff.
@@ -142,7 +144,7 @@ _E810_PIN_NAMES = {0: "0", 1: "1", 2: "2", 3: "3", 4: "4"}
 def _enable_pps_out(ptp, args):
     """Enable PEROUT (PPS OUT) if configured.
 
-    Must be called after any PHC phase step — stepping the PHC
+    Must be called after any DO phase step — stepping the PHC clock
     invalidates the PEROUT alignment, stopping the output pulse.
 
     Pin programming: tries PTP_PIN_SETFUNC ioctl first (i226), then
@@ -227,7 +229,7 @@ def _enable_pps_out(ptp, args):
 
 
 def measure_pps_frequency(ptp, channel, n_samples=5, timeout_s=8):
-    """Measure PHC frequency error from first-to-last PPS fractional second.
+    """Measure DO frequency error from first-to-last PPS fractional second.
 
     Captures n_samples+1 PPS events and computes the total fractional-second
     drift over the full baseline.  With N PPS intervals (N seconds), the
@@ -509,7 +511,7 @@ def main():
         return 1
 
     # Measure PPS frequency
-    log.info("Measuring PHC frequency from PPS intervals...")
+    log.info("Measuring DO frequency from PPS intervals...")
     pps_freq_ppb, pps_freq_sigma, pps_freq_n = measure_pps_frequency(
         ptp, args.extts_channel, n_samples=args.epochs, timeout_s=args.epochs + 3)
     if pps_freq_ppb is not None:
@@ -682,7 +684,7 @@ def main():
     ptp.disable_extts(args.extts_channel)
 
     if pps_event is None:
-        log.error("No PPS event received — cannot evaluate PHC phase")
+        log.error("No PPS event received — cannot evaluate DO phase")
         ptp.close()
         return 1
 
@@ -703,14 +705,14 @@ def main():
     # Total phase error including whole-second offset
     phase_error_ns = epoch_offset * 1_000_000_000 + pps_error_ns
 
-    log.info("PHC phase: epoch_offset=%ds, pps_error=%+.0f ns, "
+    log.info("DO phase: epoch_offset=%ds, pps_error=%+.0f ns, "
              "total_phase_error=%+.0f ns (realtime_utc=%d, target=%d)",
              epoch_offset, pps_error_ns, phase_error_ns, utc_sec, target_sec)
 
     # Frequency sanity check — PPS measurement alone is sufficient.
     # pps_freq_ppb is the PHC's total frequency error (crystal + current
     # adjfine) as seen by PPS intervals.  If it's outside tolerance, the
-    # PHC frequency needs correction regardless of whether we have a drift
+    # DO frequency needs correction regardless of whether we have a drift
     # file.
     freq_sane = True
     if pps_freq_ppb is not None:
@@ -738,7 +740,7 @@ def main():
     # Three steps:
     #
     # 1. Phase step — use optimal stopping to get the best achievable
-    #    PHC phase within a fixed search budget.  The step error has a
+    #    DO phase within a fixed search budget.  The step error has a
     #    log-normal distribution (fixed minimum kernel path + multiplicative
     #    scheduling jitter).  Optimal stopping learns the distribution
     #    during the first 37% of the budget, then accepts the first
@@ -748,7 +750,7 @@ def main():
     #    residual φ₀ (the readback used by optimal stopping has a
     #    systematic bias from PTP_SYS_OFFSET asymmetry; PPS is truth).
     #
-    # 3. Glide slope — set a PHC frequency that drives φ₀ toward zero
+    # 3. Glide slope — set a DO frequency that drives φ₀ toward zero
     #    at the rate the servo expects for a near-critically-damped
     #    handoff:  dφ/dt₀ = -ζ·ωₙ·φ₀  where ωₙ = √Ki.
 
@@ -883,7 +885,7 @@ def main():
     # ── ClockMatrix handoff ──────────────────────────────────────── #
     #
     # On Timebeat OTC hardware, the ClockMatrix drives the i226's 25 MHz.
-    # The PHC counts these cycles. We set the PHC phase above (step) and
+    # The DO counts these cycles. We set the DO phase above (step) and
     # now transfer the frequency correction from PHC adjfine to the
     # ClockMatrix FCW, so the engine can steer the clock tree directly.
     #

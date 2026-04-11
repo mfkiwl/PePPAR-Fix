@@ -1469,8 +1469,8 @@ def _setup_servo(args, known_ecef, qerr_store):
                      current_adj - bootstrap_base_freq)
         servo = DOFreqEst(
             sigma_ticc_ns=sigma_ticc,
-            sigma_phc_phase_ns=0.92,
-            sigma_phc_freq_ppb=args.kalman_sigma_freq,
+            sigma_do_phase_ns=0.92,
+            sigma_do_freq_ppb=args.kalman_sigma_freq,
             sigma_tcxo_phase_ns=2.0,    # rx TCXO (F9T) PPS TDEV(1s)
             sigma_tcxo_freq_ppb=0.1,    # rx TCXO drift rate
             max_ppb=caps['max_adj'],
@@ -1479,7 +1479,7 @@ def _setup_servo(args, known_ecef, qerr_store):
             base_freq=bootstrap_base_freq,
         )
         log.info("DOFreqEst 4-state: sigma_ticc=%.3f ns, "
-                 "sigma_phc=[0.92 ns, %.4f ppb], "
+                 "sigma_do=[0.92 ns, %.4f ppb], "
                  "sigma_tcxo=[2.0 ns, 0.1 ppb], "
                  "initial_freq=%.1f ppb, base_freq=%s, tcxo_init=%s",
                  sigma_ticc, args.kalman_sigma_freq, current_adj,

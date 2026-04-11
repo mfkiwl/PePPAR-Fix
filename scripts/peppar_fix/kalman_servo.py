@@ -1,4 +1,6 @@
-"""Kalman filter + LQR servo for PHC frequency steering.
+"""Kalman filter + LQR servo for DO frequency steering.
+
+See docs/glossary.md for term definitions (DO, rx TCXO, etc.).
 
 Replaces the PI servo with an optimal controller that uses a 2-state
 model of the DO (phase + frequency) and known noise profiles to
@@ -10,10 +12,10 @@ State model (discrete, per-epoch):
     freq[n+1]  = freq[n] + w_freq[n]
 
 where:
-    phase = PHC phase error relative to GPS (ns)
-    freq  = DO frequency offset (ppb) — the slowly-drifting TCXO rate
+    phase = DO phase error relative to GPS (ns), i.e. gnss_pps - do_pps
+    freq  = DO frequency offset (ppb) — the slowly-drifting crystal rate
     u     = adjfine correction we apply (ppb)
-    w_freq = frequency random walk (process noise from TCXO drift)
+    w_freq = frequency random walk (process noise from DO crystal drift)
 
 Measurement model:
     z[n] = phase[n] + v[n]

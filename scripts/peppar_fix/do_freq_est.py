@@ -56,7 +56,7 @@ class DOFreqEst:
     """
 
     def __init__(self, sigma_ticc_ns=0.178,
-                 sigma_phc_phase_ns=0.92, sigma_phc_freq_ppb=0.01,
+                 sigma_do_phase_ns=0.92, sigma_do_freq_ppb=0.01,
                  sigma_tcxo_phase_ns=2.0, sigma_tcxo_freq_ppb=0.1,
                  tick_ns=8.0,
                  max_ppb=62_500_000.0, initial_freq=0.0,
@@ -97,8 +97,8 @@ class DOFreqEst:
         self.Q = np.diag([
             sigma_tcxo_phase_ns ** 2,
             sigma_tcxo_freq_ppb ** 2,
-            sigma_phc_phase_ns ** 2,
-            sigma_phc_freq_ppb ** 2,
+            sigma_do_phase_ns ** 2,
+            sigma_do_freq_ppb ** 2,
         ])
 
         # Measurement noise
@@ -195,13 +195,13 @@ class DOFreqEst:
             self._need_phc_seed = False
 
         # ── Adaptive Q: boost during pull-in ──
-        phc_abs = abs(self.x[2])
-        if phc_abs > 50.0:
+        do_phase_abs = abs(self.x[2])
+        if do_phase_abs > 50.0:
             q_scale = 10.0
-        elif phc_abs < 10.0:
+        elif do_phase_abs < 10.0:
             q_scale = 1.0
         else:
-            q_scale = 1.0 + 9.0 * (phc_abs - 10.0) / 40.0
+            q_scale = 1.0 + 9.0 * (do_phase_abs - 10.0) / 40.0
         Q_scaled = self.Q.copy()
         # Only boost DO states during pull-in (rx TCXO states converge from PPP)
         Q_scaled[2, 2] *= q_scale

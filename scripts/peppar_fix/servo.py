@@ -1,8 +1,8 @@
-"""PI servo controller for PHC frequency steering."""
+"""PI servo controller for DO frequency steering."""
 
 
 class PIServo:
-    """Proportional-integral controller for PHC frequency steering.
+    """Proportional-integral controller for DO frequency steering.
 
     Modeled after SatPulse's PI servo with anti-windup clamping.
     """
