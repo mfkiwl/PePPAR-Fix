@@ -154,6 +154,7 @@ class TiccPairMeasurement:
     diff_ns: float
     recv_mono: float
     confidence: float
+    ref_qerr_ns: float = None  # qerr matched to the ref (gnss_pps) edge
 
 
 class TiccPairTracker:
@@ -222,6 +223,7 @@ class TiccPairTracker:
                     getattr(phc_event, "correlation_confidence", 1.0) or 1.0,
                     getattr(ref_event, "correlation_confidence", 1.0) or 1.0,
                 ),
+                ref_qerr_ns=getattr(ref_event, '_matched_qerr_ns', None),
             )
 
     def latest(self, now_mono: float, max_age_s: float):
@@ -1642,6 +1644,20 @@ def _setup_servo(args, known_ecef, qerr_store):
                                     event.channel,
                                 ])
                                 ticc_log_f.flush()
+                            # Match qerr to each gnss_pps (chB) edge as it
+                            # arrives — deterministic, no race with latest().
+                            # The chB recv_mono is the CLOCK_MONOTONIC anchor.
+                            # TIM-TP arrives ~0.9s before the PPS it predicts,
+                            # and TICC reads ~50ms after the PPS fires, so
+                            # the expected offset is ~0.95s.
+                            if event.channel == args.ticc_ref_channel:
+                                _qerr, _ = qerr_store.match_pps_mono(
+                                    event.recv_mono,
+                                    expected_offset_s=0.95, tolerance_s=0.2)
+                                event._matched_qerr_ns = _qerr
+                            else:
+                                event._matched_qerr_ns = None
+
                             ticc_tracker.ingest(event)
 
                             # In TICC-drive mode, chB (reference PPS) events
@@ -2130,16 +2146,10 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             pps_err_ticc_ns = -(ticc_measurement.diff_ns - args.ticc_target_ns)
             ticc_age_s = max(0.0, time.monotonic() - ticc_measurement.recv_mono)
             ticc_confidence = ticc_measurement.confidence
-            # Match qErr to the TICC measurement's PPS edge — separate
-            # from the EXTTS match.  The expected offset between TIM-TP
-            # arrival and TICC receipt depends on USB latency and which
-            # PPS epoch ticc_tracker.latest() returns.  Auto-calibrated
-            # at startup via qVIR feedback (see _calibrate_ticc_qerr_offset).
-            # See docs/stream-timescale-correlation.md "TICC–qErr correlation".
-            ticc_qerr_offset = ctx.get('ticc_qerr_expected_offset_s', 0.95)
-            qerr_for_ticc_pps_ns, _ = qerr_store.match_pps_mono(
-                ticc_measurement.recv_mono,
-                expected_offset_s=ticc_qerr_offset, tolerance_s=0.2)
+            # qerr for this TICC measurement was matched at chB arrival
+            # time in the ticc_reader thread — deterministic, no race
+            # with latest().  See docs/stream-timescale-correlation.md.
+            qerr_for_ticc_pps_ns = ticc_measurement.ref_qerr_ns
     if qerr_for_extts_pps_ns is None and n_epochs % 10 == 0:
         log.info("  [%s] qErr match miss (mono)", n_epochs)
     elif qerr_for_extts_pps_ns is not None and n_epochs % 10 == 0:
@@ -2244,37 +2254,6 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             lvl("  [%s] TICC qVIR: Δvar(ticc)/Δvar(ticc+qErr) = %.2f (%s)",
                 n_epochs, ticc_qerr_ratio, label)
 
-    # Auto-calibrate TICC qerr offset: if qVIR_ticc is poor after 50
-    # epochs, the expected_offset is wrong for this host.  Try the
-    # adjacent TIM-TP (±1 second) by shifting the offset.
-    if (n_epochs == 50 and ticc_qerr_ratio is not None
-            and ticc_qerr_ratio < 1.5
-            and not ctx.get('ticc_qerr_offset_calibrated')):
-        current = ctx.get('ticc_qerr_expected_offset_s', 0.95)
-        alt = current + 1.0  # try the NEXT TIM-TP (1 second later)
-        log.warning("TICC qVIR=%.2f at epoch %d — trying alternative "
-                    "offset %.2fs → %.2fs",
-                    ticc_qerr_ratio, n_epochs, current, alt)
-        ctx['ticc_qerr_expected_offset_s'] = alt
-        # Reset the TICC qVIR trackers
-        qerr_alignment["ticc_var"] = RunningVarianceWindow()
-        qerr_alignment["ticc_qerr_plus_var"] = RunningVarianceWindow()
-        qerr_alignment["ticc_qerr_minus_var"] = RunningVarianceWindow()
-    elif (n_epochs == 100 and ticc_qerr_ratio is not None
-            and not ctx.get('ticc_qerr_offset_calibrated')):
-        if ticc_qerr_ratio >= 1.5:
-            ctx['ticc_qerr_offset_calibrated'] = True
-            log.info("TICC qerr offset calibrated: %.2fs (qVIR=%.2f)",
-                     ctx.get('ticc_qerr_expected_offset_s', 0.95),
-                     ticc_qerr_ratio)
-        else:
-            log.error("TICC qVIR=%.2f after offset recalibration — "
-                      "qErr correction will not help on this host. "
-                      "Falling back to uncorrected TICC.",
-                      ticc_qerr_ratio)
-            ctx['ticc_qerr_offset_calibrated'] = True
-            ctx['ticc_qerr_disabled'] = True
-
     if args.ticc_drive:
         if pps_err_ticc_ns is None:
             if skip_stats is not None:
@@ -2349,7 +2328,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                                  pps_corr_ppp_ns - qerr_for_extts_pps_ns,
                                  raw_ppp - qerr_for_extts_pps_ns,
                                  len(dt_rx_buf))
-        if not pps_corr_applied and not ctx.get('ticc_qerr_disabled'):
+        if not pps_corr_applied:
             if qerr_for_ticc_pps_ns is not None:
                 pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_ticc_pps_ns
             elif qerr_for_extts_pps_ns is not None:
