@@ -972,6 +972,61 @@ GPS TOW (the TICC has no concept of GPS time).  We cannot match by
 arrival order (queueing distorts order).  `CLOCK_MONOTONIC` is the
 only reliable shared reference.
 
+### When in-stream timestamps help (and when they don't)
+
+Some streams carry timestamps **within** their messages:
+
+- **TIM-TP**: GPS TOW in `towMS`
+- **RAWX**: GPS TOW in `rcvTow`
+- **NTRIP/SSR**: GNSS epoch timestamps in RTCM corrections
+
+When two streams share an in-stream timescale, correlation is
+trivial: match qErr to RAWX by GPS TOW and you're done.  No
+`CLOCK_MONOTONIC` needed because both messages carry their own
+relationship to the same reference.
+
+But this is of no help when you need to correlate a timestamped
+stream with a stream that has **no in-stream timestamp**:
+
+- **PPS**: just a voltage edge, no embedded time
+- **TICC**: timestamps in seconds-since-boot, no GPS relationship
+- **EXTTS**: PHC timestamps with no guaranteed GPS relationship
+
+For these cross-timescale correlations, `CLOCK_MONOTONIC` is the
+only option.
+
+### Staleness detection from in-stream timestamps
+
+Streams that carry in-stream timestamps give us a powerful tool:
+**staleness detection**.
+
+When the read queue is empty after a read, we know the read
+happened close to the event.  At that moment, we can measure the
+latency between the in-stream timestamp and `CLOCK_MONOTONIC`:
+
+```
+latency = time.monotonic() - in_stream_to_mono(msg.gps_tow)
+```
+
+We gently update our estimate of this latency as we run (it
+reflects serial + USB + kernel + scheduling delays).  Then for
+every subsequent read, we check:
+
+- **latency ≈ established**: message is fresh, normal confidence
+- **latency increasing**: something is queuing — in our read path,
+  in the network, or even at the point of production (e.g., the
+  receiver is slow to output).  Lower confidence in results where
+  freshness matters.
+- **latency jumped**: a burst of stale messages arrived.  The
+  in-stream timestamps tell us exactly how stale each one is.
+
+This gives us per-message freshness with no special protocol — any
+stream with in-stream timestamps gets staleness detection for free
+once we calibrate the in-stream-to-monotonic relationship.  Streams
+without in-stream timestamps (PPS, TICC) can only detect staleness
+by checking whether `CLOCK_MONOTONIC` spacing matches the expected
+event rate.
+
 ## TICC–qErr correlation (2026-04-11 discovery)
 
 ### What TIM-TP qErr predicts
