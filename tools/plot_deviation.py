@@ -187,6 +187,23 @@ def load_servo_csv(path):
     if np.sum(valid) > 10:
         sources['PPS+PPP'] = (taus, pp[valid], rate)
 
+    # TICC chA (servo input — includes qErr correction, PPP or TIM-TP)
+    ticc_err = []
+    for r in rows:
+        try:
+            src = r.get('source', '')
+            se = r.get('source_error_ns', '')
+            if se and se != '' and src == 'TICC':
+                ticc_err.append(float(se))
+            else:
+                ticc_err.append(np.nan)
+        except (ValueError, KeyError):
+            ticc_err.append(np.nan)
+    te = np.array(ticc_err) * 1e-9
+    valid = np.isfinite(te)
+    if np.sum(valid) > 10:
+        sources['TICC'] = (taus, te[valid], rate)
+
     return sources
 
 
