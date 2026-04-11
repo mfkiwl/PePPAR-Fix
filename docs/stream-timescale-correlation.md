@@ -1106,9 +1106,9 @@ and the TIM-TP read timestamp.  The `expected_offset_s=0.95` encodes
 the measured timing relationship between TIM-TP arrival and TICC
 arrival for the same PPS edge.
 
-### The litmus test
+### The qVIR check
 
-The qerr alignment litmus test computes the variance ratio:
+The qerr alignment qVIR check computes the variance ratio:
 
 ```
 ratio = Δvar(raw) / Δvar(raw + qerr)
@@ -1120,12 +1120,12 @@ ratio = Δvar(raw) / Δvar(raw + qerr)
 - **ratio < 1.0**: qerr is anticorrelated (adding noise — wrong
   sign or edge)
 
-**Both EXTTS+qErr and TICC+qErr must have their own litmus tests.**
+**Both EXTTS+qErr and TICC+qErr must have their own qVIR checks.**
 If either shows ratio ≤ 1.0, the correlation is broken and the servo
 must stop using qerr immediately.  Applying wrong-edge qerr makes
 TDEV **worse** than raw PPS (3.3 ns vs 2.1 ns in the 2026-04-11
 incident).  This must be caught in real time — the whole reason the
-litmus exists is to prevent discovering a correlation failure after
+qVIR exists is to prevent discovering a correlation failure after
 an overnight run.
 
 ## Code audit: non-CLOCK_MONOTONIC correlation (2026-04-11)

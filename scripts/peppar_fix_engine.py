@@ -99,7 +99,7 @@ def _dt_rx_trend_predict(buf):
 
 
 class RunningVarianceWindow:
-    """Small rolling variance tracker for alignment litmus metrics."""
+    """Small rolling variance tracker for alignment qVIR metrics."""
 
     def __init__(self, maxlen=32):
         self._values = deque(maxlen=maxlen)
@@ -2105,7 +2105,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     # monotonic clock avoids all GPS TOW / receiver clock bias issues.
     # See docs/stream-timescale-correlation.md "TICC–qErr epoch matching"
     # for why epoch alignment is critical and how it's verified.
-    # Match qErr to the EXTTS PPS edge (for EXTTS litmus and non-TICC paths).
+    # Match qErr to the EXTTS PPS edge (for EXTTS qVIR and non-TICC paths).
     # See docs/stream-timescale-correlation.md for the full correlation model.
     # qerr values are OFFSETS (corrections), not timestamps.  Each is
     # matched to a specific PPS edge via CLOCK_MONOTONIC.  After adding
@@ -2133,7 +2133,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             # Match qErr to the TICC measurement's PPS edge — separate
             # from the EXTTS match.  The TICC reports ~50 ms after the
             # PPS, TIM-TP arrived ~0.9s before it.  Total offset ≈ 0.95s.
-            # Do NOT override qerr_for_extts_pps_ns — that's for the EXTTS litmus.
+            # Do NOT override qerr_for_extts_pps_ns — that's for the EXTTS qVIR.
             # See docs/stream-timescale-correlation.md "TICC–qErr correlation".
             qerr_for_ticc_pps_ns, _ = qerr_store.match_pps_mono(
                 ticc_measurement.recv_mono,
@@ -2223,7 +2223,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                      else "ok" if qerr_plus_ratio >= 1.0
                      else "BAD")
             lvl = log.info if qerr_plus_ratio >= 1.0 else log.warning
-            lvl("  [%s] EXTTS qErr litmus: Δvar(pps)/Δvar(pps+qErr) = %.2f (%s)",
+            lvl("  [%s] EXTTS qVIR: Δvar(pps)/Δvar(pps+qErr) = %.2f (%s)",
                 n_epochs, qerr_plus_ratio, label)
 
     # Litmus 2: TICC + qErr (separate epoch matching)
@@ -2239,7 +2239,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                      else "ok" if ticc_qerr_ratio >= 1.0
                      else "BAD")
             lvl = log.info if ticc_qerr_ratio >= 1.0 else log.warning
-            lvl("  [%s] TICC qErr litmus: Δvar(ticc)/Δvar(ticc+qErr) = %.2f (%s)",
+            lvl("  [%s] TICC qVIR: Δvar(ticc)/Δvar(ticc+qErr) = %.2f (%s)",
                 n_epochs, ticc_qerr_ratio, label)
 
     if args.ticc_drive:
@@ -2320,7 +2320,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_ticc_pps_ns
         elif not pps_corr_applied and qerr_for_extts_pps_ns is not None:
             # Fallback: no TICC-specific qerr match, use EXTTS match.
-            # This may be wrong-epoch — the TICC litmus will catch it.
+            # This may be wrong-epoch — the TICC qVIR will catch it.
             pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_extts_pps_ns
         sources = ticc_only_error_source(pps_err_ticc_qerr_ns, args.ticc_confidence_ns)
         corr_age_for_inflation = None  # not applicable in TICC-drive mode

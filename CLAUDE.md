@@ -349,7 +349,7 @@ queueing, CPU scheduling, and network delays.
   `ticc_measurement.recv_mono` (expected_offset ≈ 0.95s), NOT the
   EXTTS `pps_event.recv_mono`.  Off-by-one edge makes TDEV **worse**
   than raw PPS (3.3 ns vs 2.1 ns — confirmed 2026-04-11).
-- **Litmus**: the qerr alignment ratio `Δvar(raw)/Δvar(raw+qerr)`
+- **qVIR (qErr Variance Improvement Ratio) `Δvar(raw)/Δvar(raw+qerr)`
   must be > 1.5.  If ≤ 1.0, the correlation is broken — stop using
   qerr immediately.  Do not discover this after an overnight run.
 

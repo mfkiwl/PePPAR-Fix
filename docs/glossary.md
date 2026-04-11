@@ -61,6 +61,7 @@ listed first.
 
 | Term | Definition |
 |---|---|
+| **qVIR** | qErr Variance Improvement Ratio.  `Δvar(uncorrected) / Δvar(corrected)`.  Measures how much qErr correction reduces the variance of a PPS timestamp stream.  >1.5 = good (qErr is helping).  ≈1.0 = qErr is uncorrelated with the measurement (wrong epoch match).  <1.0 = qErr is making things worse (wrong sign or epoch).  Computed separately for EXTTS (qVIR_extts) and TICC (qVIR_ticc).  High qVIR correlates with low TDEV; low qVIR correlates with high TDEV.  Primary use: detect qErr mis-correlation early so we don't waste a run collecting data with terrible TDEV.  qErr has so much variance (±4 ns) that applying it to the wrong PPS edge is immediately visible in the ratio — smoother correction streams would mask the error. |
 | **EKF** | Extended Kalman Filter.  Nonlinear state estimator.  Used in the 4-state DOFreqEst for TICC+PPP fusion. |
 | **LQR** | Linear-Quadratic Regulator.  Optimal control law that minimizes a cost function.  Used in the Kalman servo for frequency steering. |
 | **PI servo** | Proportional-Integral servo.  Simple feedback controller with gain (Kp) and integral (Ki) terms. |
