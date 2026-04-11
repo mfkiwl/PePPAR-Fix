@@ -2111,6 +2111,17 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             ticc_diff_ns = -(ticc_measurement.diff_ns - args.ticc_target_ns)
             ticc_age_s = max(0.0, time.monotonic() - ticc_measurement.recv_mono)
             ticc_confidence = ticc_measurement.confidence
+            # Re-match qErr to the TICC measurement's PPS epoch.
+            # The TICC reports ~1 second after the PPS event, so
+            # ticc_measurement.recv_mono is ~1s after the PPS it measured.
+            # The TIM-TP arrived ~0.9s BEFORE that PPS.  Total offset
+            # from TIM-TP arrival to TICC receipt ≈ 1.9s.
+            ticc_qerr, ticc_qerr_offset = qerr_store.match_pps_mono(
+                ticc_measurement.recv_mono,
+                expected_offset_s=1.9, tolerance_s=0.3)
+            if ticc_qerr is not None:
+                qerr_ns = ticc_qerr
+                qerr_offset_s = ticc_qerr_offset
     if qerr_ns is None and n_epochs % 10 == 0:
         log.info("  [%s] qErr match miss (mono)", n_epochs)
     elif qerr_ns is not None and n_epochs % 10 == 0:
