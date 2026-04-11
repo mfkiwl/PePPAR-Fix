@@ -231,6 +231,48 @@ Before starting a long run:
 - [ ] data/ directory exists
 - [ ] `python3 -c "import pyubx2"` succeeds (in the right python)
 - [ ] Timebeat stopped (on OTC hosts): `systemctl is-active timebeat`
+- [ ] System time daemon running and locked (see below)
+- [ ] PHC phase check (see below)
+
+### System time and PHC phase verification
+
+**System time daemon**: A time daemon must be running and locked to a
+trustworthy master before starting peppar-fix.  The daemon can be
+`systemd-timesyncd`, `chrony`, or `ntpd` — it doesn't matter which,
+but we must know what it is and confirm it has a confident lock:
+
+```bash
+# systemd-timesyncd:
+timedatectl show --property=NTPSynchronized   # should say "yes"
+
+# chrony:
+chronyc tracking | grep -E "Leap|Stratum"     # stratum > 0
+
+# ntpd:
+ntpq -p | head -5                             # should show * peer
+```
+
+**PHC phase check**: Compare PHC to system clock.  The PHC runs on
+TAI, so the expected offset is ~37 seconds (current TAI-UTC = 37s):
+
+```bash
+sudo phc_ctl /dev/ptp0 cmp
+```
+
+Expected: **~37,000,000,000 ns** (37 seconds).
+
+- **36,500,000,000 or 37,500,000,000** → PHC is 500 ms out of phase.
+  The bootstrap will land PEROUT on the wrong half-second.
+  Fix: `sudo phc_ctl /dev/ptp0 set` to reset PHC to system time,
+  then verify with `cmp` again.
+- **Wildly different** (seconds or more off) → PHC was never set,
+  or the i226/igc driver was reloaded and PHC reset to epoch 0.
+  Fix: `sudo phc_ctl /dev/ptp0 set` and verify.
+
+This check catches the i226 PEROUT 500 ms phase ambiguity before it
+wastes an overnight run.  The bootstrap's ADJ_SETOFFSET step only
+makes fine adjustments — it cannot fix a 500 ms offset because it
+assumes the PHC is already within a few milliseconds of GPS time.
 
 ## Future work
 
