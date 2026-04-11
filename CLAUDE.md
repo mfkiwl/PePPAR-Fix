@@ -306,6 +306,33 @@ for the duration of your work.
 
 ## Key Technical Context
 
+### Stream correlation via CLOCK_MONOTONIC — read this before touching qErr
+
+**Read `docs/stream-timescale-correlation.md` before modifying any
+code that matches data from different streams** (qErr, TICC, EXTTS,
+PPP, NTRIP).
+
+The TICC operates on its own timescale with no defined relationship
+to GPS, UTC, or PHC time.  The **only** shared timescale for
+correlating TICC measurements with other streams is
+`CLOCK_MONOTONIC`.  We timestamp every event at read time, carry that
+timestamp through the pipeline, and match at correlation gates.
+
+**Critical rule for qErr correction of TICC measurements**:
+
+- **Sign**: `corrected = ticc_diff_ns + qerr_ns` (plus, not minus)
+- **Epoch**: qerr must be from the **same PPS epoch** the TICC
+  measured.  Off-by-one makes TDEV **worse** than raw PPS (3.3 ns vs
+  2.1 ns — confirmed 2026-04-11).  Match qerr using
+  `ticc_measurement.recv_mono` (expected_offset ≈ 0.95s), NOT the
+  EXTTS `pps_event.recv_mono`.
+- **Litmus**: the qerr alignment ratio `Δvar(raw)/Δvar(raw+qerr)`
+  must be > 1.5.  If ≤ 1.0, the correlation is broken — stop using
+  qerr immediately.  Do not discover this after an overnight run.
+
+This applies to **all** time-based correlation between streams with
+independent timescales, not just qErr.
+
 ### Position finding
 
 The PPP position finder (`peppar_find_position.py` or Phase 1 of

@@ -907,3 +907,119 @@ The current code distinguishes:
 - `obs_received_but_dropped`
   - observations arrived but expired or failed policy checks before use
   - logged separately from true source silence
+
+## TICC–qErr epoch matching (2026-04-11 discovery)
+
+### The problem
+
+The TICC operates on its own timescale (seconds since boot).  It has
+no defined relationship to GPS time, UTC, PHC time, or any other
+timescale in the system.  The only shared timescale we can use to
+correlate TICC measurements with other streams is `CLOCK_MONOTONIC`:
+we log the host monotonic time when we read each TICC timestamp, and
+we log it when we read EXTTS, RAWX, TIM-TP, NTRIP, or anything else.
+
+This relationship must be **discovered and maintained dynamically**.
+No static offset or index-matching works because:
+
+- The TICC boots independently (reset on serial open unless HUPCL is
+  cleared — see `ticc.py`).
+- Messages can be dropped by any stream at any time (USB glitches,
+  kernel buffer overflows, CPU starvation, network congestion).
+- Multi-second lags can occur between when a physical event happens
+  and when we read its timestamp.
+
+**However**, when we read a timestamp and there are no queued
+timestamps behind it, we have a solid correlation point through
+`CLOCK_MONOTONIC` — the absence of queueing means the read happened
+close to the event.  This relationship can be established at startup
+and refined as we run, so that it survives dropped messages.
+
+### TICC-to-qErr matching: the sign and the lag
+
+The TICC measurement of PPS chB includes the F9T's PPS quantization
+error (the sub-8 ns tick residual).  TIM-TP `qErr` reports this
+residual.  To correct the TICC measurement, we add qErr:
+
+```
+corrected_ticc = ticc_diff_ns + qerr_ns
+```
+
+**Sign**: `+qerr_ns`.  The TICC sees `-(PHC_phase) - qerr(TCXO)`.
+Adding `qerr` cancels the TCXO quantization, leaving `-(PHC_phase)`.
+Subtracting qerr or using the wrong epoch's qerr **makes TDEV
+worse**, not better.
+
+**Epoch matching**: The qerr must come from the **same PPS epoch**
+that the TICC measured.  Off-by-one is catastrophic: at ~22 ppb TCXO
+drift, the TCXO sweeps through one 8 ns tick every ~0.36 seconds.
+A 1-second mismatch means the qerr is ~2.75 ticks off — it becomes
+uncorrelated noise that the servo faithfully tracks into the PHC.
+
+### How the mismatch happens
+
+In TICC-drive mode, three events occur per PPS epoch N:
+
+1. **TIM-TP arrives** at `T_N - 0.9s` (describes epoch N's PPS)
+2. **PPS fires** at `T_N` → EXTTS event, TICC chB trigger
+3. **TICC reports** at `T_N + 0.05s` (USB serial latency)
+
+The PPP observation for epoch N is processed at `~T_N + 1s` (the
+F9T outputs RAWX at `T_N + 0.9s`, then PPP filter runs).  At that
+point, `ticc_tracker.latest()` returns the **freshest** TICC
+measurement — which is from epoch **N+1** (arrived at `T_{N+1} + 0.05`).
+
+If qerr is matched to the EXTTS PPS event (epoch N), but the TICC
+measurement is from epoch N+1, the qerr is one epoch behind.
+
+### The fix
+
+Match qerr using the **TICC measurement's** `recv_mono`, not the
+EXTTS PPS event's:
+
+```python
+ticc_qerr, _ = qerr_store.match_pps_mono(
+    ticc_measurement.recv_mono,
+    expected_offset_s=0.95,  # 0.9s TIM-TP lead + 0.05s TICC latency
+    tolerance_s=0.2)
+if ticc_qerr is not None:
+    qerr_ns = ticc_qerr
+```
+
+This ensures the qerr and TICC measurement refer to the same PPS
+epoch regardless of PPP processing delays.
+
+### Verification: the litmus test
+
+The qerr alignment litmus test computes the variance ratio:
+
+```
+ratio = Δvar(raw) / Δvar(raw + qerr)
+```
+
+- **ratio > 1.5**: qerr is working (reducing variance)
+- **ratio ≈ 1.0**: qerr is uncorrelated (no effect — likely wrong epoch)
+- **ratio < 1.0**: qerr is anticorrelated (adding noise — wrong sign or epoch)
+
+**Both EXTTS+qErr and TICC+qErr should have their own litmus tests.**
+If either shows ratio < 1.5, the correlation is broken and the servo
+should stop using qerr until it's fixed.  Applying wrong qerr makes
+TDEV **worse** than raw PPS (3.3 ns vs 2.1 ns in the 2026-04-11
+incident).  This must be caught immediately, not discovered after an
+overnight run.
+
+### Generalization
+
+This isn't specific to qErr and TICC.  **Any time-based correlation
+between streams with independent timescales** requires:
+
+1. A shared reference timescale (`CLOCK_MONOTONIC`)
+2. Timestamps taken as close as possible to the physical event
+3. Timestamps carried through the pipeline to the correlation point
+4. Dynamic discovery and maintenance of inter-timescale relationships
+5. A litmus test that detects correlation failure in real time
+6. Automatic fallback (disable the correction) when the litmus fails
+
+The `CLOCK_MONOTONIC` ↔ `CLOCK_REALTIME` relationship is trivially
+available from `clock_gettime()`.  The TICC timescale ↔
+`CLOCK_MONOTONIC` relationship must be discovered from the data.

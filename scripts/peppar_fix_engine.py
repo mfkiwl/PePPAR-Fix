@@ -2098,6 +2098,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     # Match qErr to this PPS edge by host monotonic time.  TIM-TP
     # arrives ~900 ms before the PPS it describes; correlating by
     # monotonic clock avoids all GPS TOW / receiver clock bias issues.
+    # See docs/stream-timescale-correlation.md "TICC–qErr epoch matching"
+    # for why epoch alignment is critical and how it's verified.
     qerr_ns, qerr_offset_s = qerr_store.match_pps_mono(pps_event.recv_mono)
     ticc_diff_ns = None
     ticc_diff_raw_ns = None
