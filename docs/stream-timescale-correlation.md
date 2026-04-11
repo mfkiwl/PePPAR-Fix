@@ -1157,3 +1157,37 @@ timescale, not across timescales.
   obs-to-PPS
 - TICC-to-qErr re-matching — `CLOCK_MONOTONIC` via
   `match_pps_mono(ticc_measurement.recv_mono)`
+
+## Variable naming convention for PPS timestamps and corrections
+
+We work with two PPS streams:
+
+- **gnss_pps**: the F9T's PPS edge (GNSS reference).
+- **do_pps**: the PHC PEROUT edge (disciplined oscillator output).
+
+The PPS phase error is `gnss_pps − do_pps` — positive means the DO
+is late.  This is what the servo drives toward zero.
+
+Variable names carry **what** is being measured (the PPS error),
+**where** it was measured (TICC or EXTTS timescale), and **what
+corrections** were applied (if any):
+
+| Variable | Meaning |
+|---|---|
+| `pps_err_ticc_ns` | PPS error on TICC timescale (uncorrected) |
+| `pps_err_ticc_qerr_ns` | Same, with TIM-TP qerr applied |
+| `pps_err_extts_ns` | PPS error on EXTTS/PHC timescale (uncorrected) |
+| `qerr_for_ticc_pps_ns` | qErr offset matched to the TICC PPS edge |
+| `qerr_for_extts_pps_ns` | qErr offset matched to the EXTTS PPS edge |
+
+Rules:
+
+1. **Lead with the measurement** (pps_err), not the instrument.
+2. **No aliases** — one variable per value.  No redundant copies.
+3. **No "raw"** — uncorrected is the default.  Corrections are
+   explicit suffixes (\_qerr, \_ppp\_qerr).
+4. **qerr is an offset**, not a timestamp.  After adding it to a
+   timestamp, the result stays on the timestamp's timescale.
+5. Short-tau TDEV of `pps_err_ticc_qerr_ns` is the metric we are
+   trying to minimize — it measures how well the DO tracks the
+   GNSS-corrected PPS reference as seen by the TICC.
