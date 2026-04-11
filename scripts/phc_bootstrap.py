@@ -166,25 +166,57 @@ def _enable_pps_out(ptp, args):
             pin_name = _E810_PIN_NAMES.get(args.pps_out_pin, str(args.pps_out_pin))
             _set_pin_function_sysfs(args.ptp_dev, pin_name,
                                     PTP_PF_PEROUT, args.pps_out_channel)
-        # i226 PEROUT half-period workaround (2026-04-10):
+        # i226 PEROUT half-period workaround (2026-04-10, updated 2026-04-11):
         #
         # The i226 Target Time PEROUT can latch onto the wrong half-period
-        # after a PHC time step (ADJ_SETOFFSET/clock_settime).  Per kernel
-        # netdev: stepping the PHC while PEROUT is active causes the
-        # hardware to oscillate at 62.5 MHz or lock up.  The corrupted
-        # state persists across simple disable/enable cycles.
+        # after a PHC time step.  This is a HARDWARE issue — some i226
+        # boards consistently land on 500ms phase regardless of start_nsec,
+        # double-programming, or kernel version (confirmed with SatPulse
+        # and across kernel 6.12.62 and 6.12.75).
         #
-        # Fix: disable, program once (lets hardware see the current PHC
-        # time), wait 2 seconds (one full PEROUT period), then disable
-        # and re-program.  The second programming always fires correctly.
-        # This matches the kernel-recommended sequence: stop output,
-        # reprogram clock, restart output — with the added second cycle
-        # to clear any stale hardware state from a previous session.
+        # Fix: program PEROUT, verify via EXTTS that the phase is within
+        # 100ms of the second boundary.  If 500ms off, reprogram with
+        # start_nsec=500_000_000 to flip to the correct half.
+        from peppar_fix.ptp_device import PTP_PF_EXTTS
         ptp.disable_perout(args.pps_out_channel)
         ptp.enable_perout(args.pps_out_channel)
         time.sleep(2)
-        ptp.disable_perout(args.pps_out_channel)
-        ptp.enable_perout(args.pps_out_channel)
+        # Verify PEROUT phase via EXTTS — read the PEROUT edge timestamp.
+        # PEROUT fires into the EXTTS pin (loopback on TimeHAT SDP0→SDP1).
+        # If EXTTS is not available or not wired for PEROUT, skip the check.
+        perout_phase_ok = True
+        try:
+            ptp.enable_extts(args.extts_channel, rising_edge=True)
+            from peppar_fix.ptp_device import DualEdgeFilter
+            dedup = DualEdgeFilter()
+            test = ptp.read_extts_dedup(dedup, timeout_ms=2000)
+            if test is not None:
+                _, nsec = test[0], test[1]
+                # Check if PEROUT fires near 0ms or near 500ms
+                frac_ms = (nsec % 1_000_000_000) / 1_000_000
+                if 400 < frac_ms < 600:
+                    log.warning("PEROUT 500ms phase detected (%.0f ms) — "
+                                "reprogramming with opposite phase", frac_ms)
+                    perout_phase_ok = False
+        except OSError:
+            pass  # no EXTTS available — can't verify
+        if not perout_phase_ok:
+            ptp.disable_perout(args.pps_out_channel)
+            ptp.enable_perout(args.pps_out_channel,
+                              start_nsec_override=500_000_000)
+            time.sleep(2)
+            # Verify again
+            try:
+                test = ptp.read_extts_dedup(dedup, timeout_ms=2000)
+                if test is not None:
+                    frac_ms = (test[1] % 1_000_000_000) / 1_000_000
+                    if 400 < frac_ms < 600:
+                        log.error("PEROUT still at 500ms after correction — "
+                                  "hardware issue on this i226")
+                    else:
+                        log.info("PEROUT phase corrected to %.0f ms", frac_ms)
+            except OSError:
+                pass
         log.info("PPS OUT enabled: pin %d, PEROUT channel %d",
                  args.pps_out_pin, args.pps_out_channel)
     except OSError as e:

@@ -231,7 +231,8 @@ class PtpDevice:
         except OSError:
             fcntl.ioctl(self.fd, PTP_EXTTS_REQUEST, buf)
 
-    def enable_perout(self, channel, period_ns=1_000_000_000):
+    def enable_perout(self, channel, period_ns=1_000_000_000,
+                      start_nsec_override=None):
         """Enable periodic output (1PPS) on a channel.
 
         Kernel struct ptp_perout_request (56 bytes):
@@ -279,7 +280,7 @@ class PtpDevice:
         period_sub = period_ns % 1_000_000_000
         phc_ns, _sys_ns = self.read_phc_ns()
         start_sec = phc_ns // 1_000_000_000 + 2
-        start_nsec = 0
+        start_nsec = start_nsec_override if start_nsec_override is not None else 0
         PTP_PEROUT_DUTY_CYCLE = 1 << 1
         buf = struct.pack('<qII qII II qII',
                           start_sec, start_nsec, 0,
