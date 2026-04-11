@@ -1522,9 +1522,14 @@ def _setup_servo(args, known_ecef, qerr_store):
     )
 
     qerr_alignment = {
+        # Litmus 1: EXTTS PPS + qErr (matched to EXTTS epoch)
         "pps_var": RunningVarianceWindow(),
         "pps_qerr_plus_var": RunningVarianceWindow(),
         "pps_qerr_minus_var": RunningVarianceWindow(),
+        # Litmus 2: TICC + qErr (matched to TICC epoch)
+        "ticc_var": RunningVarianceWindow(),
+        "ticc_qerr_plus_var": RunningVarianceWindow(),
+        "ticc_qerr_minus_var": RunningVarianceWindow(),
     }
 
     # PPS event queue
@@ -2100,7 +2105,11 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     # monotonic clock avoids all GPS TOW / receiver clock bias issues.
     # See docs/stream-timescale-correlation.md "TICC–qErr epoch matching"
     # for why epoch alignment is critical and how it's verified.
-    qerr_ns, qerr_offset_s = qerr_store.match_pps_mono(pps_event.recv_mono)
+    # Match qErr to the EXTTS PPS edge (for EXTTS litmus and non-TICC paths).
+    # See docs/stream-timescale-correlation.md for the full correlation model.
+    extts_qerr_ns, qerr_offset_s = qerr_store.match_pps_mono(pps_event.recv_mono)
+    qerr_ns = extts_qerr_ns  # default for non-TICC paths
+    ticc_qerr_ns = None  # separate match for TICC path
     ticc_diff_ns = None
     ticc_diff_raw_ns = None
     ticc_age_s = None
@@ -2113,40 +2122,41 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             ticc_diff_ns = -(ticc_measurement.diff_ns - args.ticc_target_ns)
             ticc_age_s = max(0.0, time.monotonic() - ticc_measurement.recv_mono)
             ticc_confidence = ticc_measurement.confidence
-            # Re-match qErr to the TICC measurement's PPS epoch.
-            # The TICC reports ~50 ms after the PPS event, so
-            # ticc_measurement.recv_mono ≈ T_pps + 0.05.  TIM-TP
-            # arrived ~0.9s BEFORE that PPS at T_pps - 0.9.  Total
-            # offset from TIM-TP arrival to TICC receipt ≈ 0.95s.
-            # The default match (via pps_event) uses the EXTTS PPS
-            # from the PPP epoch, which is 1 epoch behind the latest
-            # TICC measurement — causing a lag-1 mismatch.
-            ticc_qerr, ticc_qerr_offset = qerr_store.match_pps_mono(
+            # Match qErr to the TICC measurement's PPS edge — separate
+            # from the EXTTS match.  The TICC reports ~50 ms after the
+            # PPS, TIM-TP arrived ~0.9s before it.  Total offset ≈ 0.95s.
+            # Do NOT override qerr_ns — that's for the EXTTS litmus.
+            # See docs/stream-timescale-correlation.md "TICC–qErr correlation".
+            ticc_qerr_ns, _ = qerr_store.match_pps_mono(
                 ticc_measurement.recv_mono,
                 expected_offset_s=0.95, tolerance_s=0.2)
-            if ticc_qerr is not None:
-                qerr_ns = ticc_qerr
-                qerr_offset_s = ticc_qerr_offset
     if qerr_ns is None and n_epochs % 10 == 0:
         log.info("  [%s] qErr match miss (mono)", n_epochs)
     elif qerr_ns is not None and n_epochs % 10 == 0:
         log.info(
-            "  [%s] qErr match ok: offset=%.3fs qerr=%+.1fns",
+            "  [%s] qErr match ok: extts_offset=%.3fs extts_qerr=%+.1fns"
+            "  ticc_qerr=%s",
             n_epochs,
             qerr_offset_s if qerr_offset_s is not None else -1.0,
             qerr_ns,
+            f"{ticc_qerr_ns:+.1f}ns" if ticc_qerr_ns is not None else "None",
         )
-    # qErr litmus: subtract the known PHC rate (adjfine) so the residual
-    # is pure PPS jitter, then use first-difference variance.  This works
-    # identically whether the servo is pulling in, tracking, or idle.
-    # adjfine_ppb * 1s = ns of expected phase change per epoch.
+    # ── Litmus test 1: EXTTS PPS + qErr ──
+    # Uses extts_qerr_ns matched to the EXTTS PPS epoch.
     cum_adj = qerr_alignment.get("cumulative_adjfine_ns", 0.0)
     rate_compensated = pps_error_ns - cum_adj
     qerr_alignment["cumulative_adjfine_ns"] = cum_adj + ctx['adjfine_ppb']
     qerr_alignment["pps_var"].add(rate_compensated)
-    if qerr_ns is not None:
-        qerr_alignment["pps_qerr_plus_var"].add(rate_compensated + qerr_ns)
-        qerr_alignment["pps_qerr_minus_var"].add(rate_compensated - qerr_ns)
+    if extts_qerr_ns is not None:
+        qerr_alignment["pps_qerr_plus_var"].add(rate_compensated + extts_qerr_ns)
+        qerr_alignment["pps_qerr_minus_var"].add(rate_compensated - extts_qerr_ns)
+    # ── Litmus test 2: TICC + qErr ──
+    # Uses ticc_qerr_ns matched to the TICC PPS edge (separate epoch).
+    if ticc_diff_ns is not None:
+        qerr_alignment["ticc_var"].add(ticc_diff_ns)
+        if ticc_qerr_ns is not None:
+            qerr_alignment["ticc_qerr_plus_var"].add(ticc_diff_ns + ticc_qerr_ns)
+            qerr_alignment["ticc_qerr_minus_var"].add(ticc_diff_ns - ticc_qerr_ns)
     # Carrier phase tracker: auto-init and accumulate adjfine
     carrier_tracker = ctx.get('carrier_tracker')
     if carrier_tracker is not None and not getattr(args, 'no_carrier', False):
@@ -2205,8 +2215,24 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                      else "ok" if qerr_plus_ratio >= 1.0
                      else "BAD")
             lvl = log.info if qerr_plus_ratio >= 1.0 else log.warning
-            lvl("  [%s] qErr litmus: Δvar(pps)/Δvar(pps+qErr) = %.2f (%s)",
+            lvl("  [%s] EXTTS qErr litmus: Δvar(pps)/Δvar(pps+qErr) = %.2f (%s)",
                 n_epochs, qerr_plus_ratio, label)
+
+    # Litmus 2: TICC + qErr (separate epoch matching)
+    ticc_var_ns2 = qerr_alignment["ticc_var"].diff_variance()
+    ticc_qerr_plus_var_ns2 = qerr_alignment["ticc_qerr_plus_var"].diff_variance()
+    ticc_qerr_ratio = None
+    if (ticc_var_ns2 is not None and ticc_qerr_plus_var_ns2 is not None
+            and ticc_qerr_plus_var_ns2 > 0.0):
+        ticc_qerr_ratio = ticc_var_ns2 / ticc_qerr_plus_var_ns2
+    if n_epochs % 10 == 0:
+        if ticc_qerr_ratio is not None and qerr_alignment["ticc_qerr_plus_var"].count() >= 8:
+            label = ("good" if ticc_qerr_ratio >= 1.5
+                     else "ok" if ticc_qerr_ratio >= 1.0
+                     else "BAD")
+            lvl = log.info if ticc_qerr_ratio >= 1.0 else log.warning
+            lvl("  [%s] TICC qErr litmus: Δvar(ticc)/Δvar(ticc+qErr) = %.2f (%s)",
+                n_epochs, ticc_qerr_ratio, label)
 
     if args.ticc_drive:
         if ticc_diff_ns is None:
@@ -2254,10 +2280,12 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         if getattr(args, 'ppp_qerr', False):
             ppp_cal = ctx['ppp_cal']
             dt_rx_buf = ctx['dt_rx_buffer']
-            # Calibrate against TIM-TP during first ~10 converged epochs
-            if (not ppp_cal.calibrated and qerr_ns is not None
+            # Calibrate against TIM-TP during first ~10 converged epochs.
+            # Use ticc_qerr_ns (matched to TICC epoch) when available.
+            cal_qerr = ticc_qerr_ns if ticc_qerr_ns is not None else qerr_ns
+            if (not ppp_cal.calibrated and cal_qerr is not None
                     and dt_rx_sigma is not None and dt_rx_sigma < 1.0):
-                done = ppp_cal.add_sample(dt_rx_ns, qerr_ns)
+                done = ppp_cal.add_sample(dt_rx_ns, cal_qerr)
                 if done:
                     log.info("  PPP qErr calibration done: offset=%.3f ns "
                              "(%d samples)", ppp_cal.offset_ns, ppp_cal._n)
@@ -2280,7 +2308,11 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                                  ppp_qerr_ns - qerr_ns,
                                  raw_ppp - qerr_ns,
                                  len(dt_rx_buf))
-        if not ppp_qerr_used and qerr_ns is not None:
+        if not ppp_qerr_used and ticc_qerr_ns is not None:
+            ticc_diff_ns = ticc_diff_ns + ticc_qerr_ns
+        elif not ppp_qerr_used and qerr_ns is not None:
+            # Fallback: no TICC-specific qerr match, use EXTTS match.
+            # This may be wrong-epoch — the TICC litmus will catch it.
             ticc_diff_ns = ticc_diff_ns + qerr_ns
         sources = ticc_only_error_source(ticc_diff_ns, args.ticc_confidence_ns)
         corr_age_for_inflation = None  # not applicable in TICC-drive mode
