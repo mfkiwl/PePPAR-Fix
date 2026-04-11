@@ -2107,9 +2107,19 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     # for why epoch alignment is critical and how it's verified.
     # Match qErr to the EXTTS PPS edge (for EXTTS litmus and non-TICC paths).
     # See docs/stream-timescale-correlation.md for the full correlation model.
+    # qerr values are OFFSETS (corrections), not timestamps.  Each is
+    # matched to a specific PPS edge via CLOCK_MONOTONIC.  After adding
+    # qerr to a timestamp, the result is still on the timestamp's
+    # timescale (EXTTS/PHC or TICC) — the qerr just removes the F9T
+    # PPS quantization from the reference edge.
+    #
+    # extts_qerr_ns: matched to the EXTTS PPS edge (pps_event.recv_mono)
+    # ticc_qerr_ns:  matched to the TICC PPS edge (ticc_measurement.recv_mono)
+    # qerr_ns:       alias for extts_qerr_ns, used in CSV logging and
+    #                non-TICC servo paths.  Always EXTTS-epoch.
     extts_qerr_ns, qerr_offset_s = qerr_store.match_pps_mono(pps_event.recv_mono)
-    qerr_ns = extts_qerr_ns  # default for non-TICC paths
-    ticc_qerr_ns = None  # separate match for TICC path
+    qerr_ns = extts_qerr_ns
+    ticc_qerr_ns = None
     ticc_diff_ns = None
     ticc_diff_raw_ns = None
     ticc_age_s = None
@@ -2271,11 +2281,13 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         # effective reference noise drops to ~178 ps (the TICC+qErr
         # floor), well below the DO, so the servo can actually improve it.
         ticc_diff_raw_ns = ticc_diff_ns  # preserve for DOFreqEst EKF
-        # PPP-derived qErr: smooth dt_rx via linear regression over a
-        # sliding window, then compute qerr from the smoothed value.
-        # dt_rx is continuous (~22 ppb drift), so the trend never hits
-        # tick boundaries — unlike per-epoch qerr(dt_rx) which flips
-        # ±8 ns near boundaries during "jumpy" periods.
+        # Apply qErr to produce the corrected TICC measurement.
+        # ticc_diff_ns is the raw measurement on the TICC timescale.
+        # ticc_corrected_ns is the qerr-corrected measurement — still
+        # on the TICC timescale but with PPS quantization removed.
+        # These are different values with different noise properties;
+        # never conflate them in a single variable.
+        ticc_corrected_ns = ticc_diff_ns  # start with raw
         ppp_qerr_used = False
         if getattr(args, 'ppp_qerr', False):
             ppp_cal = ctx['ppp_cal']
@@ -2298,7 +2310,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 smoothed = _dt_rx_trend_predict(dt_rx_buf)
                 if smoothed is not None:
                     ppp_qerr_ns = _ppp_qerr(smoothed, cal_offset_ns=ppp_cal.offset_ns)
-                    ticc_diff_ns = ticc_diff_ns + ppp_qerr_ns
+                    ticc_corrected_ns = ticc_diff_ns + ppp_qerr_ns
                     ppp_qerr_used = True
                     if n_epochs % 10 == 0 and qerr_ns is not None:
                         raw_ppp = _ppp_qerr(dt_rx_ns, cal_offset_ns=ppp_cal.offset_ns)
@@ -2309,12 +2321,12 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                                  raw_ppp - qerr_ns,
                                  len(dt_rx_buf))
         if not ppp_qerr_used and ticc_qerr_ns is not None:
-            ticc_diff_ns = ticc_diff_ns + ticc_qerr_ns
+            ticc_corrected_ns = ticc_diff_ns + ticc_qerr_ns
         elif not ppp_qerr_used and qerr_ns is not None:
             # Fallback: no TICC-specific qerr match, use EXTTS match.
             # This may be wrong-epoch — the TICC litmus will catch it.
-            ticc_diff_ns = ticc_diff_ns + qerr_ns
-        sources = ticc_only_error_source(ticc_diff_ns, args.ticc_confidence_ns)
+            ticc_corrected_ns = ticc_diff_ns + qerr_ns
+        sources = ticc_only_error_source(ticc_corrected_ns, args.ticc_confidence_ns)
         corr_age_for_inflation = None  # not applicable in TICC-drive mode
     else:
         # Feed PPP calibration: compare PPP-derived qerr against TIM-TP
