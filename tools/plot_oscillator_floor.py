@@ -263,7 +263,7 @@ def make_plots(ticc_timehat, ticc_ocxo, freerun_timehat, freerun_ocxo, output_di
                 marker=dict(size=5), legendgroup=name, showlegend=False,
             ), row=2, col=1)
 
-    # Add shaded region and PHC noise floor where we have both TICC and EXTTS
+    # Add shaded region and DO noise floor where we have both TICC and EXTTS
     ticc_tdev_data = {}
     extts_tdev_data = {}
     for name, phase, taus, color, dash in traces_2:
@@ -281,7 +281,7 @@ def make_plots(ticc_timehat, ticc_ocxo, freerun_timehat, freerun_ocxo, output_di
             ticc_vals = [ticc_tdev_data[t] * 1e9 for t in common_taus]
             extts_vals = [extts_tdev_data[t] * 1e9 for t in common_taus]
 
-            # Fill between TICC and EXTTS (PHC noise region)
+            # Fill between TICC and EXTTS (DO noise region)
             fig2.add_trace(go.Scatter(
                 x=list(common_taus) + list(reversed(common_taus)),
                 y=extts_vals + list(reversed(ticc_vals)),
@@ -293,7 +293,7 @@ def make_plots(ticc_timehat, ticc_ocxo, freerun_timehat, freerun_ocxo, output_di
                 hoverinfo='skip',
             ), row=1, col=1)
 
-            # Computed PHC noise floor: sqrt(EXTTS² - TICC²)
+            # Computed DO noise floor: sqrt(EXTTS² - TICC²)
             phc_noise = []
             phc_taus = []
             for t in common_taus:
@@ -307,7 +307,7 @@ def make_plots(ticc_timehat, ticc_ocxo, freerun_timehat, freerun_ocxo, output_di
                 fig2.add_trace(go.Scatter(
                     x=phc_taus, y=phc_noise,
                     mode='lines+markers',
-                    name='i226 PHC noise (RSS extraction)',
+                    name='i226 DO noise (RSS extraction)',
                     line=dict(color='#2ca02c', dash='dashdot', width=2),
                     marker=dict(size=4),
                 ), row=1, col=1)
@@ -319,7 +319,7 @@ def make_plots(ticc_timehat, ticc_ocxo, freerun_timehat, freerun_ocxo, output_di
     fig2.update_layout(
         title="F9T PPS Measurement Noise: TICC vs EXTTS<br>"
               "<sub>Shaded region = PHC measurement noise (gap between TICC and EXTTS). "
-              "Green = extracted PHC noise floor (RSS). "
+              "Green = extracted DO noise floor (RSS). "
               "*E810 EXTTS is quantization-limited: ~8 ns bins match F9T's "
               "125 MHz clock, producing falsely low TDEV. "
               "No PPS IN TICC on ocxo; F9T PPS jitter expected same as TimeHat.</sub>",

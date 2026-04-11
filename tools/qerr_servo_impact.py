@@ -56,7 +56,7 @@ def analyze(csv_path):
             adj1 = float(tail[i]["adjfine_ppb"])
 
             d_raw = pps1 - pps0
-            d_comp = d_raw - adj0  # remove expected PHC drift
+            d_comp = d_raw - adj0  # remove expected DO drift
             diffs_raw.append(d_raw)
             diffs_comp.append(d_comp)
             adj_changes.append(abs(adj1 - adj0))

@@ -45,7 +45,7 @@ class MeasurementSample:
 
 
 class PtpSelfMeter:
-    """Measure PHC phase against PPS IN using PHC EXTS timestamps."""
+    """Measure DO phase against PPS IN using PHC EXTS timestamps."""
 
     def __init__(self, ptp: PtpDevice, extts_channel: int):
         self.ptp = ptp
