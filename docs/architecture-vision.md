@@ -200,6 +200,106 @@ The coupling exists in the raw TICC (before qErr), not in the
 corrected TICC.  The raw-TICC EKF with explicit tick quantization
 is the correct architecture.
 
+## The GPS-to-DO chain (2026-04-12)
+
+The system's job is to transfer GPS time phase to the DO.  Every
+link in the chain is a measurement of one oscillator against another.
+The chain runs master-to-slave:
+
+```
+GPS satellite clocks           (the master reference)
+        │
+        │  carrier-phase observations (RAWX)
+        │  → PPP filter estimates dt_rx
+        │  → PPP-AR fixes ambiguities for lower noise
+        ▼
+rx TCXO (F9T's 125 MHz crystal)
+        │
+        │  Two independent measurements of rx TCXO vs GPS:
+        │
+        │  1. dt_rx from PPP (carrier phase, ~0.1 ns, 30-60 min
+        │     convergence, atmospheric corrections required)
+        │
+        │  2. qErr sequence from TIM-TP (beat note of rx TCXO
+        │     against GPS, ~178 ps per sample, immediate,
+        │     no atmospheric dependency)
+        │
+        │  Both measure the same thing: rx TCXO frequency and
+        │  phase relative to GPS time.  They cross-validate.
+        │
+        │  PPS edge (gnss_pps): the rx TCXO's tick-quantized
+        │  representation of the GPS second boundary
+        ▼
+DO (disciplined oscillator crystal)
+        │
+        │  Measured by TICC: gnss_pps vs do_pps
+        │  → pps_err_ticc_ns = gnss_pps - do_pps
+        │  → pps_err_ticc_qerr_ns (with qErr correction)
+        │
+        │  Also measured by EXTTS: gnss_pps on PHC timescale
+        │  → pps_err_extts_ns (8 ns resolution, but on the
+        │     timescale we discipline)
+        ▼
+DO frequency output (adjfine)
+```
+
+### The qErr beat note (2026-04-12 insight)
+
+The qErr sequence is the beat note between the rx TCXO's 125 MHz
+clock and GPS time, sampled at 1 Hz at each PPS edge.  Each sample
+reports where the PPS edge landed within the 8 ns tick grid to
+~178 ps precision.
+
+When analyzed as a sequence rather than applied as independent
+corrections, the unwrapped qErr reveals:
+
+- **rx TCXO frequency relative to GPS**: the slope of the unwrapped
+  phase (~2-3 ns/s, varying with temperature)
+- **rx TCXO phase relative to GPS**: the accumulated unwrapped
+  phase, precise to 178 ps per sample
+
+This is the same information PPP's dt_rx provides, but from a
+completely independent measurement path:
+
+| Property        | dt_rx (PPP)     | qErr sequence        |
+|-----------------|-----------------|----------------------|
+| Noise/sample    | ~0.1 ns         | ~178 ps              |
+| Convergence     | 30-60 min       | Immediate (1st PPS)  |
+| Atmospheric?    | Yes             | No — hardware only   |
+| Ambiguity?      | Float bias      | None (ticks observed) |
+| Update rate     | 1 Hz            | 1 Hz                 |
+
+The qErr-derived frequency tracks the rx TCXO to better than 0.7 ns
+over 10-second windows (measured from 8-hour overnight data,
+strictly causal linear fit, predicting 1 second ahead).
+
+### How qErr frequency tracking fits the architecture
+
+**Cross-validation**: if the qErr-derived rx TCXO frequency diverges
+from PPP's dt_rx rate, one of them has a problem (cycle slip,
+atmospheric anomaly, or qErr correlation failure).  This is a
+lightweight integrity check that runs at 1 Hz with no additional
+computation beyond the unwrap.
+
+**PPP filter seeding**: the qErr-derived frequency can seed the PPP
+filter's initial clock rate estimate, accelerating convergence.
+Currently the PPP filter starts at dt_rx=0 and takes minutes to
+converge.  A qErr-derived seed would give it the right starting
+frequency from the first PPS edge.
+
+**Holdover quality**: during NTRIP outages, PPP dt_rx goes stale.
+The qErr sequence continues (it depends only on the F9T's internal
+clock and GNSS lock, not on external corrections).  The unwrapped
+qErr keeps tracking the rx TCXO's frequency drift, providing
+a backup frequency reference for the servo.
+
+**PPP-AR synergy**: PPP-AR reduces dt_rx noise from ~0.1 ns to
+~0.05 ns (see docs/ppp-ar-design.md).  This tighter dt_rx combined
+with the qErr-derived phase gives two sub-100-ps estimates of the
+rx TCXO state.  Their agreement or disagreement is a sensitive
+indicator of carrier-phase integrity — exactly what PPP-AR needs to
+validate its integer ambiguity fixes.
+
 ### Graceful degradation
 
 In all fusion architectures, the sigma-inflation mechanism still
