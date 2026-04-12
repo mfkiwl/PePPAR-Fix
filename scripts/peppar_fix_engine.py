@@ -101,17 +101,17 @@ class QErrTimescaleTracker:
         self._n = 0
         self._calibration_offsets = []
         self._logged = False
+        self._last_consumed_mono = None
 
     def match_and_update(self, chb_recv_mono, qerr_store):
         """Find qerr for a chB event and update the offset estimate.
 
+        Each TIM-TP sample is consumed at most once.  Two consecutive
+        chB events cannot match the same TIM-TP — if the best match
+        is the one we already consumed, return None for this epoch.
+
         Returns (qerr_ns, offset_s) or (None, None).
         """
-        # Find the closest TIM-TP to where we expect it.
-        # Wide tolerance (0.4s) during calibration to find the right
-        # neighborhood.  Tight tolerance (0.15s) after calibration to
-        # ensure we always pick the SAME TIM-TP, not the adjacent one
-        # (which is only 1s away).
         tol = 0.4 if not self.calibrated else 0.15
         qerr_ns, match_offset_s = qerr_store.match_pps_mono(
             chb_recv_mono,
@@ -121,10 +121,16 @@ class QErrTimescaleTracker:
         if qerr_ns is None:
             return None, None
 
-        # The actual offset for this pair
-        actual_offset = match_offset_s
+        # Deduplicate: the matched TIM-TP's host_time is approximately
+        # chb_recv_mono - match_offset_s.  If it's within 0.1s of the
+        # last consumed TIM-TP, it's the same sample — skip it.
+        matched_tim_tp_mono = chb_recv_mono - match_offset_s
+        if (self._last_consumed_mono is not None
+                and abs(matched_tim_tp_mono - self._last_consumed_mono) < 0.5):
+            return None, None
+        self._last_consumed_mono = matched_tim_tp_mono
 
-        # During calibration: collect offsets, compute median
+        actual_offset = match_offset_s
         if not self.calibrated:
             self._calibration_offsets.append(actual_offset)
             self._n += 1
@@ -133,9 +139,6 @@ class QErrTimescaleTracker:
                 self.offset_s = median
                 self.calibrated = True
         else:
-            # After calibration: update slowly via EMA, but only if
-            # the match is close to our estimate (< 0.2s off).
-            # Large deviations are likely wrong matches — ignore them.
             if abs(actual_offset - self.offset_s) < 0.2:
                 self.offset_s += self._alpha * (actual_offset - self.offset_s)
 
