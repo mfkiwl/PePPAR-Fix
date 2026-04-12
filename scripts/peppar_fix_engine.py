@@ -100,6 +100,7 @@ class QErrTimescaleTracker:
         self._alpha = alpha  # EMA weight (slow tracking)
         self._n = 0
         self._calibration_offsets = []
+        self._logged = False
 
     def match_and_update(self, chb_recv_mono, qerr_store):
         """Find qerr for a chB event and update the offset estimate.
@@ -1726,11 +1727,12 @@ def _setup_servo(args, known_ecef, qerr_store):
                                     event.recv_mono, qerr_store)
                                 ticc_tracker.set_pending_ref_qerr(
                                     event.ref_sec, _qerr)
-                                if qerr_ticc_tracker._n == 10:
+                                if qerr_ticc_tracker._n == 10 and not qerr_ticc_tracker._logged:
                                     log.info("qErr timescale tracker calibrated: "
                                              "offset=%.3fs (%d samples)",
                                              qerr_ticc_tracker.offset_s,
                                              qerr_ticc_tracker._n)
+                                    qerr_ticc_tracker._logged = True
 
                             ticc_tracker.ingest(event)
 
