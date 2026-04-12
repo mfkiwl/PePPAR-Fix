@@ -1694,6 +1694,13 @@ def _setup_servo(args, known_ecef, qerr_store):
             ticc_log_f.flush()
 
         qerr_ticc_tracker = QErrTimescaleTracker()
+        # chB-only qVIR: pure correlation check, no DO in the picture.
+        # Tracks chB interval deviations (PPS sawtooth) and checks
+        # whether matched qerr removes that variance.
+        _chb_prev_ps = [None]  # mutable for closure
+        _chb_raw_var = RunningVarianceWindow(maxlen=64)
+        _chb_corr_var = RunningVarianceWindow(maxlen=64)
+        _chb_qvir_count = [0]
 
         def ticc_reader():
             # When TICC-driven, the reference channel (chB) also generates
@@ -1733,6 +1740,24 @@ def _setup_servo(args, known_ecef, qerr_store):
                                              qerr_ticc_tracker.offset_s,
                                              qerr_ticc_tracker._n)
                                     qerr_ticc_tracker._logged = True
+                                # chB-only qVIR: interval deviation ± qerr
+                                cur_ps = event.ref_ps
+                                prev_ps = _chb_prev_ps[0]
+                                _chb_prev_ps[0] = cur_ps
+                                if prev_ps is not None:
+                                    phase_diff_ns = (cur_ps - prev_ps) / 1000.0
+                                    _chb_raw_var.add(phase_diff_ns)
+                                    if _qerr is not None:
+                                        _chb_corr_var.add(phase_diff_ns + _qerr)
+                                    _chb_qvir_count[0] += 1
+                                    if _chb_qvir_count[0] % 100 == 0:
+                                        rv = _chb_raw_var.diff_variance()
+                                        cv = _chb_corr_var.diff_variance()
+                                        if rv and cv and cv > 0:
+                                            qvir = rv / cv
+                                            log.info("chB-only qVIR: %.1f "
+                                                     "(raw=%.2f corr=%.2f ns²)",
+                                                     qvir, rv, cv)
 
                             ticc_tracker.ingest(event)
 
