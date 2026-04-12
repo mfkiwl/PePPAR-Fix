@@ -173,6 +173,10 @@ class QErrStore:
         # TIM-TP(N) arrives ~0.9s before chB(N), so the FIFO ordering
         # is natural: TIM-TP enqueues first, chB dequeues second.
         self._fifo = deque(maxlen=8)
+        # TIM-TP-initiated matching: the most recent fresh TIM-TP
+        # sets _pending_for_chb.  The next fresh chB in [+800, +1100]ms
+        # consumes it.
+        self._pending_for_chb = None  # (host_mono, qerr_ns) or None
 
     @staticmethod
     def _normalize_tow_ms(tow_ms):
@@ -240,6 +244,21 @@ class QErrStore:
                 "host_time": host_time,
             })
             self._fifo.append(qerr_ns)
+            # Offer this TIM-TP for chB matching.  The chB side
+            # checks the timing window — stale TIM-TP (queued)
+            # will have a host_time too far in the past for the
+            # window to match.
+            self._pending_for_chb = (host_time, qerr_ns)
+
+    def get_pending_for_chb(self):
+        """Return the pending (host_mono, qerr_ns) or None."""
+        with self._lock:
+            return self._pending_for_chb
+
+    def clear_pending(self):
+        """Mark the pending TIM-TP as consumed by a chB event."""
+        with self._lock:
+            self._pending_for_chb = None
 
     def consume_next(self):
         """Pop the oldest unconsumed qerr from the FIFO.

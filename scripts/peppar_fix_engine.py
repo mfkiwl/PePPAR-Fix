@@ -1738,21 +1738,22 @@ def _setup_servo(args, known_ecef, qerr_store):
                             was_armed = ticc_tracker._armed
                             ticc_tracker.ingest(event)
 
-                            # Match qerr to each gnss_pps (chB) edge.
-                            # Only use CLOCK_MONOTONIC matching when
-                            # queue_remains=False — the buffer was
-                            # empty after this read, so recv_mono is
-                            # maximally fresh and correlation is solid.
-                            # Queued events (queue_remains=True) have
-                            # stale recv_mono — don't try to correlate.
+                            # Match qerr to chB by TIM-TP-initiated
+                            # windowing.  When a fresh TIM-TP arrives,
+                            # it opens a window [+800ms, +1100ms] on
+                            # CLOCK_MONOTONIC.  The next fresh chB
+                            # that lands in the window is the match.
+                            # See docs/stream-timescale-correlation.md.
                             if event.channel == args.ticc_ref_channel:
                                 _qerr = None
-                                if (was_armed and not event.queue_remains):
-                                    # Use FIFO consume — each TIM-TP
-                                    # consumed exactly once.  Fresh
-                                    # events only (queue_remains=False)
-                                    # ensures no bursts break the 1:1.
-                                    _qerr = qerr_store.consume_next()
+                                if was_armed and not event.queue_remains:
+                                    pending = qerr_store.get_pending_for_chb()
+                                    if pending is not None:
+                                        pend_mono, pend_qerr = pending
+                                        delay = event.recv_mono - pend_mono
+                                        if 0.8 <= delay <= 1.1:
+                                            _qerr = pend_qerr
+                                            qerr_store.clear_pending()
                                 ticc_tracker.set_pending_ref_qerr(
                                     event.ref_sec, _qerr)
                                 # chB-only qVIR: corrected interval =
