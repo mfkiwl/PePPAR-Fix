@@ -1607,10 +1607,8 @@ def _setup_servo(args, known_ecef, qerr_store):
         "pps_var": RunningVarianceWindow(),
         "pps_qerr_plus_var": RunningVarianceWindow(),
         "pps_qerr_minus_var": RunningVarianceWindow(),
-        # Litmus 2: TICC + qErr (matched to TICC epoch)
-        "ticc_var": RunningVarianceWindow(),
-        "ticc_qerr_plus_var": RunningVarianceWindow(),
-        "ticc_qerr_minus_var": RunningVarianceWindow(),
+        # chB-only qVIR is computed in the ticc_reader thread
+        # (not here) using per-timestamp variance, not diff variance.
     }
 
     # PPS event queue
@@ -1704,8 +1702,6 @@ def _setup_servo(args, known_ecef, qerr_store):
         # chB-only qVIR: pure correlation check, no DO in the picture.
         # Tracks chB interval deviations (PPS sawtooth) and checks
         # whether matched qerr removes that variance.
-        _chb_prev_ps = [None]  # mutable for closure
-        _chb_prev_qerr = [None]
         _chb_raw_var = RunningVarianceWindow(maxlen=64)
         _chb_corr_var = RunningVarianceWindow(maxlen=64)
         _chb_qvir_count = [0]
@@ -1756,41 +1752,25 @@ def _setup_servo(args, known_ecef, qerr_store):
                                             qerr_store.clear_pending()
                                 ticc_tracker.set_pending_ref_qerr(
                                     event.ref_sec, _qerr)
-                                # chB-only qVIR: corrected interval =
-                                # interval - Δqerr.  Pure F9T PPS + TICC,
-                                # no DO.  High qVIR = correlation correct.
-                                cur_ps = event.ref_ps
-                                prev_ps = _chb_prev_ps[0]
-                                prev_qerr = _chb_prev_qerr[0]
-                                _chb_prev_ps[0] = cur_ps
-                                _chb_prev_qerr[0] = _qerr
-                                if prev_ps is not None:
-                                    phase_diff_ns = (cur_ps - prev_ps) / 1000.0
-                                    _chb_raw_var.add(phase_diff_ns)
-                                    if _qerr is not None and prev_qerr is not None:
-                                        delta_qerr = _qerr - prev_qerr
-                                        # Unwrap tick boundary
-                                        if delta_qerr > 4.0: delta_qerr -= 8.0
-                                        elif delta_qerr < -4.0: delta_qerr += 8.0
-                                        _chb_corr_var.add(phase_diff_ns + delta_qerr)
+                                # chB-only qVIR: apply qerr to each chB
+                                # TIMESTAMP (not intervals).  Corrected
+                                # = chB_phase + qerr.  Detrended variance
+                                # of corrected should be much smaller than
+                                # raw (sawtooth removed, leaving TICC noise).
+                                # Pure F9T PPS + TICC, no DO.
+                                phase_ns = event.ref_ps / 1000.0
+                                _chb_raw_var.add(phase_ns)
+                                if _qerr is not None:
+                                    _chb_corr_var.add(phase_ns + _qerr)
                                     _chb_qvir_count[0] += 1
-                                    if _chb_qvir_count[0] <= 30:
-                                        log.info("chB match: phase=%.3f dqerr=%.3f "
-                                                 "sum=%.3f matched_off=%.4f qerr=%.3f",
-                                                 phase_diff_ns, delta_qerr,
-                                                 phase_diff_ns + delta_qerr,
-                                                 _matched_offset if _matched_offset else 0,
-                                                 _qerr if _qerr else 0)
                                     if _chb_qvir_count[0] % 100 == 0:
                                         rv = _chb_raw_var.detrended_variance()
                                         cv = _chb_corr_var.detrended_variance()
                                         if rv and cv and cv > 0:
                                             qvir = rv / cv
                                             log.info("chB-only qVIR: %.1f "
-                                                     "(raw_var=%.2f corr_var=%.2f ns² "
-                                                     "last_phase=%.2f last_dqerr=%.2f)",
-                                                     qvir, rv, cv,
-                                                     phase_diff_ns, delta_qerr)
+                                                     "(raw=%.2f corr=%.2f ns²)",
+                                                     qvir, rv, cv)
 
                             # In TICC-drive mode, chB (reference PPS) events
                             # replace EXTTS as the PPS source for correlation.
@@ -2303,13 +2283,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     if qerr_for_extts_pps_ns is not None:
         qerr_alignment["pps_qerr_plus_var"].add(rate_compensated + qerr_for_extts_pps_ns)
         qerr_alignment["pps_qerr_minus_var"].add(rate_compensated - qerr_for_extts_pps_ns)
-    # ── Litmus test 2: TICC + qErr ──
-    # Uses qerr_for_ticc_pps_ns matched to the TICC PPS edge (separate epoch).
-    if pps_err_ticc_ns is not None:
-        qerr_alignment["ticc_var"].add(pps_err_ticc_ns)
-        if qerr_for_ticc_pps_ns is not None:
-            qerr_alignment["ticc_qerr_plus_var"].add(pps_err_ticc_ns + qerr_for_ticc_pps_ns)
-            qerr_alignment["ticc_qerr_minus_var"].add(pps_err_ticc_ns - qerr_for_ticc_pps_ns)
+    # chB-only qVIR (the definitive correlation check) runs in the
+    # ticc_reader thread, not here.  See chB-only qVIR log messages.
     # Carrier phase tracker: auto-init and accumulate adjfine
     carrier_tracker = ctx.get('carrier_tracker')
     if carrier_tracker is not None and not getattr(args, 'no_carrier', False):
@@ -2372,21 +2347,6 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 n_epochs, qerr_plus_ratio, label)
 
     # Litmus 2: TICC + qErr (separate epoch matching)
-    ticc_var_ns2 = qerr_alignment["ticc_var"].diff_variance()
-    ticc_qerr_plus_var_ns2 = qerr_alignment["ticc_qerr_plus_var"].diff_variance()
-    ticc_qerr_ratio = None
-    if (ticc_var_ns2 is not None and ticc_qerr_plus_var_ns2 is not None
-            and ticc_qerr_plus_var_ns2 > 0.0):
-        ticc_qerr_ratio = ticc_var_ns2 / ticc_qerr_plus_var_ns2
-    if n_epochs % 10 == 0:
-        if ticc_qerr_ratio is not None and qerr_alignment["ticc_qerr_plus_var"].count() >= 8:
-            label = ("good" if ticc_qerr_ratio >= 1.5
-                     else "ok" if ticc_qerr_ratio >= 1.0
-                     else "BAD")
-            lvl = log.info if ticc_qerr_ratio >= 1.0 else log.warning
-            lvl("  [%s] TICC qVIR: Δvar(ticc)/Δvar(ticc+qErr) = %.2f (%s)",
-                n_epochs, ticc_qerr_ratio, label)
-
     if args.ticc_drive:
         if pps_err_ticc_ns is None:
             if skip_stats is not None:
