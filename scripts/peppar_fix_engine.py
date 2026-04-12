@@ -1763,6 +1763,13 @@ def _setup_servo(args, known_ecef, qerr_store):
                                         elif delta_qerr < -4.0: delta_qerr += 8.0
                                         _chb_corr_var.add(phase_diff_ns + delta_qerr)
                                     _chb_qvir_count[0] += 1
+                                    if _chb_qvir_count[0] <= 20:
+                                        log.info("chB match: phase=%.3f dqerr=%.3f "
+                                                 "sum=%.3f offset=%.3f qerr=%.3f",
+                                                 phase_diff_ns, delta_qerr,
+                                                 phase_diff_ns + delta_qerr,
+                                                 qerr_ticc_tracker.offset_s,
+                                                 _qerr if _qerr else 0)
                                     if _chb_qvir_count[0] % 100 == 0:
                                         rv = _chb_raw_var.detrended_variance()
                                         cv = _chb_corr_var.detrended_variance()
