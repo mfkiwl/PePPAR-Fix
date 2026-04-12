@@ -107,12 +107,16 @@ class QErrTimescaleTracker:
 
         Returns (qerr_ns, offset_s) or (None, None).
         """
-        # Find the closest TIM-TP to where we expect it
-        target_mono = chb_recv_mono - self.offset_s
+        # Find the closest TIM-TP to where we expect it.
+        # Wide tolerance (0.4s) during calibration to find the right
+        # neighborhood.  Tight tolerance (0.15s) after calibration to
+        # ensure we always pick the SAME TIM-TP, not the adjacent one
+        # (which is only 1s away).
+        tol = 0.4 if not self.calibrated else 0.15
         qerr_ns, match_offset_s = qerr_store.match_pps_mono(
             chb_recv_mono,
             expected_offset_s=self.offset_s,
-            tolerance_s=0.4)  # wide tolerance during calibration
+            tolerance_s=tol)
 
         if qerr_ns is None:
             return None, None
