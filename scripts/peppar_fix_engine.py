@@ -2341,7 +2341,31 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_ticc_pps_ns
             elif qerr_for_extts_pps_ns is not None:
                 pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_extts_pps_ns
-        sources = ticc_only_error_source(pps_err_ticc_qerr_ns, args.ticc_confidence_ns)
+        # ── EXTTS → TICC servo drive transition ──
+        # During pull-in (large phase error), drive from gnss_pps_extts
+        # (on the PHC timescale we discipline).  EXTTS has 8 ns resolution
+        # but that's fine when the error is hundreds of ns.
+        # Once converged (error < threshold), switch to gnss_pps_ticc
+        # (60 ps resolution, timescale-independent diff).
+        # See docs/stream-timescale-correlation.md for why this matters.
+        TICC_DRIVE_THRESHOLD_NS = getattr(args, 'ticc_drive_threshold_ns', 100.0)
+        use_extts = (abs(pps_err_extts_ns) > TICC_DRIVE_THRESHOLD_NS
+                     and qerr_for_extts_pps_ns is not None)
+        if use_extts:
+            pps_err_extts_qerr_ns = pps_err_extts_ns + qerr_for_extts_pps_ns
+            sources = ticc_only_error_source(pps_err_extts_qerr_ns,
+                                             args.ticc_confidence_ns)
+            if ctx.get('ticc_drive_source') != 'extts':
+                log.info("  Servo drive: EXTTS (|err|=%.0f ns > %.0f threshold)",
+                         abs(pps_err_extts_ns), TICC_DRIVE_THRESHOLD_NS)
+                ctx['ticc_drive_source'] = 'extts'
+        else:
+            sources = ticc_only_error_source(pps_err_ticc_qerr_ns,
+                                             args.ticc_confidence_ns)
+            if ctx.get('ticc_drive_source') != 'ticc':
+                log.info("  Servo drive: TICC (|err|=%.0f ns ≤ %.0f threshold)",
+                         abs(pps_err_extts_ns), TICC_DRIVE_THRESHOLD_NS)
+                ctx['ticc_drive_source'] = 'ticc'
         corr_age_for_inflation = None  # not applicable in TICC-drive mode
     else:
         # Feed PPP calibration: compare PPP-derived qerr against TIM-TP
