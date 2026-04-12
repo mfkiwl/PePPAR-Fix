@@ -1739,17 +1739,23 @@ def _setup_servo(args, known_ecef, qerr_store):
                             ticc_tracker.ingest(event)
 
                             # Match qerr to each gnss_pps (chB) edge.
-                            # Sequential FIFO: TIM-TP(N) arrives ~0.9s
-                            # before chB(N), so consume_next() gets
-                            # the right sample.  Wait until armed to
-                            # avoid consuming during the TICC boot
-                            # burst (multiple buffered lines at once).
+                            # Only use CLOCK_MONOTONIC matching when
+                            # queue_remains=False — the buffer was
+                            # empty after this read, so recv_mono is
+                            # maximally fresh and correlation is solid.
+                            # Queued events (queue_remains=True) have
+                            # stale recv_mono — don't try to correlate.
                             if event.channel == args.ticc_ref_channel:
-                                if not was_armed:
-                                    qerr_store.flush_fifo()
-                                    _qerr = None
-                                else:
-                                    _qerr = qerr_store.consume_next()
+                                _qerr = None
+                                if (was_armed and not event.queue_remains):
+                                    _qerr, _ = qerr_store.match_pps_mono(
+                                        event.recv_mono,
+                                        expected_offset_s=qerr_ticc_tracker.offset_s,
+                                        tolerance_s=0.15)
+                                    # Update the timescale offset estimate
+                                    # only from fresh (non-queued) matches
+                                    if _qerr is not None:
+                                        qerr_ticc_tracker._n += 1
                                 ticc_tracker.set_pending_ref_qerr(
                                     event.ref_sec, _qerr)
                                 # chB-only qVIR: corrected interval =
