@@ -75,6 +75,68 @@ from peppar_fix.receiver import get_driver
 log = logging.getLogger("peppar-fix")
 
 
+class QErrTimescaleTracker:
+    """Track CLOCK_MONOTONIC offset between TIM-TP and TICC chB streams.
+
+    TIM-TP for PPS epoch N arrives at mono_A.  TICC chB for the same
+    epoch arrives at mono_B.  The offset = mono_B - mono_A is nearly
+    constant (~0.95s on most hosts, depending on USB latency).
+
+    Rather than dynamically searching for the best TIM-TP match per
+    pulse (fragile — can grab the adjacent TIM-TP when the offset
+    drifts), this tracker:
+    1. Bootstraps the offset from the first few chB/TIM-TP pairs
+    2. Maintains it with an exponential moving average
+    3. Uses the tracked offset to index directly into the TIM-TP
+       stream for each chB event — deterministic, no search ambiguity
+
+    Since TIM-TP samples are ~1 second apart, the offset only needs
+    to be accurate within ±0.3s to unambiguously pick the right one.
+    """
+
+    def __init__(self, initial_offset_s=0.95, alpha=0.005):
+        self.offset_s = initial_offset_s
+        self.calibrated = False
+        self._alpha = alpha  # EMA weight (slow tracking)
+        self._n = 0
+        self._calibration_offsets = []
+
+    def match_and_update(self, chb_recv_mono, qerr_store):
+        """Find qerr for a chB event and update the offset estimate.
+
+        Returns (qerr_ns, offset_s) or (None, None).
+        """
+        # Find the closest TIM-TP to where we expect it
+        target_mono = chb_recv_mono - self.offset_s
+        qerr_ns, match_offset_s = qerr_store.match_pps_mono(
+            chb_recv_mono,
+            expected_offset_s=self.offset_s,
+            tolerance_s=0.4)  # wide tolerance during calibration
+
+        if qerr_ns is None:
+            return None, None
+
+        # The actual offset for this pair
+        actual_offset = match_offset_s
+
+        # During calibration: collect offsets, compute median
+        if not self.calibrated:
+            self._calibration_offsets.append(actual_offset)
+            self._n += 1
+            if self._n >= 10:
+                median = sorted(self._calibration_offsets)[len(self._calibration_offsets) // 2]
+                self.offset_s = median
+                self.calibrated = True
+        else:
+            # After calibration: update slowly via EMA, but only if
+            # the match is close to our estimate (< 0.2s off).
+            # Large deviations are likely wrong matches — ignore them.
+            if abs(actual_offset - self.offset_s) < 0.2:
+                self.offset_s += self._alpha * (actual_offset - self.offset_s)
+
+        return qerr_ns, actual_offset
+
+
 def _dt_rx_trend_predict(buf):
     """Linear regression on dt_rx buffer, predict at the latest epoch.
 
@@ -1630,6 +1692,8 @@ def _setup_servo(args, known_ecef, qerr_store):
             ])
             ticc_log_f.flush()
 
+        qerr_ticc_tracker = QErrTimescaleTracker()
+
         def ticc_reader():
             # When TICC-driven, the reference channel (chB) also generates
             # PpsEvent objects for the correlation gate — replacing EXTTS.
@@ -1654,17 +1718,19 @@ def _setup_servo(args, known_ecef, qerr_store):
                                 ])
                                 ticc_log_f.flush()
                             # Match qerr to each gnss_pps (chB) edge as it
-                            # arrives — deterministic, no race with latest().
-                            # The chB recv_mono is the CLOCK_MONOTONIC anchor.
-                            # TIM-TP arrives ~0.9s before the PPS it predicts,
-                            # and TICC reads ~50ms after the PPS fires, so
-                            # the expected offset is ~0.95s.
+                            # arrives, using the tracked timescale offset
+                            # between TIM-TP and TICC chB streams.
+                            # See docs/stream-timescale-correlation.md.
                             if event.channel == args.ticc_ref_channel:
-                                _qerr, _ = qerr_store.match_pps_mono(
-                                    event.recv_mono,
-                                    expected_offset_s=0.95, tolerance_s=0.2)
+                                _qerr, _offset = qerr_ticc_tracker.match_and_update(
+                                    event.recv_mono, qerr_store)
                                 ticc_tracker.set_pending_ref_qerr(
                                     event.ref_sec, _qerr)
+                                if qerr_ticc_tracker._n == 10:
+                                    log.info("qErr timescale tracker calibrated: "
+                                             "offset=%.3fs (%d samples)",
+                                             qerr_ticc_tracker.offset_s,
+                                             qerr_ticc_tracker._n)
 
                             ticc_tracker.ingest(event)
 
@@ -1753,6 +1819,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'stop_pps': stop_pps,
         'stop_ticc': stop_ticc,
         'ticc_tracker': ticc_tracker,
+        'qerr_ticc_tracker': qerr_ticc_tracker if args.ticc_port else None,
         'ticc_log_f': ticc_log_f,
         'extts_channel': extts_channel,
         'caps': caps,
