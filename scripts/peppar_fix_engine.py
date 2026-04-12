@@ -1698,6 +1698,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         # Tracks chB interval deviations (PPS sawtooth) and checks
         # whether matched qerr removes that variance.
         _chb_prev_ps = [None]  # mutable for closure
+        _chb_prev_qerr = [None]
         _chb_raw_var = RunningVarianceWindow(maxlen=64)
         _chb_corr_var = RunningVarianceWindow(maxlen=64)
         _chb_qvir_count = [0]
@@ -1740,15 +1741,23 @@ def _setup_servo(args, known_ecef, qerr_store):
                                              qerr_ticc_tracker.offset_s,
                                              qerr_ticc_tracker._n)
                                     qerr_ticc_tracker._logged = True
-                                # chB-only qVIR: interval deviation ± qerr
+                                # chB-only qVIR: corrected interval =
+                                # interval - Δqerr.  Pure F9T PPS + TICC,
+                                # no DO.  High qVIR = correlation correct.
                                 cur_ps = event.ref_ps
                                 prev_ps = _chb_prev_ps[0]
+                                prev_qerr = _chb_prev_qerr[0]
                                 _chb_prev_ps[0] = cur_ps
+                                _chb_prev_qerr[0] = _qerr
                                 if prev_ps is not None:
                                     phase_diff_ns = (cur_ps - prev_ps) / 1000.0
                                     _chb_raw_var.add(phase_diff_ns)
-                                    if _qerr is not None:
-                                        _chb_corr_var.add(phase_diff_ns + _qerr)
+                                    if _qerr is not None and prev_qerr is not None:
+                                        delta_qerr = _qerr - prev_qerr
+                                        # Unwrap tick boundary
+                                        if delta_qerr > 4.0: delta_qerr -= 8.0
+                                        elif delta_qerr < -4.0: delta_qerr += 8.0
+                                        _chb_corr_var.add(phase_diff_ns - delta_qerr)
                                     _chb_qvir_count[0] += 1
                                     if _chb_qvir_count[0] % 100 == 0:
                                         rv = _chb_raw_var.diff_variance()
