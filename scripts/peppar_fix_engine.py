@@ -1742,8 +1742,12 @@ def _setup_servo(args, known_ecef, qerr_store):
                                 # TIM-TP sample.  TIM-TP(N) arrives
                                 # ~0.9s before chB(N), so the FIFO
                                 # order is guaranteed.  Each TIM-TP
-                                # is consumed exactly once — no
-                                # duplicate or wrong-epoch matches.
+                                # is consumed exactly once.
+                                # On first chB, flush stale TIM-TP
+                                # from before the TICC started.
+                                if not hasattr(ticc_tracker, '_fifo_aligned'):
+                                    qerr_store.flush_fifo()
+                                    ticc_tracker._fifo_aligned = True
                                 _qerr = qerr_store.consume_next()
                                 ticc_tracker.set_pending_ref_qerr(
                                     event.ref_sec, _qerr)

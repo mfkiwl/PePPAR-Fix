@@ -253,6 +253,15 @@ class QErrStore:
                 return None
             return self._fifo.popleft()
 
+    def flush_fifo(self):
+        """Discard all pending FIFO entries.
+
+        Called when the TICC reader starts to discard stale TIM-TP
+        samples that arrived before the first chB event.
+        """
+        with self._lock:
+            self._fifo.clear()
+
     def get(self, max_age_s=2.0):
         """Return (qerr_ns, tow_ms) or (None, None) if stale/unavailable."""
         with self._lock:
