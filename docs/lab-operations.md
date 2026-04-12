@@ -274,6 +274,86 @@ wastes an overnight run.  The bootstrap's ADJ_SETOFFSET step only
 makes fine adjustments — it cannot fix a 500 ms offset because it
 assumes the PHC is already within a few milliseconds of GPS time.
 
+## ptpmon bringup stumbles (2026-04-11)
+
+Fresh CM4 Lite (906 MB RAM, kernel 6.12.62+rpt-rpi-v8) with i226,
+TICC #2, and F9T EVK.  Brought up from zero to running peppar-fix
+freerun + carrier-phase PPP.
+
+### 10. gt host key unknown on fresh host
+
+New host had never talked to gt.  `git clone bob@gt:git/PePPAR-Fix.git`
+failed with "Host key verification failed."
+
+**Fix**: `ssh-keyscan gt >> ~/.ssh/known_hosts` before cloning.
+
+**Add to first-time setup procedure**: step 0 is accept gt's host key.
+
+### 11. No SSH keypair for gt access
+
+Fresh Pi OS image has no `~/.ssh/id_*` keypair.  After accepting the
+host key, git clone still failed with "Permission denied (publickey)."
+
+**Fix**: `ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519` on the new
+host, then authorize the public key on gt.  Used TimeHat as a hop to
+reach gt since the dev workstation also lacked gt access.
+
+**Add to first-time setup procedure**: generate key, authorize on gt.
+
+### 12. F9T EVK has no udev symlink — ttyACM assignment is fragile
+
+The F9T EVK has no USB serial number (per CLAUDE.md), so
+99-timelab.rules cannot create a stable symlink.  Config must use
+raw `/dev/ttyACM1`.  If the TICC and F9T are unplugged and replugged
+in different order, ttyACM0/1 assignments swap silently.
+
+**Workaround**: use `/dev/serial/by-id/usb-u-blox_AG_...-if00` path
+as the ocxo-i226.toml config does.  This survives enumeration order
+changes.  (Not done on ptpmon yet — using raw ttyACM1 for now.)
+
+### 13. Wrapper freerun + retry loop surprises
+
+`peppar-fix --duration 60` first ran a 30-minute freerun
+characterization, then restarted the engine for the 60-second
+discipline run, then kept restarting on exit.  Not a bug — the
+wrapper's design — but surprising when you expect 60 seconds total
+and SSH sessions accumulate zombie process trees.
+
+**Observation only** — matches stumble #9 in madhat-bringup doc
+(wrapper override of `--duration`).
+
+### 14. ptpmon PHC is /dev/ptp1, not /dev/ptp0
+
+CM4 Lite has a Broadcom PHC at `/dev/ptp0` (bcm_phy_ptp).  The i226
+is at `/dev/ptp1`.  The ptpmon.toml config correctly has `ptp_dev =
+"/dev/ptp1"`, but `phc_ctl /dev/ptp0 cmp` in the pre-flight
+checklist checks the wrong device.  The pre-flight check must use
+the host config's `ptp_dev`, not hardcoded `/dev/ptp0`.
+
+### 15. No igc DKMS on ptpmon — PEROUT 500ms after step
+
+Stock igc on kernel 6.12.62+rpt-rpi-v8.  Our code's period-nudge
+workaround (`999_999_999 ns`) avoids frequency mode, but the
+PEROUT still lands at 500ms after the bootstrap's PHC step.  The
+PEROUT phase verification in `_enable_pps_out()` didn't catch it
+(EXTTS read may have timed out or returned the wrong pin's event).
+
+**Fix**: Install igc-6.12.0-ppsfix.1 DKMS (from TimeHAT repo) and
+rebuild for the v8 kernel.  Also investigate why the PEROUT phase
+verification silently failed.
+
+### 16. DO frequency 3790 ppb on ptpmon
+
+First-boot i226 crystal shows 3790 ppb offset — 30x higher than
+TimeHat/MadHat (~125 ppb).  Possibly the crystal hasn't thermally
+stabilized, or the PHC was never properly set before the PPS
+frequency measurement.  The bootstrap kept re-stepping and failed
+to converge.
+
+**Fix**: Set PHC from system time (`phc_ctl /dev/ptp1 set`) before
+running peppar-fix.  Let the crystal stabilize for 30+ minutes.
+If the frequency remains >1000 ppb, the crystal may be defective.
+
 ## Future work
 
 ### Near-term (reduces stumbling)
