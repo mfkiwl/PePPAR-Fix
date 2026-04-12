@@ -168,6 +168,11 @@ class QErrStore:
         self._samples = deque(maxlen=maxlen)
         self._log_writer = log_writer
         self._log_file = log_file  # so .flush() works after every write
+        # Sequential FIFO for TICC chB consumption.  Each TIM-TP is
+        # consumed by exactly one chB event via consume_next().
+        # TIM-TP(N) arrives ~0.9s before chB(N), so the FIFO ordering
+        # is natural: TIM-TP enqueues first, chB dequeues second.
+        self._fifo = deque(maxlen=8)
 
     @staticmethod
     def _normalize_tow_ms(tow_ms):
@@ -234,6 +239,19 @@ class QErrStore:
                 "tow_ms": norm_tow,
                 "host_time": host_time,
             })
+            self._fifo.append(qerr_ns)
+
+    def consume_next(self):
+        """Pop the oldest unconsumed qerr from the FIFO.
+
+        For sequential 1:1 pairing with TICC chB events.  Each TIM-TP
+        sample is consumed exactly once.  Returns qerr_ns or None if
+        the FIFO is empty (TIM-TP hasn't arrived yet for this epoch).
+        """
+        with self._lock:
+            if not self._fifo:
+                return None
+            return self._fifo.popleft()
 
     def get(self, max_age_s=2.0):
         """Return (qerr_ns, tow_ms) or (None, None) if stale/unavailable."""

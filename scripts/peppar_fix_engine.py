@@ -1738,16 +1738,15 @@ def _setup_servo(args, known_ecef, qerr_store):
                             # between TIM-TP and TICC chB streams.
                             # See docs/stream-timescale-correlation.md.
                             if event.channel == args.ticc_ref_channel:
-                                _qerr, _offset = qerr_ticc_tracker.match_and_update(
-                                    event.recv_mono, qerr_store)
+                                # Sequential FIFO: consume the next
+                                # TIM-TP sample.  TIM-TP(N) arrives
+                                # ~0.9s before chB(N), so the FIFO
+                                # order is guaranteed.  Each TIM-TP
+                                # is consumed exactly once — no
+                                # duplicate or wrong-epoch matches.
+                                _qerr = qerr_store.consume_next()
                                 ticc_tracker.set_pending_ref_qerr(
                                     event.ref_sec, _qerr)
-                                if qerr_ticc_tracker._n == 10 and not qerr_ticc_tracker._logged:
-                                    log.info("qErr timescale tracker calibrated: "
-                                             "offset=%.3fs (%d samples)",
-                                             qerr_ticc_tracker.offset_s,
-                                             qerr_ticc_tracker._n)
-                                    qerr_ticc_tracker._logged = True
                                 # chB-only qVIR: corrected interval =
                                 # interval - Δqerr.  Pure F9T PPS + TICC,
                                 # no DO.  High qVIR = correlation correct.
