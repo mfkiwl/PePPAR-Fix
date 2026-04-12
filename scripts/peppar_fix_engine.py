@@ -1607,7 +1607,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         "pps_var": RunningVarianceWindow(),
         "pps_qerr_plus_var": RunningVarianceWindow(),
         "pps_qerr_minus_var": RunningVarianceWindow(),
-        # chB-only qVIR is computed in the ticc_reader thread
+        # TICC qVIR is computed in the ticc_reader thread
         # (not here) using per-timestamp variance, not diff variance.
     }
 
@@ -1699,7 +1699,7 @@ def _setup_servo(args, known_ecef, qerr_store):
             ticc_log_f.flush()
 
         qerr_ticc_tracker = QErrTimescaleTracker()
-        # chB-only qVIR: pure correlation check, no DO in the picture.
+        # TICC qVIR: pure correlation check, no DO in the picture.
         # Tracks chB interval deviations (PPS sawtooth) and checks
         # whether matched qerr removes that variance.
         _chb_raw_var = RunningVarianceWindow(maxlen=64)
@@ -1752,7 +1752,7 @@ def _setup_servo(args, known_ecef, qerr_store):
                                             qerr_store.clear_pending()
                                 ticc_tracker.set_pending_ref_qerr(
                                     event.ref_sec, _qerr)
-                                # chB-only qVIR: apply qerr to each chB
+                                # TICC qVIR: apply qerr to each chB
                                 # TIMESTAMP (not intervals).  Corrected
                                 # = chB_phase + qerr.  Detrended variance
                                 # of corrected should be much smaller than
@@ -1768,7 +1768,7 @@ def _setup_servo(args, known_ecef, qerr_store):
                                         cv = _chb_corr_var.detrended_variance()
                                         if rv and cv and cv > 0:
                                             qvir = rv / cv
-                                            log.info("chB-only qVIR: %.1f "
+                                            log.info("TICC qVIR: %.1f "
                                                      "(raw=%.2f corr=%.2f ns²)",
                                                      qvir, rv, cv)
 
@@ -2283,8 +2283,8 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     if qerr_for_extts_pps_ns is not None:
         qerr_alignment["pps_qerr_plus_var"].add(rate_compensated + qerr_for_extts_pps_ns)
         qerr_alignment["pps_qerr_minus_var"].add(rate_compensated - qerr_for_extts_pps_ns)
-    # chB-only qVIR (the definitive correlation check) runs in the
-    # ticc_reader thread, not here.  See chB-only qVIR log messages.
+    # TICC qVIR (the definitive correlation check) runs in the
+    # ticc_reader thread, not here.  See TICC qVIR log messages.
     # Carrier phase tracker: auto-init and accumulate adjfine
     carrier_tracker = ctx.get('carrier_tracker')
     if carrier_tracker is not None and not getattr(args, 'no_carrier', False):
