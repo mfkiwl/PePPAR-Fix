@@ -1748,14 +1748,11 @@ def _setup_servo(args, known_ecef, qerr_store):
                             if event.channel == args.ticc_ref_channel:
                                 _qerr = None
                                 if (was_armed and not event.queue_remains):
-                                    _qerr, _matched_offset = qerr_store.match_pps_mono(
-                                        event.recv_mono,
-                                        expected_offset_s=qerr_ticc_tracker.offset_s,
-                                        tolerance_s=0.15)
-                                    # Update the timescale offset estimate
-                                    # only from fresh (non-queued) matches
-                                    if _qerr is not None:
-                                        qerr_ticc_tracker._n += 1
+                                    # Use FIFO consume — each TIM-TP
+                                    # consumed exactly once.  Fresh
+                                    # events only (queue_remains=False)
+                                    # ensures no bursts break the 1:1.
+                                    _qerr = qerr_store.consume_next()
                                 ticc_tracker.set_pending_ref_qerr(
                                     event.ref_sec, _qerr)
                                 # chB-only qVIR: corrected interval =
