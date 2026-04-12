@@ -1757,7 +1757,7 @@ def _setup_servo(args, known_ecef, qerr_store):
                                         # Unwrap tick boundary
                                         if delta_qerr > 4.0: delta_qerr -= 8.0
                                         elif delta_qerr < -4.0: delta_qerr += 8.0
-                                        _chb_corr_var.add(phase_diff_ns - delta_qerr)
+                                        _chb_corr_var.add(phase_diff_ns + delta_qerr)
                                     _chb_qvir_count[0] += 1
                                     if _chb_qvir_count[0] % 100 == 0:
                                         rv = _chb_raw_var.detrended_variance()
