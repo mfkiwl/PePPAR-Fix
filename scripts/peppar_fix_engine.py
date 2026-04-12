@@ -1735,10 +1735,8 @@ def _setup_servo(args, known_ecef, qerr_store):
                             ticc_tracker.ingest(event)
 
                             # Match qerr to chB by TIM-TP-initiated
-                            # windowing.  When a fresh TIM-TP arrives,
-                            # it opens a window [+800ms, +1100ms] on
-                            # CLOCK_MONOTONIC.  The next fresh chB
-                            # that lands in the window is the match.
+                            # windowing.  See docs/qerr-correlation.md
+                            # for the full design and rationale.
                             # See docs/stream-timescale-correlation.md.
                             if event.channel == args.ticc_ref_channel:
                                 _qerr = None
