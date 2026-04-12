@@ -1733,23 +1733,19 @@ def _setup_servo(args, known_ecef, qerr_store):
                                     event.channel,
                                 ])
                                 ticc_log_f.flush()
-                            # Match qerr to each gnss_pps (chB) edge as it
-                            # arrives, using the tracked timescale offset
-                            # between TIM-TP and TICC chB streams.
-                            # See docs/stream-timescale-correlation.md.
+                            # Ingest first so _armed is set after boot
+                            # discard period completes.
+                            was_armed = ticc_tracker._armed
+                            ticc_tracker.ingest(event)
+
+                            # Match qerr to each gnss_pps (chB) edge.
+                            # Sequential FIFO: TIM-TP(N) arrives ~0.9s
+                            # before chB(N), so consume_next() gets
+                            # the right sample.  Wait until armed to
+                            # avoid consuming during the TICC boot
+                            # burst (multiple buffered lines at once).
                             if event.channel == args.ticc_ref_channel:
-                                # Sequential FIFO: consume the next
-                                # TIM-TP sample.  TIM-TP(N) arrives
-                                # ~0.9s before chB(N), so the FIFO
-                                # order is guaranteed.  Each TIM-TP
-                                # is consumed exactly once.
-                                # Wait for the TICC to settle (the
-                                # boot sequence can dump multiple
-                                # buffered lines in a burst, breaking
-                                # the 1:1 FIFO alignment).  The armed
-                                # flag is set by TiccPairTracker after
-                                # the boot discard period.
-                                if not ticc_tracker._armed:
+                                if not was_armed:
                                     qerr_store.flush_fifo()
                                     _qerr = None
                                 else:
@@ -1791,8 +1787,6 @@ def _setup_servo(args, known_ecef, qerr_store):
                                                      "last_phase=%.2f last_dqerr=%.2f)",
                                                      qvir, rv, cv,
                                                      phase_diff_ns, delta_qerr)
-
-                            ticc_tracker.ingest(event)
 
                             # In TICC-drive mode, chB (reference PPS) events
                             # replace EXTTS as the PPS source for correlation.
