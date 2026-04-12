@@ -1748,7 +1748,7 @@ def _setup_servo(args, known_ecef, qerr_store):
                             if event.channel == args.ticc_ref_channel:
                                 _qerr = None
                                 if (was_armed and not event.queue_remains):
-                                    _qerr, _ = qerr_store.match_pps_mono(
+                                    _qerr, _matched_offset = qerr_store.match_pps_mono(
                                         event.recv_mono,
                                         expected_offset_s=qerr_ticc_tracker.offset_s,
                                         tolerance_s=0.15)
@@ -1776,12 +1776,12 @@ def _setup_servo(args, known_ecef, qerr_store):
                                         elif delta_qerr < -4.0: delta_qerr += 8.0
                                         _chb_corr_var.add(phase_diff_ns + delta_qerr)
                                     _chb_qvir_count[0] += 1
-                                    if _chb_qvir_count[0] <= 20:
+                                    if _chb_qvir_count[0] <= 30:
                                         log.info("chB match: phase=%.3f dqerr=%.3f "
-                                                 "sum=%.3f offset=%.3f qerr=%.3f",
+                                                 "sum=%.3f matched_off=%.4f qerr=%.3f",
                                                  phase_diff_ns, delta_qerr,
                                                  phase_diff_ns + delta_qerr,
-                                                 qerr_ticc_tracker.offset_s,
+                                                 _matched_offset if _matched_offset else 0,
                                                  _qerr if _qerr else 0)
                                     if _chb_qvir_count[0] % 100 == 0:
                                         rv = _chb_raw_var.detrended_variance()
