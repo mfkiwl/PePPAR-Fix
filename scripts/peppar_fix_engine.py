@@ -1760,8 +1760,8 @@ def _setup_servo(args, known_ecef, qerr_store):
                                         _chb_corr_var.add(phase_diff_ns - delta_qerr)
                                     _chb_qvir_count[0] += 1
                                     if _chb_qvir_count[0] % 100 == 0:
-                                        rv = _chb_raw_var.diff_variance()
-                                        cv = _chb_corr_var.diff_variance()
+                                        rv = _chb_raw_var.detrended_variance()
+                                        cv = _chb_corr_var.detrended_variance()
                                         if rv and cv and cv > 0:
                                             qvir = rv / cv
                                             log.info("chB-only qVIR: %.1f "
