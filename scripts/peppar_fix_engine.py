@@ -1765,8 +1765,10 @@ def _setup_servo(args, known_ecef, qerr_store):
                                         if rv and cv and cv > 0:
                                             qvir = rv / cv
                                             log.info("chB-only qVIR: %.1f "
-                                                     "(raw=%.2f corr=%.2f ns²)",
-                                                     qvir, rv, cv)
+                                                     "(raw_var=%.2f corr_var=%.2f ns² "
+                                                     "last_phase=%.2f last_dqerr=%.2f)",
+                                                     qvir, rv, cv,
+                                                     phase_diff_ns, delta_qerr)
 
                             ticc_tracker.ingest(event)
 
