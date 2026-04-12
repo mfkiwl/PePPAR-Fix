@@ -1743,12 +1743,17 @@ def _setup_servo(args, known_ecef, qerr_store):
                                 # ~0.9s before chB(N), so the FIFO
                                 # order is guaranteed.  Each TIM-TP
                                 # is consumed exactly once.
-                                # On first chB, flush stale TIM-TP
-                                # from before the TICC started.
-                                if not hasattr(ticc_tracker, '_fifo_aligned'):
+                                # Wait for the TICC to settle (the
+                                # boot sequence can dump multiple
+                                # buffered lines in a burst, breaking
+                                # the 1:1 FIFO alignment).  The armed
+                                # flag is set by TiccPairTracker after
+                                # the boot discard period.
+                                if not ticc_tracker._armed:
                                     qerr_store.flush_fifo()
-                                    ticc_tracker._fifo_aligned = True
-                                _qerr = qerr_store.consume_next()
+                                    _qerr = None
+                                else:
+                                    _qerr = qerr_store.consume_next()
                                 ticc_tracker.set_pending_ref_qerr(
                                     event.ref_sec, _qerr)
                                 # chB-only qVIR: corrected interval =
