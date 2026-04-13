@@ -31,7 +31,10 @@ def load_servo_csv(path):
         rows = list(reader)
     for key in ['dt_rx_ns', 'dt_rx_sigma_ns', 'qerr_unwrapped_ns',
                 'qerr_freq_ns_s', 'qerr_dt_rx_rate_discrep_ns_s', 'qerr_ns',
-                'synth_phase_ns']:
+                'synth_phase_ns',
+                # New names (post-rename)
+                'rx_tcxo_unwrapped_ns', 'rx_tcxo_freq_ns_s',
+                'rx_tcxo_dt_rx_rate_discrep_ns_s', 'rx_tcxo_phase_ns']:
         vals = []
         for r in rows:
             v = r.get(key, '')
@@ -114,7 +117,7 @@ def main():
                       row=1, col=1)
 
     # qerr unwrapped — on secondary y-axis (different scale)
-    qerr_uw = data['qerr_unwrapped_ns']
+    qerr_uw = data.get('rx_tcxo_unwrapped_ns') or data['qerr_unwrapped_ns']
     qerr_valid = [(i, v) for i, v in enumerate(qerr_uw) if v is not None]
     if qerr_valid:
         idx, vals = zip(*qerr_valid)
@@ -136,7 +139,7 @@ def main():
                       row=2, col=1)
 
     # qerr frequency
-    qerr_freq = data['qerr_freq_ns_s']
+    qerr_freq = data.get('rx_tcxo_freq_ns_s') or data['qerr_freq_ns_s']
     qf_valid = [(i, v) for i, v in enumerate(qerr_freq) if v is not None]
     if qf_valid:
         idx, vals = zip(*qf_valid)
@@ -149,7 +152,7 @@ def main():
     dt_rx_idx, dt_rx_resid = detrend(dt_rx)
     qerr_idx, qerr_resid = detrend(qerr_uw)
 
-    synth = data['synth_phase_ns']
+    synth = data.get('rx_tcxo_phase_ns') or data['synth_phase_ns']
     synth_idx, synth_resid = detrend(synth)
 
     if dt_rx_resid is not None:

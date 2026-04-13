@@ -145,21 +145,22 @@ class QErrTimescaleTracker:
         return qerr_ns, actual_offset
 
 
-class QErrBeatNote:
-    """Unwrap qErr sequence to extract the rx TCXO beat note against GPS.
+class RxTcxoTracker:
+    """Track the rx TCXO's phase and frequency relative to GPS.
 
-    Each TIM-TP qErr sample reports where the PPS edge landed within the
-    8 ns tick grid (~178 ps precision, range [-4, +4] ns).  As the rx TCXO
-    drifts relative to GPS, qErr sweeps through this range and wraps at
-    the ±4 ns boundary.
+    Fuses two independent measurements of the same oscillator:
+    - **qErr** (TIM-TP): sub-tick position to ~178 ps, but ambiguous
+      by 8 ns (one 125 MHz tick).
+    - **dt_rx** (PPP filter): full phase, but ~4 ns noise per epoch.
 
-    This class unwraps the phase sequence to produce a continuous
-    accumulated phase (the rx TCXO's phase relative to GPS), and
-    estimates the rx TCXO frequency offset from the slope.
+    The tracker unwraps qErr for smooth inter-epoch phase tracking
+    and uses dt_rx to anchor the integer tick count via a complementary
+    filter (low-pass dt_rx + high-pass qErr unwrapped).
 
-    The unwrapped phase should track PPP dt_rx (modulo a constant
-    offset).  Divergence indicates a problem in one of the two
-    measurement paths.
+    Outputs:
+    - ``phase_ns()``: synthesized phase — qErr precision, dt_rx ambiguity
+    - ``freq_ns_per_s()``: frequency offset from 30-sample sliding window
+    - ``cross_validate_dt_rx()``: rate comparison to detect cycle slips
     """
 
     TICK_NS = 8.0  # 125 MHz = 8 ns period
@@ -182,7 +183,7 @@ class QErrBeatNote:
         # Low-freq from dt_rx (full phase), high-freq from qErr (precise)
         self._synth_dt_rx_buf = deque(maxlen=10)
         self._synth_qerr_buf = deque(maxlen=10)
-        self._synth_phase_ns = None
+        self._rx_tcxo_phase = None
 
     def update(self, qerr_ns):
         """Feed one qErr sample (nanoseconds).  Returns unwrapped phase in ns."""
@@ -207,7 +208,7 @@ class QErrBeatNote:
         self._n += 1
         return self._accumulated_ns
 
-    def frequency_offset_ns_per_s(self):
+    def freq_ns_per_s(self):
         """Estimate rx TCXO frequency offset in ns/s from recent window.
 
         Returns (freq_ns_per_s, n_samples) or (None, 0) if insufficient data.
@@ -255,7 +256,7 @@ class QErrBeatNote:
         dt_rx_rate = dt_rx_ns - self._prev_dt_rx  # ns/s at 1 Hz
         self._prev_dt_rx = dt_rx_ns
 
-        qerr_freq, n = self.frequency_offset_ns_per_s()
+        qerr_freq, n = self.freq_ns_per_s()
         if qerr_freq is None:
             return None, False
 
@@ -272,7 +273,7 @@ class QErrBeatNote:
         self._dt_rx_calibrated = True
         return discrepancy, True
 
-    def synthesize_phase(self, dt_rx_ns, qerr_ns):
+    def phase_ns(self, dt_rx_ns, qerr_ns):
         """Combine dt_rx (full phase, noisy) with qErr (precise, ambiguous).
 
         Complementary filter: low-frequency content from dt_rx (smoothed
@@ -285,7 +286,7 @@ class QErrBeatNote:
         At tau>30s it converges to dt_rx's curve (no tick ambiguity).
         """
         if dt_rx_ns is None or qerr_ns is None:
-            return self._synth_phase_ns
+            return self._rx_tcxo_phase
 
         qerr_uw = self._accumulated_ns  # current unwrapped qErr phase
 
@@ -294,17 +295,17 @@ class QErrBeatNote:
 
         n = len(self._synth_dt_rx_buf)
         if n < 3:
-            return self._synth_phase_ns
+            return self._rx_tcxo_phase
 
         dt_rx_smooth = sum(self._synth_dt_rx_buf) / n
         qerr_uw_smooth = sum(self._synth_qerr_buf) / n
 
-        self._synth_phase_ns = dt_rx_smooth + (qerr_uw - qerr_uw_smooth)
-        return self._synth_phase_ns
+        self._rx_tcxo_phase = dt_rx_smooth + (qerr_uw - qerr_uw_smooth)
+        return self._rx_tcxo_phase
 
     @property
     def synth_phase_ns(self):
-        return self._synth_phase_ns
+        return self._rx_tcxo_phase
 
     @property
     def n_samples(self):
@@ -2017,8 +2018,8 @@ def _setup_servo(args, known_ecef, qerr_store):
             'tracking_mode', 'time_to_zero_s',
             'isb_gal_ns', 'isb_bds_ns',
             'phc_gettime_ns',
-            'qerr_unwrapped_ns', 'qerr_freq_ns_s', 'qerr_dt_rx_rate_discrep_ns_s',
-            'synth_phase_ns',
+            'rx_tcxo_unwrapped_ns', 'rx_tcxo_freq_ns_s', 'rx_tcxo_dt_rx_rate_discrep_ns_s',
+            'rx_tcxo_phase_ns',
         ])
 
     return {
@@ -2053,7 +2054,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'compute_error_sources': compute_error_sources,
         'ticc_only_error_source': ticc_only_error_source,
         'ppp_cal': PPPCalibration(tick_ns=8.0, min_samples=10),
-        'qerr_beat_note': QErrBeatNote(freq_window=30),
+        'rx_tcxo': RxTcxoTracker(freq_window=30),
         'dt_rx_buffer': deque(maxlen=30),
         'carrier_tracker': _init_carrier_tracker(args),
         'tracking_large_error_count': 0,
@@ -2463,36 +2464,36 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             qerr_for_extts_pps_ns,
             f"{qerr_for_ticc_pps_ns:+.1f}ns" if qerr_for_ticc_pps_ns is not None else "None",
         )
-    # ── qErr beat note: unwrap phase and cross-validate against dt_rx ──
-    qerr_beat = ctx['qerr_beat_note']
-    _qerr_dt_rx_discrep = None
-    _qerr_freq_ns_s = None
-    _synth_phase_ns = None
+    # ── rx_tcxo: unwrap phase and cross-validate against dt_rx ──
+    rx_tcxo = ctx['rx_tcxo']
+    _rx_tcxo_discrep = None
+    _rx_tcxo_freq = None
+    _rx_tcxo_phase = None
     # Prefer TICC-matched qErr (more precise epoch), fall back to EXTTS
-    _beat_qerr = qerr_for_ticc_pps_ns if qerr_for_ticc_pps_ns is not None else qerr_for_extts_pps_ns
-    if _beat_qerr is not None:
-        unwrapped_ns = qerr_beat.update(_beat_qerr)
-        _qerr_freq_ns_s, freq_n = qerr_beat.frequency_offset_ns_per_s()
+    _qerr_for_rx_tcxo = qerr_for_ticc_pps_ns if qerr_for_ticc_pps_ns is not None else qerr_for_extts_pps_ns
+    if _qerr_for_rx_tcxo is not None:
+        unwrapped_ns = rx_tcxo.update(_qerr_for_rx_tcxo)
+        _rx_tcxo_freq, freq_n = rx_tcxo.freq_ns_per_s()
         # Synthesize phase: dt_rx resolves tick, qErr gives sub-tick
         if dt_rx_ns is not None and dt_rx_sigma is not None and dt_rx_sigma < 2.0:
-            _synth_phase_ns = qerr_beat.synthesize_phase(dt_rx_ns, _beat_qerr)
-            discrep, cal = qerr_beat.cross_validate_dt_rx(dt_rx_ns)
+            _rx_tcxo_phase = rx_tcxo.phase_ns(dt_rx_ns, _qerr_for_rx_tcxo)
+            discrep, cal = rx_tcxo.cross_validate_dt_rx(dt_rx_ns)
             if cal:
-                _qerr_dt_rx_discrep = discrep
+                _rx_tcxo_discrep = discrep
             if n_epochs % 30 == 0:
-                synth_str = f"synth={_synth_phase_ns:.1f}ns " if _synth_phase_ns is not None else ""
+                synth_str = f"synth={_rx_tcxo_phase:.1f}ns " if _rx_tcxo_phase is not None else ""
                 if cal and discrep is not None:
-                    log.info("  [%d] qErr beat note: unwrapped=%.1f ns, "
+                    log.info("  [%d] rx_tcxo: unwrapped=%.1f ns, "
                              "%sfreq=%.3f ns/s (%d samples), "
                              "dt_rx rate discrepancy=%+.2f ns/s",
                              n_epochs, unwrapped_ns, synth_str,
-                             _qerr_freq_ns_s if _qerr_freq_ns_s is not None else 0.0,
+                             _rx_tcxo_freq if _rx_tcxo_freq is not None else 0.0,
                              freq_n, discrep)
                 elif not cal:
-                    log.info("  [%d] qErr beat note: unwrapped=%.1f ns, "
+                    log.info("  [%d] rx_tcxo: unwrapped=%.1f ns, "
                              "%sfreq=%.3f ns/s (%d samples), calibrating",
                              n_epochs, unwrapped_ns, synth_str,
-                             _qerr_freq_ns_s if _qerr_freq_ns_s is not None else 0.0,
+                             _rx_tcxo_freq if _rx_tcxo_freq is not None else 0.0,
                              freq_n)
 
     # ── Litmus test 1: EXTTS PPS + qErr ──
@@ -2936,10 +2937,10 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns,
                ctx.get('tracking_mode'), mode_time_to_zero_s,
                phc_gettime_ns,
-               qerr_unwrapped_ns=qerr_beat.accumulated_phase_ns() if qerr_beat.n_samples > 0 else None,
-               qerr_freq_ns_s=_qerr_freq_ns_s,
-               qerr_dt_rx_discrep_ns=_qerr_dt_rx_discrep,
-               synth_phase_ns=_synth_phase_ns)
+               rx_tcxo_unwrapped_ns=rx_tcxo.accumulated_phase_ns() if rx_tcxo.n_samples > 0 else None,
+               rx_tcxo_freq_ns_s=_rx_tcxo_freq,
+               rx_tcxo_discrep_ns_s=_rx_tcxo_discrep,
+               rx_tcxo_phase_ns=_rx_tcxo_phase)
     return "logged"
 
 
@@ -2955,8 +2956,8 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
                adjfine_ppb, phase, n_used, gain_scale, scheduler,
                isb_gal_ns, isb_bds_ns, tracking_mode, time_to_zero_s,
                phc_gettime_ns=None,
-               qerr_unwrapped_ns=None, qerr_freq_ns_s=None,
-               qerr_dt_rx_discrep_ns=None, synth_phase_ns=None):
+               rx_tcxo_unwrapped_ns=None, rx_tcxo_freq_ns_s=None,
+               rx_tcxo_discrep_ns_s=None, rx_tcxo_phase_ns=None):
     """Write one servo log row."""
     if log_w is None:
         return
@@ -3000,10 +3001,10 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
         f'{time_to_zero_s:.3f}' if time_to_zero_s is not None else '',
         f'{isb_gal_ns:.3f}', f'{isb_bds_ns:.3f}',
         str(phc_gettime_ns) if phc_gettime_ns is not None else '',
-        f'{qerr_unwrapped_ns:.3f}' if qerr_unwrapped_ns is not None else '',
-        f'{qerr_freq_ns_s:.3f}' if qerr_freq_ns_s is not None else '',
-        f'{qerr_dt_rx_discrep_ns:.1f}' if qerr_dt_rx_discrep_ns is not None else '',
-        f'{synth_phase_ns:.3f}' if synth_phase_ns is not None else '',
+        f'{rx_tcxo_unwrapped_ns:.3f}' if rx_tcxo_unwrapped_ns is not None else '',
+        f'{rx_tcxo_freq_ns_s:.3f}' if rx_tcxo_freq_ns_s is not None else '',
+        f'{rx_tcxo_discrep_ns_s:.1f}' if rx_tcxo_discrep_ns_s is not None else '',
+        f'{rx_tcxo_phase_ns:.3f}' if rx_tcxo_phase_ns is not None else '',
     ])
     if log_f is not None:
         log_f.flush()
