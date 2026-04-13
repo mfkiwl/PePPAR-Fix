@@ -96,6 +96,8 @@ class NtripStream:
         self.tls = tls if tls is not None else (port == 443)
         self._sock = None
         self._buffer = bytearray()
+        self._chunked = False
+        self._chunk_buf = bytearray()
         self._connected = False
         self._reconnect_count = 0
         self._bytes_received = 0
@@ -120,9 +122,12 @@ class NtripStream:
         log.info(f"Connecting to {self.caster}:{self.port}/{self.mountpoint}"
                  f"{' (TLS)' if self.tls else ''}")
 
-        # Build NTRIP request (HTTP/1.0 to avoid chunked transfer encoding)
+        # Build NTRIP request.  Use HTTP/1.1 — some casters (notably
+        # products.igs-ip.net) don't stream data with HTTP/1.0.  We
+        # handle chunked transfer encoding in _recv() if the server
+        # uses it.
         request = (
-            f"GET /{self.mountpoint} HTTP/1.0\r\n"
+            f"GET /{self.mountpoint} HTTP/1.1\r\n"
             f"Host: {self.caster}:{self.port}\r\n"
             f"Ntrip-Version: Ntrip/2.0\r\n"
             f"User-Agent: NTRIP PePPAR-Fix/0.5\r\n"
@@ -167,10 +172,23 @@ class NtripStream:
                     break
             raise ConnectionError(f"NTRIP error: {status_line}")
 
+        # Detect chunked transfer encoding
+        self._chunked = False
+        self._chunk_buf = bytearray()
+        for line in header_str.split("\r\n")[1:]:
+            if line.lower().startswith("transfer-encoding:"):
+                if "chunked" in line.lower():
+                    self._chunked = True
+                    log.info(f"  Transfer-Encoding: chunked — decoding chunks")
+                break
+
         # Any data after the header boundary goes into our buffer
         remainder = header.split(b"\r\n\r\n", 1)[1]
         if remainder:
-            self._buffer.extend(remainder)
+            if self._chunked:
+                self._dechunk(remainder)
+            else:
+                self._buffer.extend(remainder)
 
         self._connected = True
         self._connect_time = datetime.now(timezone.utc)
@@ -186,15 +204,58 @@ class NtripStream:
                 pass
         self._sock = None
         self._connected = False
+        self._chunked = False
+        self._chunk_buf.clear()
 
     close = disconnect
+
+    def _dechunk(self, data):
+        """Decode HTTP chunked transfer encoding into self._buffer.
+
+        Accumulates raw socket bytes in self._chunk_buf, extracts complete
+        chunks, and appends the decoded payload to self._buffer.  A zero-
+        length chunk signals end-of-stream (raises ConnectionError so the
+        reconnect loop handles it like any other close).
+        """
+        self._chunk_buf.extend(data)
+        while True:
+            # Look for chunk-size line terminated by \r\n
+            sep = self._chunk_buf.find(b"\r\n")
+            if sep < 0:
+                break
+            size_str = self._chunk_buf[:sep].decode(errors="replace").strip()
+            # Chunk extensions (;key=val) are allowed but unused
+            size_str = size_str.split(";", 1)[0].strip()
+            if not size_str:
+                # Empty line between chunks — skip
+                del self._chunk_buf[:sep + 2]
+                continue
+            try:
+                chunk_len = int(size_str, 16)
+            except ValueError:
+                # Not a valid chunk header — discard and resync
+                del self._chunk_buf[:sep + 2]
+                continue
+            if chunk_len == 0:
+                # Terminal chunk — server closed the stream
+                raise ConnectionError("Chunked stream ended (zero-length chunk)")
+            # Need chunk_len bytes + trailing \r\n after the chunk data
+            total = sep + 2 + chunk_len + 2
+            if len(self._chunk_buf) < total:
+                break  # wait for more data
+            payload = self._chunk_buf[sep + 2:sep + 2 + chunk_len]
+            self._buffer.extend(payload)
+            del self._chunk_buf[:total]
 
     def _recv(self, n=4096):
         """Receive data and append to buffer."""
         data = self._sock.recv(n)
         if not data:
             raise ConnectionError("Connection closed by server")
-        self._buffer.extend(data)
+        if self._chunked:
+            self._dechunk(data)
+        else:
+            self._buffer.extend(data)
         self._bytes_received += len(data)
 
     def _read_frame(self):
