@@ -494,3 +494,34 @@ The repo should treat these as platform configuration, not as incidental quirks.
 - [ ] Verify whether the GNSS path is kernel-char-device based or ordinary serial
 - [ ] Confirm which timescale the PHC should represent for the intended consumer
 - [ ] Record whether host-side monotonic timestamps are sufficient for correlation or whether a deeper kernel timestamp is needed
+
+## clkPoC3 / CM4 BCM54210PE (2026-04-13)
+
+### One-step sync required for PTP GM
+
+The CM4's BCM54210PE PHY supports PTP hardware timestamping (EXTTS
+works, PHC discipline via ts2phc confirmed at ±6 ns).  However, the
+bcmgenet MAC driver **cannot retrieve TX timestamps** from the PHY.
+`ptp4l` in two-step mode fails immediately with "timed out while
+polling for tx timestamp" regardless of `tx_timestamp_timeout` value
+(tested up to 200ms).
+
+**Fix**: use one-step sync (`twoStepFlag 0`).  The PHY embeds the
+timestamp directly in the Sync packet, bypassing the MAC's TX
+timestamp retrieval.  Confirmed working on clkPoC3 (CM4, kernel
+6.12.75, linuxptp 4.2, domain 50).
+
+### PHC timescale
+
+The PHC runs on TAI (UTC + 37s leap seconds).  On boot, `ts2phc`'s
+`ExecStartPre` sets the PHC to system time + 37.  For production,
+chrony with a PHC refclock should maintain coarse time through
+reboots.
+
+### Hardware
+
+- Raspberry Pi Compute Module 4 Rev 1.0
+- NIC: BCM54210PE PHY, bcmgenet MAC, 1 Gbps
+- PPS: F9T PPS wired to SYNC_IN pin
+- PHC: `/dev/ptp0` (`bcm_phy_ptp`), 1 EXTTS, 1 PEROUT, 1 pin
+- IP: 10.168.13.9/24 (static, PTP LAN)
