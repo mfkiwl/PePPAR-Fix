@@ -407,6 +407,23 @@ measurement error:
 See `docs/ticc-baseline-2026-04-01.md` for the full analysis and
 `docs/visual-stories.md` for plot specifications.
 
+### TICC stability metric: use chA alone, not chA-chB
+
+When characterizing servo output stability (TDEV/ADEV), use **TICC chA
+alone** (the DO's PPS, detrended).  This measures the absolute phase
+stability of the disciplined oscillator — what a downstream consumer
+actually sees.
+
+**Do not use chA-chB** (DO PPS minus GNSS PPS) for this purpose.
+chA-chB measures how well the DO *tracks GPS* — i.e., the work the
+servo did — not the quality of the output.  A perfect servo tracking a
+noisy GPS reference would show low chA-chB but high chA: the output
+inherited the reference noise.  Conversely, a servo that drifts slowly
+from GPS might show large chA-chB while chA stays smooth.
+
+Use chA-chB only when the question is "how faithfully does the DO
+follow GPS?" — e.g., diagnosing servo gain or loop bandwidth.
+
 ## Design Documentation
 
 The `docs/` directory contains design documents and research notes. Start

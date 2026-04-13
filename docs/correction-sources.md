@@ -91,3 +91,22 @@ tls = true
 ```
 
 Broadcast ephemeris mount is passed separately via `--eph-mount`.
+
+## Reference frames and correction services
+
+SSR corrections place the satellite orbits (and therefore the user
+position) in a specific ITRF realization.  IGS products use ITRF2020
+(current epoch).  CAS and CNES use the same.  Positions computed with
+different correction services may disagree by tens of centimeters if
+the services use different ITRF epochs — the offset is accumulated
+tectonic plate motion, not a bug.
+
+This matters for PePPAR Fix only if we compare our AntPosEst position
+against a local survey marker or a correction service that uses a
+regional fixed-epoch frame (e.g., ETRF89, GDA2020).  Within a single
+correction service, the frame is self-consistent.
+
+For background on why different correction services produce offset
+positions, see the u-blox white paper:
+[Not just where are you, but when are you — reference frames and correction services](https://content.u-blox.com/sites/default/files/documents/reference-frames-correction-services-white-paper-online.pdf)
+(Bastian Huck, u-blox AG).

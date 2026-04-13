@@ -145,6 +145,125 @@ class QErrTimescaleTracker:
         return qerr_ns, actual_offset
 
 
+class QErrBeatNote:
+    """Unwrap qErr sequence to extract the rx TCXO beat note against GPS.
+
+    Each TIM-TP qErr sample reports where the PPS edge landed within the
+    8 ns tick grid (~178 ps precision, range [-4, +4] ns).  As the rx TCXO
+    drifts relative to GPS, qErr sweeps through this range and wraps at
+    the ±4 ns boundary.
+
+    This class unwraps the phase sequence to produce a continuous
+    accumulated phase (the rx TCXO's phase relative to GPS), and
+    estimates the rx TCXO frequency offset from the slope.
+
+    The unwrapped phase should track PPP dt_rx (modulo a constant
+    offset).  Divergence indicates a problem in one of the two
+    measurement paths.
+    """
+
+    TICK_NS = 8.0  # 125 MHz = 8 ns period
+    WRAP_THRESHOLD_NS = 4.0  # detect wrap when |Δ| > half tick
+    # At 3 ns/s TCXO drift, normal deltas are ~3 ns and wrap deltas are
+    # ~5 ns.  Threshold must be between these: drift < threshold < tick-drift.
+    # Half-tick (4.0) works for drift rates up to ~3.5 ns/s.  Beyond that,
+    # use frequency-aided unwrapping (not yet implemented).
+
+    def __init__(self, freq_window=30):
+        self._prev_qerr_ns = None
+        self._accumulated_ns = 0.0  # unwrapped phase
+        self._n = 0
+        # Ring buffer for frequency estimation (slope of unwrapped phase)
+        self._phase_buf = deque(maxlen=freq_window)
+        # For dt_rx cross-validation
+        self._dt_rx_offset = None  # calibrated offset: unwrapped - dt_rx
+        self._dt_rx_cal_samples = []
+        self._dt_rx_cal_n = 10
+        self._dt_rx_calibrated = False
+
+    def update(self, qerr_ns):
+        """Feed one qErr sample (nanoseconds).  Returns unwrapped phase in ns."""
+        if self._prev_qerr_ns is None:
+            self._prev_qerr_ns = qerr_ns
+            self._accumulated_ns = 0.0
+            self._phase_buf.append(self._accumulated_ns)
+            self._n = 1
+            return self._accumulated_ns
+
+        delta = qerr_ns - self._prev_qerr_ns
+        # Detect wraps: if the TCXO drifts past a tick boundary,
+        # qErr jumps by ~±8 ns.  Correct for it.
+        if delta > self.WRAP_THRESHOLD_NS:
+            delta -= self.TICK_NS
+        elif delta < -self.WRAP_THRESHOLD_NS:
+            delta += self.TICK_NS
+
+        self._accumulated_ns += delta
+        self._prev_qerr_ns = qerr_ns
+        self._phase_buf.append(self._accumulated_ns)
+        self._n += 1
+        return self._accumulated_ns
+
+    def frequency_offset_ns_per_s(self):
+        """Estimate rx TCXO frequency offset in ns/s from recent window.
+
+        Returns (freq_ns_per_s, n_samples) or (None, 0) if insufficient data.
+        At 1 Hz sampling, each index step = 1 second.
+        """
+        n = len(self._phase_buf)
+        if n < 5:
+            return None, 0
+        # Simple linear regression: phase = a + b*t
+        phases = list(self._phase_buf)
+        sx = n * (n - 1) / 2
+        sxx = n * (n - 1) * (2 * n - 1) / 6
+        sy = sum(phases)
+        sxy = sum(i * v for i, v in enumerate(phases))
+        denom = n * sxx - sx * sx
+        if abs(denom) < 1e-10:
+            return None, 0
+        slope = (n * sxy - sx * sy) / denom
+        return slope, n
+
+    def accumulated_phase_ns(self):
+        """Return current unwrapped accumulated phase in ns."""
+        return self._accumulated_ns
+
+    def cross_validate_dt_rx(self, dt_rx_ns):
+        """Compare unwrapped qErr phase against PPP dt_rx.
+
+        Both track the rx TCXO phase relative to GPS, but with a constant
+        offset (different zero points).  After calibration, returns the
+        discrepancy in ns.  Large discrepancy = cycle slip or filter fault.
+
+        Returns (discrepancy_ns, calibrated) or (None, False).
+        """
+        if self._n < 3:
+            return None, False
+
+        if not self._dt_rx_calibrated:
+            self._dt_rx_cal_samples.append(dt_rx_ns - self._accumulated_ns)
+            if len(self._dt_rx_cal_samples) >= self._dt_rx_cal_n:
+                # Use median for robustness against outliers during convergence
+                sorted_offsets = sorted(self._dt_rx_cal_samples)
+                self._dt_rx_offset = sorted_offsets[len(sorted_offsets) // 2]
+                self._dt_rx_calibrated = True
+            return None, False
+
+        # Calibrated: compute discrepancy
+        expected_dt_rx = self._accumulated_ns + self._dt_rx_offset
+        discrepancy = dt_rx_ns - expected_dt_rx
+        return discrepancy, True
+
+    @property
+    def n_samples(self):
+        return self._n
+
+    @property
+    def calibrated(self):
+        return self._dt_rx_calibrated
+
+
 def _dt_rx_trend_predict(buf):
     """Linear regression on dt_rx buffer, predict at the latest epoch.
 
@@ -1847,6 +1966,7 @@ def _setup_servo(args, known_ecef, qerr_store):
             'tracking_mode', 'time_to_zero_s',
             'isb_gal_ns', 'isb_bds_ns',
             'phc_gettime_ns',
+            'qerr_unwrapped_ns', 'qerr_freq_ns_s', 'qerr_dt_rx_discrep_ns',
         ])
 
     return {
@@ -1881,6 +2001,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'compute_error_sources': compute_error_sources,
         'ticc_only_error_source': ticc_only_error_source,
         'ppp_cal': PPPCalibration(tick_ns=8.0, min_samples=10),
+        'qerr_beat_note': QErrBeatNote(freq_window=30),
         'dt_rx_buffer': deque(maxlen=30),
         'carrier_tracker': _init_carrier_tracker(args),
         'tracking_large_error_count': 0,
@@ -2290,6 +2411,37 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             qerr_for_extts_pps_ns,
             f"{qerr_for_ticc_pps_ns:+.1f}ns" if qerr_for_ticc_pps_ns is not None else "None",
         )
+    # ── qErr beat note: unwrap phase and cross-validate against dt_rx ──
+    qerr_beat = ctx['qerr_beat_note']
+    _qerr_dt_rx_discrep = None
+    _qerr_freq_ns_s = None
+    # Prefer TICC-matched qErr (more precise epoch), fall back to EXTTS
+    _beat_qerr = qerr_for_ticc_pps_ns if qerr_for_ticc_pps_ns is not None else qerr_for_extts_pps_ns
+    if _beat_qerr is not None:
+        unwrapped_ns = qerr_beat.update(_beat_qerr)
+        _qerr_freq_ns_s, freq_n = qerr_beat.frequency_offset_ns_per_s()
+        # Cross-validate against PPP dt_rx when available
+        if dt_rx_ns is not None and dt_rx_sigma is not None and dt_rx_sigma < 2.0:
+            discrep, cal = qerr_beat.cross_validate_dt_rx(dt_rx_ns)
+            if cal:
+                _qerr_dt_rx_discrep = discrep
+            if n_epochs % 30 == 0:
+                if cal and discrep is not None:
+                    log.info("  [%d] qErr beat note: unwrapped=%.1f ns, "
+                             "freq=%.3f ns/s (%d samples), "
+                             "dt_rx discrepancy=%+.1f ns",
+                             n_epochs, unwrapped_ns,
+                             _qerr_freq_ns_s if _qerr_freq_ns_s is not None else 0.0,
+                             freq_n, discrep)
+                elif not cal:
+                    log.info("  [%d] qErr beat note: unwrapped=%.1f ns, "
+                             "freq=%.3f ns/s (%d samples), "
+                             "dt_rx cal: %d/%d samples",
+                             n_epochs, unwrapped_ns,
+                             _qerr_freq_ns_s if _qerr_freq_ns_s is not None else 0.0,
+                             freq_n, len(qerr_beat._dt_rx_cal_samples),
+                             qerr_beat._dt_rx_cal_n)
+
     # ── Litmus test 1: EXTTS PPS + qErr ──
     # Uses qerr_for_extts_pps_ns matched to the EXTTS PPS epoch.
     cum_adj = qerr_alignment.get("cumulative_adjfine_ns", 0.0)
@@ -2789,6 +2941,9 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
         f'{time_to_zero_s:.3f}' if time_to_zero_s is not None else '',
         f'{isb_gal_ns:.3f}', f'{isb_bds_ns:.3f}',
         str(phc_gettime_ns) if phc_gettime_ns is not None else '',
+        f'{qerr_beat.accumulated_phase_ns():.3f}' if qerr_beat.n_samples > 0 else '',
+        f'{_qerr_freq_ns_s:.3f}' if _qerr_freq_ns_s is not None else '',
+        f'{_qerr_dt_rx_discrep:.1f}' if _qerr_dt_rx_discrep is not None else '',
     ])
     if log_f is not None:
         log_f.flush()

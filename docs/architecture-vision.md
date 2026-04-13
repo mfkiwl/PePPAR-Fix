@@ -156,9 +156,13 @@ the PPS tick model provides the integer constraint.
 **Implementation path:**
 
 1. **Current (working)**: 2-state Kalman with TICC+qErr as sole
-   measurement.  TDEV(1s) = 1.01 ns.  The qErr correction is done
-   externally (TIM-TP from the F9T), and the residual ~0.178 ns
-   measurement noise is the TICC+qErr floor.
+   measurement.  TDEV(1s) = 0.799 ns (best, 2026-04-11), routinely
+   ~2.0 ns on 15-min runs (2026-04-13).  TICC-driven servo verified
+   on three hosts (TimeHat, MadHat, ptpmon) with PEROUT alignment
+   reliable via detect-and-retry loop.  qVIR = 28–176× across hosts.
+   The qErr correction is done externally (TIM-TP from the F9T),
+   and the residual ~0.178 ns measurement noise is the TICC+qErr
+   floor.
 
 2. **Next step**: EKF that models the 125 MHz tick quantization
    explicitly.  Raw TICC + PPP dt_rx as joint measurements.  The
@@ -272,6 +276,13 @@ completely independent measurement path:
 The qErr-derived frequency tracks the rx TCXO to better than 0.7 ns
 over 10-second windows (measured from 8-hour overnight data,
 strictly causal linear fit, predicting 1 second ahead).
+
+**Status (2026-04-13)**: qErr is fully operational as independent
+per-epoch corrections (qVIR = 28–176×, TIM-TP window matching solved).
+The beat note unwrapper (accumulated phase sequence) is **not yet
+implemented** — qErr is treated as independent corrections, not as a
+continuous phase sequence.  Next step: add the unwrapper to
+cross-validate against PPP dt_rx.
 
 ### How qErr frequency tracking fits the architecture
 
@@ -512,4 +523,6 @@ Each step is independently testable and deployable.
 - **Current source competition (to evolve to fusion)**: `docs/pps-ppp-error-source.md`, `docs/carrier-phase-servo.md`
 - **Current data flow (to be updated)**: `docs/full-data-flow.md`
 - **Servo noise tuning (impacted by in-band estimation)**: `docs/asd-psd-servo-tuning.md`
+- **qErr correlation design (TIM-TP window matching)**: `docs/qerr-correlation.md`
+- **PEROUT 500ms hardware bug and fix**: `docs/i226-perout-500ms-bug.md`
 - **MadHat EKF overconfidence incident (motivating the consensus design)**: project memory `project_madhat_ekf_overconfidence`
