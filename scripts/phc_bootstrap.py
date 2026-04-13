@@ -141,6 +141,64 @@ def _set_pin_function_sysfs(ptp_dev, pin_name, func, channel):
 _E810_PIN_NAMES = {0: "0", 1: "1", 2: "2", 3: "3", 4: "4"}
 
 
+def _ticc_check_perout_phase(ticc_port, timeout_s=8.0):
+    """Read TICC and check if chA and chB are aligned or 500ms apart.
+
+    Returns (aligned, chA_frac, chB_frac) where aligned is True if
+    the fractional seconds are within 100ms, or None if no data.
+    Opens the TICC with HUPCL disabled to avoid resetting the Arduino.
+    """
+    import serial
+    import termios
+    try:
+        ser = serial.Serial(ticc_port, 115200, dsrdtr=False,
+                            rtscts=False, timeout=2.0)
+        attrs = termios.tcgetattr(ser.fd)
+        attrs[2] &= ~termios.HUPCL
+        termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
+    except (OSError, serial.SerialException) as e:
+        log.warning("Cannot open TICC %s for phase check: %s", ticc_port, e)
+        return None
+
+    chA_frac = None
+    chB_frac = None
+    deadline = time.monotonic() + timeout_s
+    try:
+        while time.monotonic() < deadline:
+            line = ser.readline().decode(errors='replace').strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    ts = float(parts[0])
+                    frac = ts % 1.0
+                    if 'chA' in parts[1]:
+                        chA_frac = frac
+                    elif 'chB' in parts[1]:
+                        chB_frac = frac
+                except ValueError:
+                    continue
+            if chA_frac is not None and chB_frac is not None:
+                break
+    finally:
+        ser.close()
+
+    if chA_frac is None or chB_frac is None:
+        log.warning("TICC phase check: missing channel data "
+                    "(chA=%s chB=%s)", chA_frac, chB_frac)
+        return None
+
+    delta = abs(chA_frac - chB_frac)
+    if delta > 0.5:
+        delta = 1.0 - delta  # handle wrap
+    aligned = delta < 0.1  # within 100ms
+    log.info("TICC phase check: chA=%.3fs chB=%.3fs delta=%.3fs %s",
+             chA_frac, chB_frac, delta,
+             "ALIGNED" if aligned else "500ms OFF")
+    return (aligned, chA_frac, chB_frac)
+
+
 def _enable_pps_out(ptp, args):
     """Enable PEROUT (PPS OUT) if configured.
 
@@ -149,12 +207,18 @@ def _enable_pps_out(ptp, args):
 
     Pin programming: tries PTP_PIN_SETFUNC ioctl first (i226), then
     sysfs fallback (E810 ice driver rejects the ioctl but accepts sysfs).
+
+    PEROUT phase verification: on igc, the Target Time comparator has a
+    hardware half-period latch that randomly picks the wrong phase ~50%
+    of the time after a PHC step.  If a TICC port is configured, we
+    verify the PEROUT-vs-PPS phase after programming and retry with a
+    different start_nsec until aligned.
     """
     if args.pps_out_pin < 0:
         return
     from peppar_fix.ptp_device import PTP_PF_PEROUT
     try:
-        # Try ioctl first
+        # Configure pin for PEROUT
         pin_set = False
         if args.program_pin:
             try:
@@ -163,62 +227,43 @@ def _enable_pps_out(ptp, args):
                 pin_set = True
             except OSError:
                 pass
-        # Fallback: sysfs (needed for E810)
         if not pin_set:
             pin_name = _E810_PIN_NAMES.get(args.pps_out_pin, str(args.pps_out_pin))
             _set_pin_function_sysfs(args.ptp_dev, pin_name,
                                     PTP_PF_PEROUT, args.pps_out_channel)
-        # i226 PEROUT half-period workaround (2026-04-10, updated 2026-04-11):
-        #
-        # The i226 Target Time PEROUT can latch onto the wrong half-period
-        # after a PHC time step.  This is a HARDWARE issue — some i226
-        # boards consistently land on 500ms phase regardless of start_nsec,
-        # double-programming, or kernel version (confirmed with SatPulse
-        # and across kernel 6.12.62 and 6.12.75).
-        #
-        # Fix: program PEROUT, verify via EXTTS that the phase is within
-        # 100ms of the second boundary.  If 500ms off, reprogram with
-        # start_nsec=500_000_000 to flip to the correct half.
-        from peppar_fix.ptp_device import PTP_PF_EXTTS
-        ptp.disable_perout(args.pps_out_channel)
-        ptp.enable_perout(args.pps_out_channel)
-        time.sleep(2)
-        # Verify PEROUT phase via EXTTS — read the PEROUT edge timestamp.
-        # PEROUT fires into the EXTTS pin (loopback on TimeHAT SDP0→SDP1).
-        # If EXTTS is not available or not wired for PEROUT, skip the check.
-        perout_phase_ok = True
-        try:
-            ptp.enable_extts(args.extts_channel, rising_edge=True)
-            from peppar_fix.ptp_device import DualEdgeFilter
-            dedup = DualEdgeFilter()
-            test = ptp.read_extts_dedup(dedup, timeout_ms=2000)
-            if test is not None:
-                _, nsec = test[0], test[1]
-                # Check if PEROUT fires near 0ms or near 500ms
-                frac_ms = (nsec % 1_000_000_000) / 1_000_000
-                if 400 < frac_ms < 600:
-                    log.warning("PEROUT 500ms phase detected (%.0f ms) — "
-                                "reprogramming with opposite phase", frac_ms)
-                    perout_phase_ok = False
-        except OSError:
-            pass  # no EXTTS available — can't verify
-        if not perout_phase_ok:
-            ptp.disable_perout(args.pps_out_channel)
-            ptp.enable_perout(args.pps_out_channel,
-                              start_nsec_override=500_000_000)
-            time.sleep(2)
-            # Verify again
-            try:
-                test = ptp.read_extts_dedup(dedup, timeout_ms=2000)
-                if test is not None:
-                    frac_ms = (test[1] % 1_000_000_000) / 1_000_000
-                    if 400 < frac_ms < 600:
-                        log.error("PEROUT still at 500ms after correction — "
-                                  "hardware issue on this i226")
-                    else:
-                        log.info("PEROUT phase corrected to %.0f ms", frac_ms)
-            except OSError:
-                pass
+
+        ticc_port = getattr(args, 'ticc_port', None)
+        MAX_ATTEMPTS = 4
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            ptp.enable_perout(args.pps_out_channel)
+            log.info("PEROUT programmed (attempt %d/%d)", attempt, MAX_ATTEMPTS)
+
+            if not ticc_port:
+                log.info("No TICC port — cannot verify PEROUT phase")
+                break
+
+            # Wait for PEROUT to start (start_sec is PHC_now + 2)
+            time.sleep(4)
+            result = _ticc_check_perout_phase(ticc_port)
+            if result is None:
+                log.warning("TICC phase check inconclusive — accepting")
+                break
+            aligned, chA_frac, chB_frac = result
+            if aligned:
+                log.info("PEROUT phase verified via TICC on attempt %d", attempt)
+                break
+            if attempt < MAX_ATTEMPTS:
+                log.warning("PEROUT 500ms off — retrying (attempt %d/%d)",
+                            attempt, MAX_ATTEMPTS)
+                ptp.disable_perout(args.pps_out_channel)
+                time.sleep(1)
+            else:
+                log.error("PEROUT still 500ms off after %d attempts — "
+                          "hardware half-period latch. May need driver "
+                          "reload (rmmod igc && modprobe igc).",
+                          MAX_ATTEMPTS)
+
         log.info("PPS OUT enabled: pin %d, PEROUT channel %d",
                  args.pps_out_pin, args.pps_out_channel)
     except OSError as e:
@@ -419,6 +464,8 @@ def main():
                     help="SDP pin for PPS OUT (PEROUT), -1 = none")
     ap.add_argument("--pps-out-channel", type=int, default=0,
                     help="PEROUT channel for PPS OUT")
+    ap.add_argument("--ticc-port", default=None,
+                    help="TICC serial port for PEROUT phase verification")
     ap.add_argument("--program-pin", action="store_true")
     ap.add_argument("--phc-timescale", default="tai",
                     choices=["gps", "utc", "tai"])

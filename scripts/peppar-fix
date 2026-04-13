@@ -169,6 +169,15 @@ PHASE_STEP_BIAS_NS="${PHASE_STEP_BIAS_NS:-${HOSTCFG_PHASE_STEP_BIAS_NS:-}}"
 PMC_UDS="${PMC_UDS:-${HOSTCFG_PMC_UDS:-}}"
 PMC_DOMAIN="${PMC_DOMAIN:-${HOSTCFG_PMC_DOMAIN:-0}}"
 
+# Extract --ticc-port from engine args so bootstrap can verify PEROUT phase
+TICC_PORT=""
+for ((i=0; i<${#ENGINE_EXTRA_ARGS[@]}; i++)); do
+    if [[ "${ENGINE_EXTRA_ARGS[i]}" == "--ticc-port" ]] && [[ $((i+1)) -lt ${#ENGINE_EXTRA_ARGS[@]} ]]; then
+        TICC_PORT="${ENGINE_EXTRA_ARGS[i+1]}"
+        break
+    fi
+done
+
 # ── Validate required config ────────────────────────────────────────────── #
 
 if [[ -z "$SERIAL" ]]; then
@@ -348,6 +357,9 @@ if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
     bootstrap_phc_args+=($(ntrip_args))
     if [[ -n "$FREERUN" ]]; then
         bootstrap_phc_args+=(--no-glide)
+    fi
+    if [[ -n "$TICC_PORT" ]]; then
+        bootstrap_phc_args+=(--ticc-port "$TICC_PORT")
     fi
     phc_bootstrap_ok=false
     for ((phc_try=1; phc_try<=3; phc_try++)); do
@@ -560,6 +572,9 @@ while true; do
                 fi
                 # shellcheck disable=SC2046
                 bootstrap_phc_args+=($(ntrip_args))
+                if [[ -n "$TICC_PORT" ]]; then
+                    bootstrap_phc_args+=(--ticc-port "$TICC_PORT")
+                fi
                 if "$PYTHON_BIN" "$SCRIPT_DIR/phc_bootstrap.py" "${bootstrap_phc_args[@]}"; then
                     echo "  PHC re-bootstrap complete"
                     promote_clock_class_initialized
