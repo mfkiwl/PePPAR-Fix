@@ -887,6 +887,10 @@ def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP"):
             msg_counts[identity] += 1
             n_total += 1
 
+            # Log first occurrence of each message type for debugging
+            if n_total <= 3 or identity not in msg_counts or msg_counts[identity] <= 1:
+                log.debug(f"[{label}] msg #{n_total}: identity={identity}")
+
             # Route to appropriate handler
             if identity in EPH_MSG_TYPES:
                 prn = beph.update_from_rtcm(msg_view)
@@ -894,7 +898,9 @@ def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP"):
                     log.debug(f"[{label}] {beph.summary()}")
 
             elif identity in SSR_MSG_TYPES or identity.startswith('4076_'):
-                ssr.update_from_rtcm(msg_view)
+                result = ssr.update_from_rtcm(msg_view)
+                if n_total <= 5:
+                    log.info(f"[{label}] SSR routed: {identity} → {result}")
 
             if n_total % 100 == 0:
                 log.info(f"[{label}] {n_total} msgs | {beph.summary()} | {ssr.summary()}")
