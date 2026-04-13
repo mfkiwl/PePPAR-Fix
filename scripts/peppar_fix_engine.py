@@ -778,11 +778,18 @@ def start_ntrip_threads(args, beph, ssr, stop_event):
         log.info(f"Ephemeris stream: {args.ntrip_caster}:{args.ntrip_port}/{args.eph_mount}")
 
     if args.ssr_mount:
+        # SSR can use a separate caster (e.g., products.igs-ip.net for CNES
+        # while ephemeris comes from the Australian mirror)
+        ssr_host = getattr(args, 'ssr_caster', None) or args.ntrip_caster
+        ssr_p = getattr(args, 'ssr_port', None) or args.ntrip_port
+        ssr_u = getattr(args, 'ssr_user', None) or args.ntrip_user
+        ssr_pw = getattr(args, 'ssr_password', None) or args.ntrip_password
+        ssr_tls = use_tls if ssr_p == args.ntrip_port else (ssr_p == 443)
         ssr_stream = NtripStream(
-            caster=args.ntrip_caster, port=args.ntrip_port,
+            caster=ssr_host, port=ssr_p,
             mountpoint=args.ssr_mount,
-            user=args.ntrip_user, password=args.ntrip_password,
-            tls=use_tls,
+            user=ssr_u, password=ssr_pw,
+            tls=ssr_tls,
         )
         t = threading.Thread(
             target=ntrip_reader,
@@ -791,7 +798,7 @@ def start_ntrip_threads(args, beph, ssr, stop_event):
         )
         t.start()
         threads.append(t)
-        log.info(f"SSR stream: {args.ntrip_caster}:{args.ntrip_port}/{args.ssr_mount}")
+        log.info(f"SSR stream: {ssr_host}:{ssr_p}/{args.ssr_mount}")
 
     return threads
 
@@ -3525,6 +3532,10 @@ Two-phase operation:
     ntrip.add_argument("--ntrip-tls", action="store_true")
     ntrip.add_argument("--eph-mount", help="Broadcast ephemeris mountpoint")
     ntrip.add_argument("--ssr-mount", help="SSR corrections mountpoint")
+    ntrip.add_argument("--ssr-caster", help="SSR caster hostname (default: same as --ntrip-caster)")
+    ntrip.add_argument("--ssr-port", type=int, help="SSR caster port (default: same as --ntrip-port)")
+    ntrip.add_argument("--ssr-user", help="SSR caster username (default: same as --ntrip-user)")
+    ntrip.add_argument("--ssr-password", help="SSR caster password (default: same as --ntrip-password)")
     ntrip.add_argument("--ntrip-user", help="NTRIP username")
     ntrip.add_argument("--ntrip-password", help="NTRIP password")
     ntrip.add_argument("--max-broadcast-age-s", type=float, default=None,
