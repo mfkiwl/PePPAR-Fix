@@ -556,6 +556,7 @@ class RealtimeCorrections:
 
         # Try SSR orbit correction
         oc = self.ssr.get_orbit(prn)
+        bcast_iod = None
         if oc is not None:
             # Check IOD consistency
             bcast_iod = self.beph.get_iod(prn)
