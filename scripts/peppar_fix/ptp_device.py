@@ -157,7 +157,7 @@ def _IOW(typ, nr, size):
 PTP_EXTTS_REQUEST = _IOW(PTP_CLK_MAGIC, 2, 16)
 PTP_EXTTS_REQUEST2 = _IOW(PTP_CLK_MAGIC, 11, 16)
 PTP_PEROUT_REQUEST = _IOW(PTP_CLK_MAGIC, 3, 56)
-PTP_PEROUT_REQUEST2 = _IOW(PTP_CLK_MAGIC, 12, 76)
+PTP_PEROUT_REQUEST2 = _IOW(PTP_CLK_MAGIC, 12, 56)  # same struct size as REQUEST1
 PTP_EXTTS_EVENT_SIZE = 32
 PTP_CLOCK_GETCAPS = _IOR(PTP_CLK_MAGIC, 1, 80)
 PTP_PIN_SETFUNC = _IOW(PTP_CLK_MAGIC, 7, 96)
@@ -308,13 +308,27 @@ class PtpDevice:
                      self.path, start_nsec)
         else:
             start_nsec = 0
-        PTP_PEROUT_DUTY_CYCLE = 1 << 1
+        # Disable first and wait — on igc, re-enabling over an active
+        # PEROUT can latch to the old phase, ignoring start_nsec.
+        # A full disable-wait-enable cycle forces the hardware to
+        # re-read the start time.
+        self.disable_perout(channel)
+        import time as _time
+        _time.sleep(1)
+        # Use PTP_PEROUT_REQUEST2 with flags=0 (no PTP_PEROUT_DUTY_CYCLE).
+        # igc uses 50% duty cycle regardless of the duty cycle flag, and
+        # some kernels reject REQUEST2 with duty cycle on CM4/CM5.
+        # SatPulse also uses flags=0 for igc/igb.
         buf = struct.pack('<qII qII II qII',
                           start_sec, start_nsec, 0,
                           period_s, period_sub, 0,
-                          channel, PTP_PEROUT_DUTY_CYCLE,
-                          0, 1_000_000, 0)
-        fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST, buf)
+                          channel, 0,
+                          0, 0, 0)
+        try:
+            fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST2, buf)
+        except OSError:
+            # Fall back to REQUEST1 if REQUEST2 not supported
+            fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST, buf)
 
     def disable_perout(self, channel):
         """Disable periodic output on a channel."""
@@ -323,7 +337,10 @@ class PtpDevice:
                           0, 0, 0,
                           channel, 0,
                           0, 0, 0)
-        fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST, buf)
+        try:
+            fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST2, buf)
+        except OSError:
+            fcntl.ioctl(self.fd, PTP_PEROUT_REQUEST, buf)
 
     def read_extts(self, timeout_ms=1500):
         """Read one external timestamp event.
