@@ -97,6 +97,7 @@
 | 20 | bbb | 3403de.fffe.7f5514 | Adafruit GPS PPS | chrony → ptp4l | AM335x CPSW (100 Mbps) | linuxptp ptp4l |
 | 30 | TimeHat | 54494d.fffe.45006b | F9T-3RD PPS → SDP1 | SatPulse | i226 (igc) | ptp4l via SatPulse |
 | 40 | otcBob1 | 8c1f00.fffe.104149 | F9T PPS → SDP0 | Timebeat PPS+qErr | i226 (igc), OCXO | Timebeat 2.3.5 |
+| 50 | clkPoC3 | dca632.fffe.e6dd68 | F9T PPS → SYNC_IN | ts2phc | BCM54210PE (bcm_phy_ptp), one-step | linuxptp ts2phc + ptp4l |
 
 All PTP GMs share one L2 broadcast domain via the FS IES3110-8TFP-R switch
 configured as a PTP transparent clock (p2ptransparent, onestep, ip4mixed).
