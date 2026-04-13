@@ -2882,7 +2882,10 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                ctx['adjfine_ppb'], ctx['phase'], n_used,
                ctx['gain_scale'], scheduler, isb_gal_ns, isb_bds_ns,
                ctx.get('tracking_mode'), mode_time_to_zero_s,
-               phc_gettime_ns)
+               phc_gettime_ns,
+               qerr_unwrapped_ns=qerr_beat.accumulated_phase_ns() if qerr_beat.n_samples > 0 else None,
+               qerr_freq_ns_s=_qerr_freq_ns_s,
+               qerr_dt_rx_discrep_ns=_qerr_dt_rx_discrep)
     return "logged"
 
 
@@ -2897,7 +2900,9 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
                carrier_error_ns, best,
                adjfine_ppb, phase, n_used, gain_scale, scheduler,
                isb_gal_ns, isb_bds_ns, tracking_mode, time_to_zero_s,
-               phc_gettime_ns=None):
+               phc_gettime_ns=None,
+               qerr_unwrapped_ns=None, qerr_freq_ns_s=None,
+               qerr_dt_rx_discrep_ns=None):
     """Write one servo log row."""
     if log_w is None:
         return
@@ -2941,9 +2946,9 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
         f'{time_to_zero_s:.3f}' if time_to_zero_s is not None else '',
         f'{isb_gal_ns:.3f}', f'{isb_bds_ns:.3f}',
         str(phc_gettime_ns) if phc_gettime_ns is not None else '',
-        f'{qerr_beat.accumulated_phase_ns():.3f}' if qerr_beat.n_samples > 0 else '',
-        f'{_qerr_freq_ns_s:.3f}' if _qerr_freq_ns_s is not None else '',
-        f'{_qerr_dt_rx_discrep:.1f}' if _qerr_dt_rx_discrep is not None else '',
+        f'{qerr_unwrapped_ns:.3f}' if qerr_unwrapped_ns is not None else '',
+        f'{qerr_freq_ns_s:.3f}' if qerr_freq_ns_s is not None else '',
+        f'{qerr_dt_rx_discrep_ns:.1f}' if qerr_dt_rx_discrep_ns is not None else '',
     ])
     if log_f is not None:
         log_f.flush()
