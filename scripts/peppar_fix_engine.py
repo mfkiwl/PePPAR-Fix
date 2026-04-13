@@ -178,7 +178,10 @@ class QErrBeatNote:
         # For dt_rx cross-validation (rate comparison, not absolute)
         self._prev_dt_rx = None
         self._dt_rx_calibrated = False
-        # Synthesized phase: dt_rx resolves tick, qErr gives sub-tick
+        # Synthesized phase: complementary filter
+        # Low-freq from dt_rx (full phase), high-freq from qErr (precise)
+        self._synth_dt_rx_buf = deque(maxlen=10)
+        self._synth_qerr_buf = deque(maxlen=10)
         self._synth_phase_ns = None
 
     def update(self, qerr_ns):
@@ -270,30 +273,33 @@ class QErrBeatNote:
         return discrepancy, True
 
     def synthesize_phase(self, dt_rx_ns, qerr_ns):
-        """Combine dt_rx (tick resolution) with qErr (sub-tick precision).
+        """Combine dt_rx (full phase, noisy) with qErr (precise, ambiguous).
 
-        dt_rx provides the full rx TCXO phase relative to GPS but with
-        ~4 ns noise.  qErr provides the sub-tick position to ~178 ps but
-        is ambiguous by 8 ns.  This method uses dt_rx to resolve the
-        integer tick number and qErr for the fractional part.
+        Complementary filter: low-frequency content from dt_rx (smoothed
+        over 10 epochs to average out its ~4 ns noise), high-frequency
+        content from the qErr unwrapped phase (sub-tick, ~178 ps).
 
-        Returns synthesized phase in ns, or None if inputs are missing.
-        The result has dt_rx-level ambiguity resolution with qErr-level
-        precision — the best of both.
+        Result: synth = smooth(dt_rx) + (qerr_uw - smooth(qerr_uw))
 
-        Near tick boundaries (|qerr_ns| > 3 ns), the tick assignment is
-        uncertain when dt_rx noise could push it to the adjacent tick.
-        In those epochs, the method still returns a value but the caller
-        should treat it with lower confidence.
+        At tau=1s this gives qErr-level TDEV (~1.4 ns vs dt_rx's 4.0 ns).
+        At tau>30s it converges to dt_rx's curve (no tick ambiguity).
         """
         if dt_rx_ns is None or qerr_ns is None:
             return self._synth_phase_ns
 
-        # dt_rx tells us which tick; qerr tells us where within it.
-        # tick_number = round((dt_rx - qerr) / 8)
-        # synthesized = tick_number * 8 + qerr
-        tick_number = round((dt_rx_ns - qerr_ns) / self.TICK_NS)
-        self._synth_phase_ns = tick_number * self.TICK_NS + qerr_ns
+        qerr_uw = self._accumulated_ns  # current unwrapped qErr phase
+
+        self._synth_dt_rx_buf.append(dt_rx_ns)
+        self._synth_qerr_buf.append(qerr_uw)
+
+        n = len(self._synth_dt_rx_buf)
+        if n < 3:
+            return self._synth_phase_ns
+
+        dt_rx_smooth = sum(self._synth_dt_rx_buf) / n
+        qerr_uw_smooth = sum(self._synth_qerr_buf) / n
+
+        self._synth_phase_ns = dt_rx_smooth + (qerr_uw - qerr_uw_smooth)
         return self._synth_phase_ns
 
     @property
