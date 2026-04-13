@@ -741,6 +741,20 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                             cp_f1 -= pb_f1 / wl_f1  # meters → cycles
                         if pb_f2 is not None:
                             cp_f2 -= pb_f2 / wl_f2
+                        # Phase B diagnostic: log lookup misses
+                        if not hasattr(ssr, '_pb_lookup_logged'):
+                            ssr._pb_lookup_logged = set()
+                        lk = (sv, f1['sig_name'], f2['sig_name'])
+                        if lk not in ssr._pb_lookup_logged:
+                            avail = list(ssr._phase_bias.get(sv, {}).keys())
+                            log.info("Phase bias lookup: %s f1=%s→%s(%s) "
+                                     "f2=%s→%s(%s) avail=%s",
+                                     sv, f1['sig_name'], rinex_f1,
+                                     "HIT" if pb_f1 is not None else "MISS",
+                                     f2['sig_name'], rinex_f2,
+                                     "HIT" if pb_f2 is not None else "MISS",
+                                     avail)
+                            ssr._pb_lookup_logged.add(lk)
 
                     pr_if = a1 * pr_f1 - a2 * pr_f2
                     phi_if_m = a1 * wl_f1 * cp_f1 - a2 * wl_f2 * cp_f2

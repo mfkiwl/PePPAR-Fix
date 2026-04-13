@@ -440,9 +440,28 @@ class SSRState:
                     bias_m = getattr(msg, f'DF383_{i:02d}_{j:02d}', None)
                 if sig_id is None or bias_m is None:
                     continue
-                rinex_code = _SSR_SIGNAL_MAP.get((sys_prefix, int(sig_id)))
+                sig_id_int = int(sig_id)
+                rinex_code = _SSR_SIGNAL_MAP.get((sys_prefix, sig_id_int))
                 if rinex_code is None:
+                    # Log unmapped signal IDs to help debug phase bias gaps
+                    if not hasattr(self, '_pb_unmapped_logged'):
+                        self._pb_unmapped_logged = set()
+                    key = (sys_prefix, sig_id_int)
+                    if key not in self._pb_unmapped_logged:
+                        log.warning("Phase bias: unmapped signal %s sig_id=%d "
+                                    "(bias=%.4f m) — add to _SSR_SIGNAL_MAP",
+                                    sys_prefix, sig_id_int, float(bias_m))
+                        self._pb_unmapped_logged.add(key)
                     continue
+                # Log phase bias arrivals (first time per signal code)
+                if not hasattr(self, '_pb_codes_logged'):
+                    self._pb_codes_logged = set()
+                log_key = (prn, rinex_code)
+                if log_key not in self._pb_codes_logged:
+                    log.info("Phase bias: %s %s = %.4f m (sig_id=%d, int=%s)",
+                             prn, rinex_code, float(bias_m), sig_id_int,
+                             getattr(msg, f'IDF029_{i:02d}_{j:02d}', '?'))
+                    self._pb_codes_logged.add(log_key)
                 int_ind = getattr(msg, f'IDF029_{i:02d}_{j:02d}', 0)
                 wl_ind = getattr(msg, f'IDF030_{i:02d}_{j:02d}', 0)
                 disc = getattr(msg, f'IDF031_{i:02d}_{j:02d}', 0)
