@@ -462,6 +462,10 @@ confirm dt_rx is comparable to the combined product.  No code change
 needed — `SSRState._parse_phase_bias()` already handles the RTCM
 message types.
 
+**Phase A status (2026-04-13)**: CAS (`SSRA01CAS1`) tested.  Phase
+biases arrive (158 per epoch) but **signal codes don't match our F9T
+observations**.  See Phase B diagnosis below.
+
 **Phase B — Phase bias application + integrality monitoring**
 
 Apply phase biases in the observation processing path, before the IF
@@ -469,13 +473,43 @@ combination.  Monitor `N_float mod 1` per satellite.  With correct
 phase biases, the histogram should collapse from uniform-in-[−0.5, 0.5]
 to clustered near 0.
 
-Action: `apply_phase_bias()` function in `solve_ppp.py` using the
-signal-code mapping table.  Log `mean |N mod 1|` per epoch (the
-"ambiguity integrality" metric already logged: see the overnight logs
-`Ambiguity integrality: mean|frac|=0.283 (n=11, <0.15 = ready for AR)`
-— this metric already exists in the engine for monitoring, it's just
-that the threshold is never actionable because we don't have phase
-biases yet).
+**Phase B diagnosis (2026-04-13)**: CAS signal code mismatch confirmed
+with diagnostic logging.  The F9T tracks pilot (Q) components; CAS
+provides data (I) component biases.  The inter-component bias is
+satellite-specific and up to ~2 ns — not a fixed offset.
+
+CAS provides → we observe → match:
+
+| System | CAS signal | F9T signal | Match? |
+|--------|-----------|------------|--------|
+| GPS f1 | C1C (L1 C/A) | GPS-L1CA → C1C | HIT |
+| GPS f2 | C2W (L2 P(Y)) | GPS-L5Q → C5Q | MISS (wrong freq) |
+| GPS L5 | C5I (L5 data) | GPS-L5Q → C5Q | MISS (I vs Q) |
+| GAL f1 | *E1A only* (PRS, unmapped) | GAL-E1C → C1C | MISS |
+| GAL f2 | C5I (E5a data) | GAL-E5aQ → C5Q | MISS (I vs Q) |
+
+**Blockers**:
+1. CAS does not provide phase biases for pilot (Q) signals
+2. CAS does not provide Galileo E1C phase bias (only E1A/PRS)
+3. The I-vs-Q inter-component bias is satellite-specific, not a
+   constant that can be subtracted
+
+**Path forward**:
+- **CNES** (`SSRA00CNE1`): CNES produces observable-specific biases
+  for L5Q and E5aQ (confirmed in Banville et al. 2020, "Performance
+  Analysis... Using CNES Uncombined Bias Products").  Access to
+  `products.igs-ip.net` pending (applied 2026-04-07).
+- **Galileo HAS**: provides E1C + E5aQ phase biases for Galileo,
+  L1C/A + L5Q for GPS (pilot-component biases, matching our F9T).
+  Free via E6-B signal.  Requires F10T or E6-capable receiver.
+
+Action: follow up on `products.igs-ip.net` access for CNES stream.
+If approved, test `SSRA00CNE1` with the same diagnostic logging.
+
+The `apply_phase_bias()` code in `realtime_ppp.py` is already
+functional — it just needs an SSR source whose signal codes match.
+The `mean |N mod 1|` integrality metric is logged every epoch and
+will show improvement immediately when matching biases arrive.
 
 **Phase C — Bootstrapping AR + gradual position migration**
 
