@@ -175,10 +175,8 @@ class QErrBeatNote:
         self._n = 0
         # Ring buffer for frequency estimation (slope of unwrapped phase)
         self._phase_buf = deque(maxlen=freq_window)
-        # For dt_rx cross-validation
-        self._dt_rx_offset = None  # calibrated offset: unwrapped - dt_rx
-        self._dt_rx_cal_samples = []
-        self._dt_rx_cal_n = 10
+        # For dt_rx cross-validation (rate comparison, not absolute)
+        self._prev_dt_rx = None
         self._dt_rx_calibrated = False
 
     def update(self, qerr_ns):
@@ -230,29 +228,43 @@ class QErrBeatNote:
         return self._accumulated_ns
 
     def cross_validate_dt_rx(self, dt_rx_ns):
-        """Compare unwrapped qErr phase against PPP dt_rx.
+        """Compare qErr frequency against PPP dt_rx rate (mod 8 ns).
 
-        Both track the rx TCXO phase relative to GPS, but with a constant
-        offset (different zero points).  After calibration, returns the
-        discrepancy in ns.  Large discrepancy = cycle slip or filter fault.
+        qErr unwrapped phase tracks dt_rx modulo the 8 ns tick period.
+        The integer tick drift (N × 8 ns/s) is invisible to qErr.
+        Cross-validation compares rates: dt_rx_rate mod 8 should match
+        qErr frequency.  A discrepancy indicates a cycle slip, filter
+        fault, or qErr unwrap error.
 
-        Returns (discrepancy_ns, calibrated) or (None, False).
+        Returns (rate_discrepancy_ns_s, calibrated) or (None, False).
         """
-        if self._n < 3:
+        if self._n < 5:
+            self._prev_dt_rx = dt_rx_ns
             return None, False
 
-        if not self._dt_rx_calibrated:
-            self._dt_rx_cal_samples.append(dt_rx_ns - self._accumulated_ns)
-            if len(self._dt_rx_cal_samples) >= self._dt_rx_cal_n:
-                # Use median for robustness against outliers during convergence
-                sorted_offsets = sorted(self._dt_rx_cal_samples)
-                self._dt_rx_offset = sorted_offsets[len(sorted_offsets) // 2]
-                self._dt_rx_calibrated = True
+        if self._prev_dt_rx is None:
+            self._prev_dt_rx = dt_rx_ns
             return None, False
 
-        # Calibrated: compute discrepancy
-        expected_dt_rx = self._accumulated_ns + self._dt_rx_offset
-        discrepancy = dt_rx_ns - expected_dt_rx
+        # dt_rx rate over the frequency window
+        dt_rx_rate = dt_rx_ns - self._prev_dt_rx  # ns/s at 1 Hz
+        self._prev_dt_rx = dt_rx_ns
+
+        qerr_freq, n = self.frequency_offset_ns_per_s()
+        if qerr_freq is None:
+            return None, False
+
+        # Compare rates mod 8: both should agree on the sub-tick drift
+        dt_rx_rate_mod8 = ((dt_rx_rate + 4.0) % self.TICK_NS) - 4.0
+        qerr_freq_mod8 = ((qerr_freq + 4.0) % self.TICK_NS) - 4.0
+        discrepancy = dt_rx_rate_mod8 - qerr_freq_mod8
+        # Wrap discrepancy to [-4, +4] to handle boundary cases
+        if discrepancy > self.TICK_NS / 2:
+            discrepancy -= self.TICK_NS
+        elif discrepancy < -self.TICK_NS / 2:
+            discrepancy += self.TICK_NS
+
+        self._dt_rx_calibrated = True
         return discrepancy, True
 
     @property
@@ -1966,7 +1978,7 @@ def _setup_servo(args, known_ecef, qerr_store):
             'tracking_mode', 'time_to_zero_s',
             'isb_gal_ns', 'isb_bds_ns',
             'phc_gettime_ns',
-            'qerr_unwrapped_ns', 'qerr_freq_ns_s', 'qerr_dt_rx_discrep_ns',
+            'qerr_unwrapped_ns', 'qerr_freq_ns_s', 'qerr_dt_rx_rate_discrep_ns_s',
         ])
 
     return {
@@ -2429,18 +2441,16 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 if cal and discrep is not None:
                     log.info("  [%d] qErr beat note: unwrapped=%.1f ns, "
                              "freq=%.3f ns/s (%d samples), "
-                             "dt_rx discrepancy=%+.1f ns",
+                             "dt_rx rate discrepancy=%+.2f ns/s",
                              n_epochs, unwrapped_ns,
                              _qerr_freq_ns_s if _qerr_freq_ns_s is not None else 0.0,
                              freq_n, discrep)
                 elif not cal:
                     log.info("  [%d] qErr beat note: unwrapped=%.1f ns, "
-                             "freq=%.3f ns/s (%d samples), "
-                             "dt_rx cal: %d/%d samples",
+                             "freq=%.3f ns/s (%d samples), calibrating",
                              n_epochs, unwrapped_ns,
                              _qerr_freq_ns_s if _qerr_freq_ns_s is not None else 0.0,
-                             freq_n, len(qerr_beat._dt_rx_cal_samples),
-                             qerr_beat._dt_rx_cal_n)
+                             freq_n)
 
     # ── Litmus test 1: EXTTS PPS + qErr ──
     # Uses qerr_for_extts_pps_ns matched to the EXTTS PPS epoch.

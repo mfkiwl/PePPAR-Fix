@@ -279,10 +279,14 @@ strictly causal linear fit, predicting 1 second ahead).
 
 **Status (2026-04-13)**: qErr is fully operational as independent
 per-epoch corrections (qVIR = 28–176×, TIM-TP window matching solved).
-The beat note unwrapper (accumulated phase sequence) is **not yet
-implemented** — qErr is treated as independent corrections, not as a
-continuous phase sequence.  Next step: add the unwrapper to
-cross-validate against PPP dt_rx.
+Beat note unwrapper implemented (`QErrBeatNote` in engine).
+
+**Key finding**: the unwrapped qErr phase tracks `dt_rx mod 8 ns`, not
+`dt_rx` directly.  At ~27 ns/s TCXO drift, the integer tick component
+(~3.4 ticks/s) is invisible to qErr — only the sub-tick drift (~2.6 ns/s)
+is captured.  Cross-validation compares *rates*: `dt_rx_rate mod 8`
+should match `qErr frequency`.  This is a weaker check than absolute
+phase tracking, but still catches cycle slips and filter faults.
 
 ### How qErr frequency tracking fits the architecture
 
