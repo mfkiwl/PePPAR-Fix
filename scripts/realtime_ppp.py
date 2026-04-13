@@ -94,7 +94,7 @@ for _sub in range(101, 108):
     SSR_MSG_TYPES.add(f'4076_{_sub:03d}')
 for _mt in range(1057, 1069):
     SSR_MSG_TYPES.add(str(_mt))
-for _mt in range(1240, 1264):
+for _mt in range(1240, 1271):  # 1240-1263 (orbit/clock/code) + 1265-1270 (phase bias)
     SSR_MSG_TYPES.add(str(_mt))
 
 
