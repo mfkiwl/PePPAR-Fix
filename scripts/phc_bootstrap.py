@@ -234,10 +234,24 @@ def _enable_pps_out(ptp, args):
 
         ticc_port = getattr(args, 'ticc_port', None)
         MAX_ATTEMPTS = 4
+        # The igc Target Time comparator's start_nsec polarity varies
+        # by kernel/DKMS version.  On some builds, start_nsec is the
+        # falling edge (need period/2 for rising-edge alignment).  On
+        # others, it's the rising edge (need 0).  We try the default
+        # (auto-detected by enable_perout) first, then alternate with
+        # the opposite offset on each retry.
+        offsets = [None, 0, 500_000_000, 0]  # None = auto, then alternate
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
-            ptp.enable_perout(args.pps_out_channel)
-            log.info("PEROUT programmed (attempt %d/%d)", attempt, MAX_ATTEMPTS)
+            override = offsets[attempt - 1]
+            if override is not None:
+                ptp.enable_perout(args.pps_out_channel,
+                                  start_nsec_override=override)
+            else:
+                ptp.enable_perout(args.pps_out_channel)
+            log.info("PEROUT programmed (attempt %d/%d, start_nsec=%s)",
+                     attempt, MAX_ATTEMPTS,
+                     "auto" if override is None else override)
 
             if not ticc_port:
                 log.info("No TICC port — cannot verify PEROUT phase")
@@ -254,8 +268,8 @@ def _enable_pps_out(ptp, args):
                 log.info("PEROUT phase verified via TICC on attempt %d", attempt)
                 break
             if attempt < MAX_ATTEMPTS:
-                log.warning("PEROUT 500ms off — retrying (attempt %d/%d)",
-                            attempt, MAX_ATTEMPTS)
+                log.warning("PEROUT 500ms off — trying opposite offset "
+                            "(attempt %d/%d)", attempt, MAX_ATTEMPTS)
                 ptp.disable_perout(args.pps_out_channel)
                 time.sleep(1)
             else:
