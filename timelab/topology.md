@@ -84,7 +84,7 @@
         │  Port: bbb eth0 (10.168.13.14) — GM dom 20    │
         │  Port: TimeHat eth1 (10.168.13.26) — GM dom 30│
         │  Port: otcBob1 eth0 (10.168.13.16) — GM dom 40│
-        │  Port: ptpmon eth0 (10.168.13.13) — listener   │
+        │  Port: pi4ptpmon eth0 (10.168.13.13) — listener   │
         └────────────────────────────────────────────────┘
 ```
 
@@ -249,7 +249,7 @@ is preserved. Include date, what changed, and why.
 - otcBob1: Timebeat upgraded 2.3.2→2.3.5, PTP GM enabled on domain 40
 - Both Timebeat hosts now monitor all other PTP domains as secondaries
 - NTP secondaries changed from dns[1-5] to ntp[1-5].VanValzah.Com
-- ptpmon moved to static IP 10.168.13.13/24, swapped into PTP LAN switch
+- pi4ptpmon moved to static IP 10.168.13.13/24, swapped into PTP LAN switch
 - TimeHAT SDP0 configured as PHC PPS OUT (systemd phc-pps-out.service)
 - TICC rewired: chA = TimeHAT PHC PPS OUT, chB = F9T-BOT PPS
 

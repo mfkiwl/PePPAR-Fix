@@ -274,7 +274,7 @@ wastes an overnight run.  The bootstrap's ADJ_SETOFFSET step only
 makes fine adjustments — it cannot fix a 500 ms offset because it
 assumes the PHC is already within a few milliseconds of GPS time.
 
-## ptpmon bringup stumbles (2026-04-11)
+## pi4ptpmon bringup stumbles (2026-04-11)
 
 Fresh CM4 Lite (906 MB RAM, kernel 6.12.62+rpt-rpi-v8) with i226,
 TICC #2, and F9T EVK.  Brought up from zero to running peppar-fix
@@ -309,7 +309,7 @@ in different order, ttyACM0/1 assignments swap silently.
 
 **Workaround**: use `/dev/serial/by-id/usb-u-blox_AG_...-if00` path
 as the ocxo-i226.toml config does.  This survives enumeration order
-changes.  (Not done on ptpmon yet — using raw ttyACM1 for now.)
+changes.  (Not done on pi4ptpmon yet — using raw ttyACM1 for now.)
 
 ### 13. Wrapper freerun + retry loop surprises
 
@@ -322,15 +322,15 @@ and SSH sessions accumulate zombie process trees.
 **Observation only** — matches stumble #9 in madhat-bringup doc
 (wrapper override of `--duration`).
 
-### 14. ptpmon PHC is /dev/ptp1, not /dev/ptp0
+### 14. pi4ptpmon PHC is /dev/ptp1, not /dev/ptp0
 
 CM4 Lite has a Broadcom PHC at `/dev/ptp0` (bcm_phy_ptp).  The i226
-is at `/dev/ptp1`.  The ptpmon.toml config correctly has `ptp_dev =
+is at `/dev/ptp1`.  The pi4ptpmon.toml config correctly has `ptp_dev =
 "/dev/ptp1"`, but `phc_ctl /dev/ptp0 cmp` in the pre-flight
 checklist checks the wrong device.  The pre-flight check must use
 the host config's `ptp_dev`, not hardcoded `/dev/ptp0`.
 
-### 15. No igc DKMS on ptpmon — PEROUT 500ms after step
+### 15. No igc DKMS on pi4ptpmon — PEROUT 500ms after step
 
 Stock igc on kernel 6.12.62+rpt-rpi-v8.  Our code's period-nudge
 workaround (`999_999_999 ns`) avoids frequency mode, but the
@@ -342,7 +342,7 @@ PEROUT phase verification in `_enable_pps_out()` didn't catch it
 rebuild for the v8 kernel.  Also investigate why the PEROUT phase
 verification silently failed.
 
-### 16. DO frequency 3790 ppb on ptpmon
+### 16. DO frequency 3790 ppb on pi4ptpmon
 
 First-boot i226 crystal shows 3790 ppb offset — 30x higher than
 TimeHat/MadHat (~125 ppb).  Possibly the crystal hasn't thermally

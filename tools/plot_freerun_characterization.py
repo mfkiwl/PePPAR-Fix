@@ -110,7 +110,7 @@ def main():
     COLORS = {
         "TimeHat": "#1f77b4",
         "MadHat": "#ff7f0e",
-        "ptpmon": "#2ca02c",
+        "pi4ptpmon": "#2ca02c",
     }
     GPS_PPS_COLOR = "#d62728"
 

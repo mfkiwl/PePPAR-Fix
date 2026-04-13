@@ -125,15 +125,15 @@ are a record of what *was* connected, not what *is*.
 | Role | GPS-disciplined PTP GM (chrony + ptp4l) |
 | Docs | — |
 
-### ptpmon — PTP GM monitoring host
+### pi4ptpmon — PTP GM monitoring host
 
 | Field | Value |
 |-------|-------|
-| Hostname | ptpmon |
+| Hostname | pi4ptpmon |
 | Hardware | Raspberry Pi CM4 Lite (1 GB RAM) on IO board |
 | OS | Debian Trixie (upgrading) |
 | IP | 10.168.13.13/24 (PTP LAN, static) |
-| Access | `ssh bob@ptpmon` (passwordless), sudo without password |
+| Access | `ssh bob@pi4ptpmon` (passwordless), sudo without password |
 | NIC (onboard) | BCM54210PE (eth0) — DHCP, not used for PTP (~µs jitter) |
 | NIC (PCIe) | Intel i210 (eth1) — igb driver, PHC /dev/ptp1, HW TX+RX timestamping, HWTSTAMP_FILTER_ALL |
 | PTP LAN | eth1: 10.168.13.13/24 (static) |

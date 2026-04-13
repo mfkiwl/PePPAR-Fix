@@ -35,8 +35,8 @@ HOSTS = {
         "color": "#ff7f0e",
         "note": "EXTTS fallback (~10% TICC pair rate)",
     },
-    "ptpmon": {
-        "ticc": f"{DATA_DIR}/overnight-20260412-ptpmon-ticc.csv",
+    "pi4ptpmon": {
+        "ticc": f"{DATA_DIR}/overnight-20260412-pi4ptpmon-ticc.csv",
         "servo": None,
         "color": "#2ca02c",
         "note": "EXTTS fallback (stock igc, PEROUT drifted 302ms)",

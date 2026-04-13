@@ -92,20 +92,20 @@ TICC_DRIVE_DIR = "data/ticc-drive-20260413"
 COLORS = {
     "TimeHat": "#1f77b4",
     "MadHat": "#ff7f0e",
-    "ptpmon": "#2ca02c",
+    "pi4ptpmon": "#2ca02c",
 }
 GPS_PPS_COLOR = "#d62728"
 
 OVERNIGHT = {
     # TimeHat chA died (52 events) — exclude
     "MadHat": f"{OVERNIGHT_DIR}/overnight-20260412-madhat-ticc.csv",
-    "ptpmon": f"{OVERNIGHT_DIR}/overnight-20260412-ptpmon-ticc.csv",
+    "pi4ptpmon": f"{OVERNIGHT_DIR}/overnight-20260412-pi4ptpmon-ticc.csv",
 }
 
 TICC_DRIVE = {
     "TimeHat": f"{TICC_DRIVE_DIR}/ticc-drive-v2-20260413-timehat-ticc.csv",
     "MadHat": f"{TICC_DRIVE_DIR}/ticc-drive-v2-20260413-madhat-ticc.csv",
-    "ptpmon": f"{TICC_DRIVE_DIR}/ticc-drive-v2-20260413-ptpmon-ticc.csv",
+    "pi4ptpmon": f"{TICC_DRIVE_DIR}/ticc-drive-v2-20260413-pi4ptpmon-ticc.csv",
 }
 
 
@@ -186,7 +186,7 @@ def main():
     # --- Layout ---
     notes = (
         "<b>TimeHat overnight</b>: excluded (PEROUT died after 52 chA events)<br>"
-        "<b>ptpmon overnight</b>: stock igc driver (no DKMS ppsfix)<br>"
+        "<b>pi4ptpmon overnight</b>: stock igc driver (no DKMS ppsfix)<br>"
         "<b>Solid lines</b>: TICC+qErr driven servo (15 min)<br>"
         "<b>Dotted lines</b>: EXTTS+qErr driven servo (7.5 hours)"
     )

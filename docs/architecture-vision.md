@@ -158,7 +158,7 @@ the PPS tick model provides the integer constraint.
 1. **Current (working)**: 2-state Kalman with TICC+qErr as sole
    measurement.  TDEV(1s) = 0.799 ns (best, 2026-04-11), routinely
    ~2.0 ns on 15-min runs (2026-04-13).  TICC-driven servo verified
-   on three hosts (TimeHat, MadHat, ptpmon) with PEROUT alignment
+   on three hosts (TimeHat, MadHat, pi4ptpmon) with PEROUT alignment
    reliable via detect-and-retry loop.  qVIR = 28–176× across hosts.
    The qErr correction is done externally (TIM-TP from the F9T),
    and the residual ~0.178 ns measurement noise is the TICC+qErr
