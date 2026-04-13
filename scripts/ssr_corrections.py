@@ -71,11 +71,9 @@ _RTCM_SSR = {
 }
 
 # SSR signal tracking mode ID → RINEX observation code
-# This mapping covers both IGS SSR and standard RTCM SSR signal IDs.
-# Standard RTCM SSR uses the same GNSS Signal and Tracking Mode Indicator
-# table as defined in RTCM 3.x (Table 3.5-91 for GPS, etc.)
+# IGS SSR (4076 subtypes) uses its own signal table.
 _SSR_SIGNAL_MAP = {
-    # GPS (RTCM SSR signal IDs)
+    # GPS (IGS SSR signal IDs — wider range than RTCM SSR)
     ('G', 0): 'C1C',   # L1 C/A
     ('G', 2): 'C1P',   # L1 P
     ('G', 5): 'C1W',   # L1 Z-tracking (P(Y))
@@ -114,6 +112,78 @@ _SSR_SIGNAL_MAP = {
     ('C', 16): 'L2I',  # B1I phase
     ('C', 21): 'L5I',  # B2a I phase
 }
+
+# RTCM 3.x SSR signal tracking mode indicator (5-bit, 0-18 for GPS).
+# Different numbering from IGS SSR.  Used by RTCM 1265-1270 binary parser.
+# Source: RTKLIB ssr_sig_gps / ssr_sig_gal tables.
+_RTCM_SSR_SIGNAL_MAP = {
+    # GPS (Table 3.5-100)
+    ('G', 0): 'L1C',   # L1 C/A
+    ('G', 1): 'L1P',   # L1 P
+    ('G', 2): 'L1W',   # L1 P(Y)
+    ('G', 3): 'L1S',   # L1C(D)
+    ('G', 4): 'L1L',   # L1C(P)
+    ('G', 5): 'L2C',   # L2C(M)
+    ('G', 6): 'L2D',   # L2C(L)
+    ('G', 7): 'L2S',   # L2C(M+L)
+    ('G', 8): 'L2L',   # L2C(L)
+    ('G', 9): 'L2X',   # L2C(M+L)
+    ('G', 10): 'L2P',  # L2 P
+    ('G', 11): 'L2W',  # L2 P(Y)
+    ('G', 14): 'L5I',  # L5 I
+    ('G', 15): 'L5Q',  # L5 Q
+    # Galileo (Table 3.5-101)
+    ('E', 0): 'L1A',   # E1 A
+    ('E', 1): 'L1B',   # E1 B
+    ('E', 2): 'L1C',   # E1 C
+    ('E', 5): 'L5I',   # E5a I
+    ('E', 6): 'L5Q',   # E5a Q
+    ('E', 8): 'L7I',   # E5b I
+    ('E', 9): 'L7Q',   # E5b Q
+    ('E', 11): 'L8I',  # E5(a+b) I
+    ('E', 12): 'L8Q',  # E5(a+b) Q
+    ('E', 14): 'L6A',  # E6 A
+    ('E', 15): 'L6B',  # E6 B
+    ('E', 16): 'L6C',  # E6 C
+    # GLONASS (Table 3.5-102)
+    ('R', 0): 'L1C',   # G1 C/A
+    ('R', 1): 'L1P',   # G1 P
+    ('R', 2): 'L2C',   # G2 C/A
+    ('R', 3): 'L2P',   # G2 P
+    # BeiDou (Table 3.5-105)
+    ('C', 0): 'L2I',   # B1I
+    ('C', 1): 'L2Q',   # B1Q
+    ('C', 5): 'L5I',   # B2a I
+    ('C', 9): 'L7I',   # B2b I
+}
+
+
+class _BitReader:
+    """Bit-level reader for binary RTCM payload decoding."""
+    __slots__ = ('data', 'pos', 'length')
+
+    def __init__(self, data):
+        self.data = data
+        self.pos = 0
+        self.length = len(data) * 8
+
+    def read(self, n):
+        val = 0
+        for _ in range(n):
+            byte_idx = self.pos >> 3
+            bit_idx = 7 - (self.pos & 7)
+            val = (val << 1) | ((self.data[byte_idx] >> bit_idx) & 1)
+            self.pos += 1
+        return val
+
+    def read_signed(self, n):
+        val = self.read(n)
+        if val >= (1 << (n - 1)):
+            val -= (1 << n)
+        return val
+
+    def remaining(self):
+        return self.length - self.pos
 
 
 class OrbitCorrection:
@@ -417,9 +487,26 @@ class SSRState:
                           rx_mono=None, queue_remains=None, correlation_confidence=None):
         """Extract per-satellite phase bias corrections.
 
-        Standard RTCM SSR uses 1265/1267/1270 for GPS/GAL/BDS phase biases.
-        IGS SSR uses IDF fields.
+        pyrtcm (as of 1.1.12) does not decode RTCM 1265-1270 phase bias
+        messages — it only extracts the message type.  For these messages
+        we fall back to binary parsing of the raw payload.
+
+        IGS SSR (4076 subtypes) may be decoded by pyrtcm, so we still try
+        the attribute-based path first.
         """
+        # Check if pyrtcm actually decoded satellite data
+        has_decoded = n_sats > 0 and self._get_sat_id(msg, 1) is not None
+        if not has_decoded:
+            # Try binary parsing from raw payload (RTCM 1265-1270)
+            payload = getattr(msg, 'payload', None)
+            if payload is not None:
+                self._parse_phase_bias_binary(
+                    payload, sys_prefix,
+                    rx_mono=rx_mono, queue_remains=queue_remains,
+                    correlation_confidence=correlation_confidence)
+            return
+
+        # pyrtcm-decoded path (IGS SSR 4076 subtypes)
         for i in range(1, n_sats + 1):
             sat_id = self._get_sat_id(msg, i)
             if sat_id is None:
@@ -440,39 +527,151 @@ class SSRState:
                     bias_m = getattr(msg, f'DF383_{i:02d}_{j:02d}', None)
                 if sig_id is None or bias_m is None:
                     continue
-                sig_id_int = int(sig_id)
-                rinex_code = _SSR_SIGNAL_MAP.get((sys_prefix, sig_id_int))
-                if rinex_code is None:
-                    # Log unmapped signal IDs to help debug phase bias gaps
-                    if not hasattr(self, '_pb_unmapped_logged'):
-                        self._pb_unmapped_logged = set()
-                    key = (sys_prefix, sig_id_int)
-                    if key not in self._pb_unmapped_logged:
-                        log.warning("Phase bias: unmapped signal %s sig_id=%d "
-                                    "(bias=%.4f m) — add to _SSR_SIGNAL_MAP",
-                                    sys_prefix, sig_id_int, float(bias_m))
-                        self._pb_unmapped_logged.add(key)
-                    continue
-                # Log phase bias arrivals (first time per signal code)
-                if not hasattr(self, '_pb_codes_logged'):
-                    self._pb_codes_logged = set()
-                log_key = (prn, rinex_code)
-                if log_key not in self._pb_codes_logged:
-                    log.info("Phase bias: %s %s = %.4f m (sig_id=%d, int=%s)",
-                             prn, rinex_code, float(bias_m), sig_id_int,
-                             getattr(msg, f'IDF029_{i:02d}_{j:02d}', '?'))
-                    self._pb_codes_logged.add(log_key)
-                int_ind = getattr(msg, f'IDF029_{i:02d}_{j:02d}', 0)
-                wl_ind = getattr(msg, f'IDF030_{i:02d}_{j:02d}', 0)
-                disc = getattr(msg, f'IDF031_{i:02d}_{j:02d}', 0)
-                self._phase_bias[prn][rinex_code] = BiasCorrection(
-                    signal_code=rinex_code, bias_m=float(bias_m), is_phase=True,
-                    integer_indicator=int_ind, wl_indicator=wl_ind,
-                    disc_counter=disc,
-                    rx_mono=rx_mono,
-                    queue_remains=queue_remains,
-                    correlation_confidence=correlation_confidence,
-                )
+                self._store_phase_bias(
+                    prn, sys_prefix, int(sig_id), float(bias_m),
+                    _SSR_SIGNAL_MAP,
+                    int_ind=getattr(msg, f'IDF029_{i:02d}_{j:02d}', 0),
+                    wl_ind=getattr(msg, f'IDF030_{i:02d}_{j:02d}', 0),
+                    disc=getattr(msg, f'IDF031_{i:02d}_{j:02d}', 0),
+                    rx_mono=rx_mono, queue_remains=queue_remains,
+                    correlation_confidence=correlation_confidence)
+
+    def _parse_phase_bias_binary(self, payload, sys_prefix,
+                                 rx_mono=None, queue_remains=None,
+                                 correlation_confidence=None):
+        """Decode RTCM 1265-1270 phase bias from raw payload bytes.
+
+        Both RTCM SSR and some casters that wrap IGS-SSR-style content in
+        1265-1270 message numbers use 32-bit per-bias fields (no std-dev).
+        Standard RTCM SSR adds a 17-bit std-dev per bias.  We auto-detect
+        based on message size: if 49-bit biases overshoot the payload,
+        fall back to 32-bit.
+
+        Header layout (confirmed via RTKLIB decode_ssr7_head):
+          12  msg_type
+          20  epoch (GPS TOW or GLONASS TOD)
+           4  update interval
+           1  MMI
+           4  IOD SSR
+          16  provider ID
+           4  solution ID
+           1  dispersive bias consistency
+           1  MW consistency
+           6  n_sats
+        Total: 69 bits
+
+        Per satellite: 6 sat_id + 5 n_bias + 9 yaw + 8 yaw_rate = 28 bits
+        Per bias:      5 sig_id + 1 int + 2 wl + 4 disc + 20 bias = 32 bits
+                       (+ 17 std-dev for standard RTCM SSR = 49 bits)
+        """
+        br = _BitReader(payload)
+        if br.remaining() < 69:
+            return
+
+        br.read(12)   # msg_type (already known)
+        br.read(20)   # epoch
+        br.read(4)    # update interval
+        br.read(1)    # MMI
+        iod_ssr = br.read(4)
+        br.read(16)   # provider ID
+        br.read(4)    # solution ID
+        dispersive = br.read(1)
+        mw = br.read(1)
+        n_sats = br.read(6)
+
+        # Auto-detect bias field width.  Compute total bits needed for each.
+        # Count sat headers + biases by doing a dry run with 32-bit assumption.
+        save_pos = br.pos
+        total_biases = 0
+        for _ in range(n_sats):
+            if br.remaining() < 28:
+                break
+            br.read(6)   # sat_id
+            nb = br.read(5)
+            br.read(9)   # yaw
+            br.read(8)   # yaw_rate
+            total_biases += nb
+            br.pos += nb * 32  # skip biases at 32-bit width
+        # Check if 32-bit biases consumed the right amount
+        bits_32 = br.pos - save_pos
+        bits_49 = bits_32 + total_biases * 17  # extra 17 bits per bias for std-dev
+        avail = br.length - save_pos
+        if bits_49 <= avail and abs(avail - bits_49) < abs(avail - bits_32):
+            bias_bits = 49
+        else:
+            bias_bits = 32
+        br.pos = save_pos
+
+        n_stored = 0
+        for _ in range(n_sats):
+            if br.remaining() < 28:
+                break
+            sat_id = br.read(6)
+            n_bias = br.read(5)
+            br.read(9)   # yaw angle
+            br.read(8)   # yaw rate (signed, but we don't use it)
+            prn = f"{sys_prefix}{sat_id:02d}"
+
+            for _ in range(n_bias):
+                if br.remaining() < bias_bits:
+                    break
+                sig_id = br.read(5)
+                int_ind = br.read(1)
+                wl_ind = br.read(2)
+                disc = br.read(4)
+                bias_m = br.read_signed(20) * 0.0001
+                if bias_bits == 49:
+                    br.read(17)  # std-dev (not stored)
+
+                n_stored += self._store_phase_bias(
+                    prn, sys_prefix, sig_id, bias_m,
+                    _RTCM_SSR_SIGNAL_MAP,
+                    int_ind=int_ind, wl_ind=wl_ind, disc=disc,
+                    rx_mono=rx_mono, queue_remains=queue_remains,
+                    correlation_confidence=correlation_confidence)
+
+        if n_stored > 0:
+            if not hasattr(self, '_pb_binary_logged'):
+                self._pb_binary_logged = False
+            if not self._pb_binary_logged:
+                log.info("Phase bias binary: %s %d sats, %d biases stored "
+                         "(%d-bit format, dispersive=%d, mw=%d)",
+                         sys_prefix, n_sats, n_stored, bias_bits,
+                         dispersive, mw)
+                self._pb_binary_logged = True
+
+    def _store_phase_bias(self, prn, sys_prefix, sig_id_int, bias_m,
+                          signal_map, int_ind=0, wl_ind=0, disc=0,
+                          rx_mono=None, queue_remains=None,
+                          correlation_confidence=None):
+        """Store one phase bias correction.  Returns 1 if stored, 0 if skipped."""
+        rinex_code = signal_map.get((sys_prefix, sig_id_int))
+        if rinex_code is None:
+            if not hasattr(self, '_pb_unmapped_logged'):
+                self._pb_unmapped_logged = set()
+            key = (sys_prefix, sig_id_int)
+            if key not in self._pb_unmapped_logged:
+                log.warning("Phase bias: unmapped signal %s sig_id=%d "
+                            "(bias=%.4f m) — add to signal map",
+                            sys_prefix, sig_id_int, bias_m)
+                self._pb_unmapped_logged.add(key)
+            return 0
+        if not hasattr(self, '_pb_codes_logged'):
+            self._pb_codes_logged = set()
+        log_key = (prn, rinex_code)
+        if log_key not in self._pb_codes_logged:
+            log.info("Phase bias: %s %s = %.4f m (sig_id=%d, int=%d)",
+                     prn, rinex_code, bias_m, sig_id_int, int_ind)
+            self._pb_codes_logged.add(log_key)
+        self._phase_bias[prn][rinex_code] = BiasCorrection(
+            signal_code=rinex_code, bias_m=bias_m, is_phase=True,
+            integer_indicator=int_ind, wl_indicator=wl_ind,
+            disc_counter=disc,
+            rx_mono=rx_mono,
+            queue_remains=queue_remains,
+            correlation_confidence=correlation_confidence,
+        )
+        return 1
 
     def get_orbit(self, prn):
         """Return OrbitCorrection for a satellite, or None if stale/missing."""
