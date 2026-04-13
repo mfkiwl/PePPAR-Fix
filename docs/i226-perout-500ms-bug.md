@@ -107,16 +107,50 @@ If the PHC itself is 500ms off, the offset will be ~36.5B or ~37.5B.
 But the PHC can be correct while PEROUT is still 500ms off (the bug
 is in the PEROUT hardware, not the PHC clock).
 
-## Workaround
+## Root cause identified (2026-04-12)
 
-After programming PEROUT, verify the phase via EXTTS.  If the
-fractional second of the PEROUT edge is 400-600ms, reprogram with
-`start_nsec = 500_000_000` to flip to the other half.
+The igc hardware always uses 50% duty cycle.  The `start` field in
+`PTP_PEROUT_REQUEST` specifies the **falling edge** (start of LOW),
+not the rising edge.  Setting `start_nsec = 0` puts the falling edge
+at the top of the second and the rising edge at 500ms — exactly the
+offset we observed on every igc host.
 
-This is implemented in `phc_bootstrap.py:_enable_pps_out()`.
+SatPulse (jclark/satpulse) handles this correctly in
+`internal/sdpcmd/perout.go`:
 
-If the board consistently lands on 500ms regardless of start_nsec,
-no software workaround is known.  Hardware swap is required.
+```go
+case "igb", "igc":
+    // igb and igc always use 50% duty cycle
+    // The start in PTP_PEROUT_ENABLE determines the start of the
+    // *low* part i.e. the falling edge.
+    // But we want the rising edge to be aligned with the start of
+    // the second.
+    startOff = cfg.Perout.Period / 2
+```
+
+Testing confirmed: SatPulse's PEROUT produced correct alignment on
+MadHat (23 µs offset vs 500ms before).
+
+## Fix
+
+Set `start_nsec = period_ns // 2` (500_000_000 for 1Hz) on igc so
+the falling edge starts at 500ms and the rising edge aligns with the
+top of the PHC second.  This affects only the PEROUT output timing,
+not the PHC clock value — PTP slaves still read correct TAI.
+
+Implemented in `scripts/peppar_fix/ptp_device.py:enable_perout()` via
+`_is_igc_driver()` detection.  Verified on MadHat: TICC errors
+dropped from 500ms to sub-4ns immediately after the fix.
+
+This explains **all** observed 500ms offsets across all igc hosts.
+The "hardware Target Time half-period latch" hypothesis (root cause
+#2 above) was wrong — the issue was simply that `start_nsec = 0`
+means falling edge at 0, rising edge at 500ms on igc.
+
+TimeHat previously appeared immune because its DKMS patch may have
+altered the polarity behavior, or because a prior SatPulse test left
+the correct PEROUT state.  With the fix applied, all igc hosts should
+behave consistently.
 
 ## Pre-flight check
 
