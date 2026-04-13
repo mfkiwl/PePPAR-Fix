@@ -1738,9 +1738,19 @@ def _setup_servo(args, known_ecef, qerr_store):
                             # windowing.  See docs/qerr-correlation.md
                             # for the full design and rationale.
                             # See docs/stream-timescale-correlation.md.
+                            #
+                            # No queue_remains gate here — the timing
+                            # window (0.8-1.1s) is the freshness check
+                            # for qErr correlation.  queue_remains is
+                            # only needed for timescale relationship
+                            # estimation (case 1 in the design).  With
+                            # correctly-aligned PEROUT, chA and chB
+                            # arrive nearly simultaneously so the serial
+                            # buffer always has data, making
+                            # queue_remains=True on every chB event.
                             if event.channel == args.ticc_ref_channel:
                                 _qerr = None
-                                if was_armed and not event.queue_remains:
+                                if was_armed:
                                     pending = qerr_store.get_pending_for_chb()
                                     if pending is not None:
                                         pend_mono, pend_qerr = pending
