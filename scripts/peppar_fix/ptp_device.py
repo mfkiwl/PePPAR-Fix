@@ -13,6 +13,19 @@ import time
 log = logging.getLogger(__name__)
 
 
+def _is_igc_driver(ptp_path: str) -> bool:
+    """Return True if this PTP device is backed by the igc driver."""
+    try:
+        phc_basename = os.path.basename(ptp_path)
+        if not phc_basename.startswith("ptp"):
+            return False
+        sys_path = f"/sys/class/ptp/{phc_basename}/device/driver"
+        driver_name = os.path.basename(os.readlink(sys_path))
+    except (OSError, ValueError):
+        return False
+    return driver_name == "igc"
+
+
 def _stock_igc_freq_mode_workaround_needed(ptp_path: str) -> bool:
     """Detect when this PTP device is on a stock (unpatched) igc driver.
 
@@ -280,7 +293,21 @@ class PtpDevice:
         period_sub = period_ns % 1_000_000_000
         phc_ns, _sys_ns = self.read_phc_ns()
         start_sec = phc_ns // 1_000_000_000 + 2
-        start_nsec = start_nsec_override if start_nsec_override is not None else 0
+        if start_nsec_override is not None:
+            start_nsec = start_nsec_override
+        elif _is_igc_driver(self.path):
+            # igc uses 50% duty cycle and the start time specifies the
+            # falling edge (start of LOW).  To align the rising edge
+            # with the top of the PHC second, offset by half the period.
+            # Discovered via SatPulse (jclark/satpulse) which applies
+            # the same correction.  Without this, the rising edge fires
+            # at 500 ms into the second on all igc hardware.
+            start_nsec = period_ns // 2
+            log.info("igc detected on %s: setting PEROUT start_nsec=%d "
+                     "(half-period offset for rising-edge alignment)",
+                     self.path, start_nsec)
+        else:
+            start_nsec = 0
         PTP_PEROUT_DUTY_CYCLE = 1 << 1
         buf = struct.pack('<qII qII II qII',
                           start_sec, start_nsec, 0,
