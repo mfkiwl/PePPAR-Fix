@@ -153,7 +153,9 @@ _RTCM_SSR_SIGNAL_MAP = {
     # BeiDou (Table 3.5-105)
     ('C', 0): 'L2I',   # B1I
     ('C', 1): 'L2Q',   # B1Q
+    ('C', 3): 'L2X',   # B1I+Q
     ('C', 5): 'L5I',   # B2a I
+    ('C', 6): 'L5Q',   # B2a Q
     ('C', 9): 'L7I',   # B2b I
 }
 
