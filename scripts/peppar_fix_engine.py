@@ -2255,6 +2255,14 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             # ticc_measurement.diff_ns is chA-chB (do_pps-gnss_pps),
             # so we negate to get gnss_pps-do_pps.
             pps_err_ticc_ns = -(ticc_measurement.diff_ns - args.ticc_target_ns)
+            # Sanity: if the TICC diff is larger than 100 ms, PEROUT is
+            # grossly misaligned (e.g., 500 ms offset).  Log loudly and
+            # do NOT silently use this as a servo input.
+            if abs(pps_err_ticc_ns) > 100_000_000:
+                log.error("TICC diff = %+.0f ns — PEROUT is misaligned "
+                          "(raw diff_ns=%+.0f). NOT using as servo input.",
+                          pps_err_ticc_ns, ticc_measurement.diff_ns)
+                pps_err_ticc_ns = None
             ticc_age_s = max(0.0, time.monotonic() - ticc_measurement.recv_mono)
             ticc_confidence = ticc_measurement.confidence
             # qerr for this TICC measurement was matched at chB arrival
