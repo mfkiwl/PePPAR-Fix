@@ -253,7 +253,7 @@ def measure_differential_frequency(ticc_port, ticc_baud=115200,
     pairs = []  # (elapsed_sec, diff_ns)
     pending = {}  # ref_sec → {channel: (ref_sec, ref_ps)}
     first_ref_sec = None
-    boot_discard = 2
+    boot_discard = 5  # skip first 5s: TICC boot artifacts + post-ARM settling
 
     with Ticc(ticc_port, ticc_baud, wait_for_boot=True) as ticc:
         deadline = time.monotonic() + timeout_s

@@ -2200,7 +2200,13 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
             return False
         # For VCOCXO without PHC: ARM TADD first (syncs DO PPS to GNSS PPS),
         # then use TICC to measure the resulting frequency offset.
+        # Wait a few seconds after ARM for the divider to settle before
+        # measuring — the first PPS edges after ARM can be unstable.
         _do_tadd_arm(args)
+        settle_s = 3
+        log.info("Waiting %ds for post-ARM settling before TICC measurement...",
+                 settle_s)
+        time.sleep(settle_s)
     else:
         # phc_bootstrap helpers expect args.ptp_dev; engine uses args.servo
         args.ptp_dev = args.servo
