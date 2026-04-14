@@ -457,7 +457,8 @@ def _apply_bootstrap_profile(args):
 
 def main():
     ap = argparse.ArgumentParser(description="PHC bootstrap")
-    ap.add_argument("--position-file", required=True)
+    ap.add_argument("--position-file", default=None,
+                    help="Legacy position file (fallback if receiver state has no position)")
     ap.add_argument("--serial", required=True)
     ap.add_argument("--baud", type=int, default=9600)
     ap.add_argument("--port-type", default="USB",
@@ -520,14 +521,40 @@ def main():
     if args.ptp_profile:
         _apply_bootstrap_profile(args)
 
-    # Load position
-    if not os.path.exists(args.position_file):
-        log.error("Position file not found: %s", args.position_file)
-        log.error("Run peppar_find_position.py first for cold start")
+    # Ensure receiver is producing dual-frequency observations.
+    # Done first so we have the receiver identity for position loading.
+    systems = set(args.systems.split(","))
+    import os as _os
+    _base = _os.path.basename(args.serial)
+    _is_kernel_gnss = _base.startswith("gnss") and _base[4:].isdigit()
+    _sfrbx = 0 if _is_kernel_gnss else getattr(args, 'sfrbx_rate', 1)
+    _rate_ms = 2000 if _is_kernel_gnss else getattr(args, 'measurement_rate_ms', 1000)
+    driver, _identity = ensure_receiver_ready(
+        args.serial, args.baud, port_type=args.port_type, systems=systems,
+        sfrbx_rate=_sfrbx, measurement_rate_ms=_rate_ms)
+    if driver is None:
+        log.error("Receiver not producing dual-frequency observations — "
+                  "cannot proceed. See docs/receiver-signals.md.")
         return 1
-    known_ecef = load_position(args.position_file)
-    lat, lon, alt = ecef_to_lla(*known_ecef)
-    log.info("Loaded position: %.6f, %.6f, %.1fm", lat, lon, alt)
+    log.info("Receiver ready: %s", driver.name)
+
+    # Load position — receiver state is primary, legacy file is fallback.
+    from peppar_fix.receiver_state import load_position_from_receiver
+    known_ecef = None
+    receiver_uid = _identity.get("unique_id") if _identity else None
+    if receiver_uid is not None:
+        known_ecef = load_position_from_receiver(receiver_uid)
+        if known_ecef is not None:
+            lat, lon, alt = ecef_to_lla(*known_ecef)
+            log.info("Loaded position (receiver state): %.6f, %.6f, %.1fm", lat, lon, alt)
+    if known_ecef is None and args.position_file and os.path.exists(args.position_file):
+        known_ecef = load_position(args.position_file)
+        if known_ecef is not None:
+            lat, lon, alt = ecef_to_lla(*known_ecef)
+            log.info("Loaded position (legacy file): %.6f, %.6f, %.1fm", lat, lon, alt)
+    if known_ecef is None:
+        log.error("No position available — run position bootstrap first")
+        return 1
 
     # Load drift file
     drift = load_drift(args.drift_file)
@@ -584,25 +611,6 @@ def main():
         log.error("No PPS events received — check EXTTS wiring, pin config, and PTP device")
         ptp.close()
         return 1
-
-    # Ensure receiver is producing dual-frequency observations.
-    # Auto-detects active signals; reconfigures for L1+L5 if needed.
-    systems = set(args.systems.split(","))
-    # Detect kernel GNSS device and use bandwidth-safe defaults
-    import os as _os
-    _base = _os.path.basename(args.serial)
-    _is_kernel_gnss = _base.startswith("gnss") and _base[4:].isdigit()
-    _sfrbx = 0 if _is_kernel_gnss else getattr(args, 'sfrbx_rate', 1)
-    _rate_ms = 2000 if _is_kernel_gnss else getattr(args, 'measurement_rate_ms', 1000)
-    driver, _identity = ensure_receiver_ready(
-        args.serial, args.baud, port_type=args.port_type, systems=systems,
-        sfrbx_rate=_sfrbx, measurement_rate_ms=_rate_ms)
-    if driver is None:
-        log.error("Receiver not producing dual-frequency observations — "
-                  "cannot proceed. See docs/receiver-signals.md.")
-        ptp.close()
-        return 1
-    log.info("Receiver ready: %s", driver.name)
 
     # Start NTRIP and observation infrastructure
     from realtime_ppp import serial_reader, ntrip_reader

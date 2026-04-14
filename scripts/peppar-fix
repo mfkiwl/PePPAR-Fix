@@ -272,6 +272,9 @@ bootstrap_position() {
     if [[ -n "$KNOWN_POS" ]]; then
         pos_args+=(--seed-pos "$KNOWN_POS")
     fi
+    if [[ "$RECEIVER_UNIQUE_ID" != "none" ]] && [[ -n "$RECEIVER_UNIQUE_ID" ]]; then
+        pos_args+=(--receiver-id "$RECEIVER_UNIQUE_ID")
+    fi
     # shellcheck disable=SC2046
     pos_args+=($(ntrip_args))
 
@@ -281,7 +284,7 @@ bootstrap_position() {
 if [[ -n "$KNOWN_POS" ]]; then
     echo "  Known position provided: $KNOWN_POS (skipping bootstrap)"
     # Save known position to receiver state if we have a receiver identity.
-    # Also create legacy position file for PHC bootstrap (which still reads it).
+    # Legacy position file kept for ntrip_caster compatibility.
     IFS=',' read -r kp_lat kp_lon kp_alt <<< "$KNOWN_POS"
     "$PYTHON_BIN" -c "
 import json, sys, os
@@ -361,9 +364,12 @@ if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
     bootstrap_phc_args=(
         --serial "$SERIAL"
         --port-type "$UBX_PORT"
-        --position-file "$POSITION_FILE"
         --ptp-dev "$PTP_DEV"
     )
+    # Pass legacy position file as fallback for migration
+    if [[ -f "$POSITION_FILE" ]]; then
+        bootstrap_phc_args+=(--position-file "$POSITION_FILE")
+    fi
     if [[ -n "$BAUD" ]]; then
         bootstrap_phc_args+=(--baud "$BAUD")
     fi
@@ -456,35 +462,6 @@ echo "=== peppar-fix: Step 3 — Unified engine ==="
 
 servo_backoff=5
 
-# ── Position file rotation ──────────────────────────────────────────────── #
-# When position moves, rotate the old file instead of deleting it.
-# Serial number increments monotonically.  At 300s retry cap, a week
-# produces ~2016 files — 4-digit serial covers that with margin.
-
-rotate_position_file() {
-    if [[ ! -f "$POSITION_FILE" ]]; then
-        return
-    fi
-    local dir base ext serial dest
-    dir="$(dirname "$POSITION_FILE")"
-    base="$(basename "$POSITION_FILE")"
-    # Split name.ext → name + .ext
-    if [[ "$base" == *.* ]]; then
-        ext=".${base##*.}"
-        base="${base%.*}"
-    else
-        ext=""
-    fi
-    # Find next serial number
-    serial=1
-    while [[ -f "${dir}/${base}.${serial}${ext}" ]]; do
-        serial=$((serial + 1))
-    done
-    dest="${dir}/${base}.${serial}${ext}"
-    mv "$POSITION_FILE" "$dest"
-    echo "  Rotated $POSITION_FILE → $dest"
-}
-
 build_servo_args() {
     local args=(
         --serial "$SERIAL"
@@ -556,7 +533,6 @@ while true; do
             ;;
         2)
             echo "peppar-fix: position moved — re-bootstrapping"
-            rotate_position_file
             bootstrap_position || exit 2
             servo_backoff=5
             continue
