@@ -321,7 +321,8 @@ def _poll_ubx(ser, ubr, cls, msg_id, target_identity, timeout=3.0):
     return None
 
 
-def query_receiver_identity(port, baud=9600, ser=None, ubr=None):
+def query_receiver_identity(port, baud=9600, ser=None, ubr=None,
+                            timeout=3.0):
     """Query receiver unique ID and firmware version.
 
     Sends UBX-MON-VER and UBX-SEC-UNIQID POLL messages to identify the
@@ -332,6 +333,8 @@ def query_receiver_identity(port, baud=9600, ser=None, ubr=None):
         port: serial port path
         baud: baud rate
         ser, ubr: if provided, reuse an already-open connection
+        timeout: seconds to wait for each UBX response (default 3.0,
+            use shorter values for scanning)
 
     Returns:
         dict with keys:
@@ -358,7 +361,7 @@ def query_receiver_identity(port, baud=9600, ser=None, ubr=None):
 
     try:
         # Query MON-VER for module name and firmware version
-        ver = _poll_ubx(ser, ubr, "MON", "MON-VER", "MON-VER", timeout=3.0)
+        ver = _poll_ubx(ser, ubr, "MON", "MON-VER", "MON-VER", timeout=timeout)
         if ver is not None:
             sw_version = getattr(ver, "swVersion", b"")
             if isinstance(sw_version, bytes):
@@ -397,7 +400,7 @@ def query_receiver_identity(port, baud=9600, ser=None, ubr=None):
             _ck_b = (_ck_b + _ck_a) & 0xFF
         ser.write(b"\xb5\x62" + _cls_id + _length + bytes([_ck_a, _ck_b]))
 
-        _deadline = time.monotonic() + 3.0
+        _deadline = time.monotonic() + timeout
         _buf = b""
         while time.monotonic() < _deadline:
             _chunk = ser.read(256)
@@ -440,8 +443,8 @@ def discover_receivers(ports=None, baud_rates=None):
 
     Args:
         ports: list of serial port paths to scan.  If None,
-            scans /dev/ttyACM*, /dev/ttyUSB*, /dev/gnss*.
-        baud_rates: list of baud rates to try.  Default: [9600, 115200, 460800].
+            scans /dev/gnss-*, /dev/ttyACM*, /dev/ttyUSB*.
+        baud_rates: list of baud rates to try.  Default: [115200, 9600, 460800].
 
     Returns:
         list of (port, baud, identity) tuples for each discovered receiver.
@@ -449,13 +452,14 @@ def discover_receivers(ports=None, baud_rates=None):
     import glob as _glob
 
     if ports is None:
+        # Prefer named symlinks (gnss-*) over raw ttyACM/USB
         ports = sorted(set(
+            _glob.glob("/dev/gnss-*") +
+            _glob.glob("/dev/gnss[0-9]*") +
             _glob.glob("/dev/ttyACM*") +
-            _glob.glob("/dev/ttyUSB*") +
-            _glob.glob("/dev/gnss*") +
-            _glob.glob("/dev/gnss-*")
+            _glob.glob("/dev/ttyUSB*")
         ))
-        # Resolve symlinks and deduplicate
+        # Resolve symlinks and deduplicate (keep the symlink name)
         seen_real = set()
         unique_ports = []
         for p in ports:
@@ -466,14 +470,16 @@ def discover_receivers(ports=None, baud_rates=None):
         ports = unique_ports
 
     if baud_rates is None:
-        baud_rates = [9600, 115200, 460800]
+        # 115200 first — most F9Ts are configured for this baud
+        baud_rates = [115200, 9600, 460800]
 
     results = []
     for port in ports:
         for baud in baud_rates:
             try:
-                identity = query_receiver_identity(port, baud)
-                if identity is not None:
+                # Short timeout for scanning — just need MON-VER + SEC-UNIQID
+                identity = query_receiver_identity(port, baud, timeout=1.5)
+                if identity is not None and identity.get("unique_id") is not None:
                     results.append((port, baud, identity))
                     break  # Found receiver on this port, skip other bauds
             except Exception as e:
