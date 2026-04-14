@@ -125,6 +125,9 @@ class NarrowLaneResolver:
     def attempt(self, filt, mw_tracker):
         """Try to fix ambiguities in the PPPFilter.
 
+        Also re-constrains already-fixed ambiguities every epoch to prevent
+        drift from process noise.
+
         Args:
             filt: PPPFilter instance with .x, .P, .sv_to_idx
             mw_tracker: MelbourneWubbenaTracker with fixed N_WL values
@@ -134,6 +137,15 @@ class NarrowLaneResolver:
         """
         N_BASE = 6  # from solve_ppp.py: 3 pos + clk + 2 ISB
         newly_fixed = {}
+
+        # Re-constrain already-fixed ambiguities every epoch
+        for sv, fix_info in list(self._fixed.items()):
+            amb_idx = filt.sv_to_idx.get(sv)
+            if amb_idx is None:
+                continue
+            si = N_BASE + amb_idx
+            if si < len(filt.x):
+                self._apply_fix(filt, si, fix_info['a_if_fixed'])
 
         for sv, amb_idx in list(filt.sv_to_idx.items()):
             if sv in self._fixed:
