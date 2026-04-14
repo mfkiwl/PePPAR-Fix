@@ -114,20 +114,73 @@ it can run either L2 or L5, while the -20B is locked to L5 only.
 The -20B's NavIC support is not useful for PPP-AR (no SSR corrections
 available for NavIC).
 
+## Why L5 is preferred for PPP-AR
+
+PePPAR Fix always configures L5 when the receiver accepts it.  This
+is a deliberate choice driven by our SSR correction source (CNES)
+and the receiver's tracking mode.
+
+### Reason 1: CNES phase bias compatibility (decisive)
+
+CNES SSR provides GPS phase biases for these tracking modes:
+
+    GPS: L1C (hit), L2W, L5I
+    GAL: L1C (hit), E5aQ (hit), E7Q (hit)
+
+The F9T tracks GPS L2 as **L2CL** (civil L2C, L-code).  CNES
+provides **L2W** (semi-codeless Z-tracking, used by geodetic
+receivers).  L2CL and L2W are different signal processing approaches
+with different hardware delay characteristics — the L2W phase bias
+does not apply to L2CL observations.  Result: **GPS L2 AR silently
+fails** because the bias lookup misses.
+
+For L5, CNES provides **L5I** biases.  The F9T tracks **L5Q**.  L5I
+and L5Q share the same carrier frequency (1176.45 MHz), so the phase
+bias applies despite the tracking mode difference.  GPS L5 AR works.
+
+**This is CNES-specific.**  An SSR provider that published **L2L or
+L2X** phase biases (matching the F9T's civil L2C tracking) would make
+GPS L2 AR viable.  The L5 preference is downstream of our SSR source
+choice, not a fundamental limitation.  See `docs/correction-sources.md`
+for SSR stream options.
+
+### Reason 2: Lower code noise (significant)
+
+L5 uses BPSK(10) modulation vs L2C's BPSK(1) — roughly 10× better
+code precision.  This directly affects Melbourne-Wubbena averaging:
+lower code noise means faster WL convergence (fewer epochs to fix
+N_WL).  With L5, WL fixing completes in ~60 epochs; L2 would need
+proportionally more.
+
+### Reason 3: Firmware universality (practical)
+
+L5 works on both ZED-F9T (TIM 2.20) and ZED-F9T-20B (TIM 2.25).
+L2C only works on TIM 2.20.  Preferring L5 avoids firmware-dependent
+behavior in the field.
+
+### What would change with a different SSR source?
+
+If we switched to an SSR provider with L2L biases:
+- GPS L2 AR would work (bias lookup would hit)
+- L2 has a **longer** wide-lane wavelength (86.2 cm vs 75.2 cm),
+  which is actually easier to fix — wider tolerance for code noise
+- But L2's higher code noise partly cancels that advantage
+- L5 would still be preferred on balance (code noise + universality)
+  but the margin would be "better" rather than "required"
+
+The current policy: **always L5, documented as an SSR-driven choice,
+not a hardware limitation.**
+
 ## Implications for PePPAR Fix
 
 1. **F9T-TOP on TimeHat is the only receiver that can test L2 AR.**
    Force `--receiver f9t` to prevent `ensure_receiver_ready()` from
-   auto-switching to L5.
+   auto-switching to L5.  Requires an SSR source with L2L biases
+   to be meaningful (CNES L2W won't work).
 
-2. **The `F9TDriver` (L2 profile) has a bug**: it specifies
-   `GAL_E5B_ENA=1` which NAKs on both firmware versions. The L2
-   if_pairs also reference `GAL-E5bQ` which won't be tracked.
-   Fix: use E5a for GAL in both profiles.
+2. **`F9TDriver` L2 profile E5b bug (fixed 096dbdc)**: the L2
+   profile previously specified `GAL_E5B_ENA=1` which NAKs on all
+   tested firmware.  Now uses E5a for Galileo in both profiles.
 
-3. **`ensure_receiver_ready()` should detect the firmware variant**
-   and offer L2 as a configuration option on TIM 2.20 hardware,
-   rather than always preferring L5.
-
-4. **`docs/receiver-signals.md` needs correction**: the claim that
+3. **`docs/receiver-signals.md` needs correction**: the claim that
    TIM 2.20 NAKs L5 is false. Both firmwares support L5.
