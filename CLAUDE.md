@@ -462,6 +462,7 @@ here before changing anything in the areas they cover.
 | [wr-gm-research.md](docs/wr-gm-research.md) | White Rabbit GM architecture review: softpll internals (helper/main/external PLLs), how GM uses PPS vs 10 MHz, qErr injection points, PEROUT at 10 MHz, two integration paths (PHC PEROUT vs OCXO+ClockMatrix). |
 | [ticc-baseline-2026-04-01.md](docs/ticc-baseline-2026-04-01.md) | F9T PPS baseline TDEV(1s)=2.3 ns (2h runs); i226 TCXO PEROUT TDEV(1s)=1.170 ns (0.2% spread); servo bandwidth implications; EXTTS quantization analysis. |
 | [ppp-ar-design.md](docs/ppp-ar-design.md) | Design for PPP-AR: phase bias sources, filter changes, ambiguity resolution algorithm, 4-phase implementation plan, 5 validation tests. |
+| [ppp-ar-filter-redesign.md](docs/ppp-ar-filter-redesign.md) | **Read after ppp-ar-design.md.** Why IF ambiguities are not integer, WL/NL decomposition, Melbourne-Wubbena tracker + narrow-lane resolver design, ~210 lines total. Supersedes Phase B/C integrality approach. |
 | [clockmatrix-bootstrap-plan.md](docs/clockmatrix-bootstrap-plan.md) | ClockMatrix supplements PHC: bootstrap sequence, FCW handoff, hybrid architecture for Timebeat OTC. |
 | [lab-operations.md](docs/lab-operations.md) | **Read before running on any lab host.** Deployment procedure, pre-flight checklist, stumble analysis, standard host layout, future automation work. |
 
