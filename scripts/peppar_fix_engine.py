@@ -1506,13 +1506,14 @@ def _save_osc_freq_corr(ctx):
         tcxo_corr = adjfine - carrier_tracker.drift_rate_ppb
 
     # Save to DO state (primary)
-    try:
-        from peppar_fix.do_state import phc_unique_id, save_do_freq_offset
-        do_uid = phc_unique_id(phc_dev)
-        save_do_freq_offset(do_uid, adjfine)
-        log.info("Saved DO freq offset: adjfine=%.1f ppb (DO %s)", adjfine, do_uid)
-    except Exception as e:
-        log.warning("Failed to save DO state: %s", e)
+    do_uid = ctx.get('do_unique_id')
+    if do_uid is not None:
+        try:
+            from peppar_fix.do_state import save_do_freq_offset
+            save_do_freq_offset(do_uid, adjfine)
+            log.info("Saved DO freq offset: adjfine=%.1f ppb (DO %s)", adjfine, do_uid)
+        except Exception as e:
+            log.warning("Failed to save DO state: %s", e)
 
     # Save TCXO offset to receiver state if available
     if tcxo_corr is not None:
@@ -1563,11 +1564,10 @@ def _log_do_characterization(args):
     char = None
 
     # Try DO state first
-    phc_dev = getattr(args, 'servo', None)
-    if phc_dev:
+    do_uid = _resolve_do_uid(args)
+    if do_uid:
         try:
-            from peppar_fix.do_state import phc_unique_id, load_do_state
-            do_uid = phc_unique_id(phc_dev)
+            from peppar_fix.do_state import load_do_state
             do_state = load_do_state(do_uid)
             if do_state is not None and do_state.get("characterization"):
                 char = do_state["characterization"]
@@ -1622,12 +1622,11 @@ def _init_carrier_tracker(args):
     source = None
 
     # Try state files first
-    phc_dev = getattr(args, 'servo', None)
+    do_uid = _resolve_do_uid(args)
     receiver_uid = getattr(args, 'receiver_unique_id', None)
-    if phc_dev:
+    if do_uid:
         try:
-            from peppar_fix.do_state import phc_unique_id, load_do_state
-            do_uid = phc_unique_id(phc_dev)
+            from peppar_fix.do_state import load_do_state
             do_state = load_do_state(do_uid)
             if do_state is not None:
                 phc_corr = do_state.get("last_known_freq_offset_ppb")
@@ -1670,6 +1669,25 @@ def _init_carrier_tracker(args):
     return tracker
 
 
+def _resolve_do_uid(args):
+    """Resolve the DO unique_id from --do-label or PHC MAC.
+
+    External DOs (VCOCXO, ClockMatrix) use --do-label.
+    Bundled PHC+DO uses the PHC MAC address.
+    """
+    do_label = getattr(args, 'do_label', None)
+    if do_label:
+        return do_label
+    phc_dev = getattr(args, 'servo', None)
+    if phc_dev:
+        try:
+            from peppar_fix.do_state import phc_unique_id
+            return phc_unique_id(phc_dev)
+        except Exception:
+            return phc_dev
+    return None
+
+
 def _setup_servo(args, known_ecef, qerr_store):
     """Set up PHC servo.
 
@@ -1705,10 +1723,36 @@ def _setup_servo(args, known_ecef, qerr_store):
     bootstrap_adj = ptp.read_adjfine()
     log.info("PHC adjfine from bootstrap: %.1f ppb", bootstrap_adj)
 
-    # Construct frequency actuator based on profile
+    # Construct frequency actuator based on profile.
+    # Priority: DAC > ClockMatrix > PHC adjfine (last resort).
     from peppar_fix.phc_actuator import PhcAdjfineActuator
     actuator = PhcAdjfineActuator(ptp)
-    if getattr(args, 'clockmatrix_bus', None) is not None:
+    actuator_type = "phc_adjfine"
+
+    if getattr(args, 'dac_bus', None) is not None:
+        try:
+            from peppar_fix.dac_actuator import DacActuator
+            dac_addr = int(getattr(args, 'dac_addr', '0x60'), 0)
+            ppb_per_code = getattr(args, 'dac_ppb_per_code', None)
+            if ppb_per_code is None:
+                log.error("--dac-ppb-per-code required for DAC actuator")
+            else:
+                actuator = DacActuator(
+                    bus_num=args.dac_bus,
+                    addr=dac_addr,
+                    bits=getattr(args, 'dac_bits', 12),
+                    center_code=getattr(args, 'dac_center_code', None),
+                    ppb_per_code=ppb_per_code,
+                    max_ppb=getattr(args, 'dac_max_ppb', None),
+                    dac_type=getattr(args, 'dac_type', 'mcp4725'),
+                )
+                actuator_type = "dac"
+                log.info("Using DAC actuator: bus=%d addr=0x%02x bits=%d ppb/code=%.4f",
+                         args.dac_bus, dac_addr, args.dac_bits, ppb_per_code)
+        except Exception as e:
+            log.error("DAC actuator init failed: %s — falling back to PHC adjfine", e)
+            actuator = PhcAdjfineActuator(ptp)
+    elif getattr(args, 'clockmatrix_bus', None) is not None:
         try:
             from peppar_fix.clockmatrix import ClockMatrixI2C
             from peppar_fix.clockmatrix_actuator import ClockMatrixActuator
@@ -1717,6 +1761,7 @@ def _setup_servo(args, known_ecef, qerr_store):
                 addr=int(getattr(args, 'clockmatrix_addr', '0x58'), 0))
             cm_dpll = getattr(args, 'clockmatrix_dpll_actuator', 3)
             actuator = ClockMatrixActuator(cm_i2c, dpll_id=cm_dpll)
+            actuator_type = "clockmatrix"
             log.info("Using ClockMatrix actuator: bus=%d dpll=%d",
                      args.clockmatrix_bus, cm_dpll)
         except Exception as e:
@@ -2161,6 +2206,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'phc_dev': args.servo,
         'drift_file': getattr(args, 'drift_file', None) or 'data/drift.json',
         'receiver_unique_id': getattr(args, 'receiver_unique_id', None),
+        'do_unique_id': _resolve_do_uid(args),
         'ts_params': ts_params,
         'actuator': actuator,
         'cm_phase_source': cm_phase_source,
@@ -3847,6 +3893,25 @@ Two-phase operation:
                             "(Carrier source disabled, PPS+PPP still available)")
     servo.add_argument("--do-char-file", default="data/do_characterization.json",
                        help="Path to DO characterization JSON (read at startup)")
+    servo.add_argument("--do-label", default=None,
+                       help="Label for the disciplined oscillator (overrides auto-detected PHC "
+                            "MAC as the DO unique_id in state persistence). Required for external "
+                            "DOs (VCOCXO, ClockMatrix) that aren't bundled inside a PHC.")
+    servo.add_argument("--dac-bus", type=int, default=None,
+                       help="I2C bus for DAC-driven VCOCXO (e.g. 1 for /dev/i2c-1)")
+    servo.add_argument("--dac-addr", default=None,
+                       help="I2C address for DAC (e.g. 0x60)")
+    servo.add_argument("--dac-bits", type=int, default=12,
+                       help="DAC resolution in bits (default: 12 for MCP4725)")
+    servo.add_argument("--dac-center-code", type=int, default=None,
+                       help="DAC code for nominal frequency (default: midscale)")
+    servo.add_argument("--dac-ppb-per-code", type=float, default=None,
+                       help="Tuning sensitivity in ppb per DAC LSB (must be characterized)")
+    servo.add_argument("--dac-max-ppb", type=float, default=None,
+                       help="Maximum frequency adjustment in ppb (default: computed from range)")
+    servo.add_argument("--dac-type", default="mcp4725",
+                       choices=["mcp4725", "ad5693r", "generic"],
+                       help="DAC chip type (default: mcp4725)")
 
     ticc = ap.add_argument_group("TICC experimental input (optional)")
     ticc.add_argument("--ticc-port", default=None,

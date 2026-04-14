@@ -31,6 +31,15 @@ KEYS = (
     "ticc_settled_threshold_ns",
     "ticc_settled_deadband_ns",
     "ticc_settled_count",
+    "do_label",
+    "do_type",
+    "dac_bus",
+    "dac_addr",
+    "dac_bits",
+    "dac_center_code",
+    "dac_ppb_per_code",
+    "dac_max_ppb",
+    "dac_type",
 )
 
 
