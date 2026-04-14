@@ -2,20 +2,20 @@
 
 ## Hosts
 
-### PiPuss — Data collection and GNSS observation
+### MadHat (was PiPuss) — Data collection and GNSS observation
 
 | Field | Value |
 |-------|-------|
-| Hostname | PiPuss |
+| Hostname | MadHat (renamed from PiPuss 2026-04-13) |
 | Hardware | Raspberry Pi 5 (BCM2712, aarch64) |
 | OS | Debian Bookworm, kernel 6.12.62+rpt-rpi-2712 |
 | IP | 10.168.60.242 (DHCP) |
-| Access | `ssh pipuss.local` |
-| Serial ports | /dev/ttyACM0, /dev/ttyACM1, /dev/ttyACM2, /dev/ttyAMA10 |
-| Symlinks | /dev/gnss-top, /dev/gnss-bot, /dev/ticc (udev rules) |
-| Services | chronyd, gpsd (/dev/ttyACM0) |
-| Python | `~/pygpsclient/bin/python` (pyubx2, numpy, pandas, allantools) |
-| Role | testAnt data collection, PePPAR Fix observations |
+| Access | `ssh MadHat.local` |
+| Serial ports | /dev/ttyACM0 |
+| Symlinks | TBD (old gnss-top/gnss-bot symlinks may be stale after rewire) |
+| Services | chronyd |
+| Python | `~/peppar-fix/venv` (pyubx2, numpy, scipy) |
+| Role | PePPAR Fix AR observation, testAnt data collection |
 | Docs | — |
 
 ### Onocoy — **MOTHBALLED 2026-04-08**
@@ -96,7 +96,7 @@ are a record of what *was* connected, not what *is*.
 | NIC | TimeHAT v5 (Intel i226-LM, TCXO), eth1 on PTP LAN |
 | PHC | /dev/ptp0 (i226, 1 ns resolution, HW timestamping) |
 | SDP pins | SDP0 (PHC PPS OUT, SMA1 J4 → TICC #3 chA), SDP1 (PPS IN from F9T-3RD) |
-| GNSS | u-blox ZED-F9T-20B (EVK-F9T-20-00, F9T-3RD) on /dev/gnss-top at 115200 baud |
+| GNSS | u-blox ZED-F9T (EVK-F9T-10-00, F9T-TOP) on /dev/gnss-top at 460800 baud |
 | Antenna | UFO (SparkFun SPK6618H) via GUS #1 |
 | Software | SatPulse (Go daemon), satpulsetool |
 | Services | satpulse (systemd) |
@@ -183,29 +183,29 @@ against ntp1. NTS is used for MITM protection on Internet sources.
 | EVK model | EVK-F9T-20-00 |
 | Module | u-blox ZED-F9T-20B |
 | Firmware | TIM 2.25 (PROTVER 29.25) |
-| Host | TimeHat |
-| Port | /dev/gnss-top (udev symlink, matched by USB ID_PATH) |
-| Baud | 115200 |
-| Signals | GPS, Galileo, BeiDou, QZSS, SBAS |
+| SEC-UNIQID | 394029318459 |
+| Host | clkPoC3 (moved from TimeHat 2026-04-13) |
+| Port | /dev/ttyACM1 |
+| Baud | 460800 |
+| Signals | GPS L1+L5, Galileo E1+E5a, BeiDou B1+B2a |
 | Limitation | **No GLONASS** (-20B hardware variant) |
-| Antenna | UFO (SparkFun SPK6618H) via GUS #1 |
-| PPS | Wired to TimeHAT SDP1 + TICC #3 chB (EVK SMA) |
-| Notes | Brand new unit, installed 2026-03-16. Configured with configure_f9t.py (GPS+GAL+BDS, 1 Hz, survey-in 300s/5m). |
+| Antenna | Shared with F9T-TOP and F9T-BOT via splitter (same ARP) |
+| Notes | Moved to clkPoC3 2026-04-13. Was on TimeHat 2026-03-16 to 2026-04-13. |
 
 ### F9T-TOP
 
 | Field | Value |
 |-------|-------|
 | EVK model | EVK-F9T-10-00 |
-| Module | u-blox ZED-F9T |
+| Module | u-blox ZED-F9T (no -20B suffix in MON-VER) |
 | Firmware | TIM 2.20 (PROTVER 29.20) |
-| Host | PiPuss |
-| Port | /dev/gnss-top (udev symlink) |
-| Baud | 115200 |
-| Signals | GPS, GLONASS, Galileo, BeiDou, QZSS, SBAS, NavIC |
-| Antenna | TBD (returning to PiPuss for testAnt use) |
-| PPS | TBD |
-| Notes | Returned to PiPuss 2026-03-16; previously on TimeHat |
+| SEC-UNIQID | 136395244089 |
+| Host | TimeHat (moved from MadHat/PiPuss 2026-04-13) |
+| Port | /dev/gnss-top |
+| Baud | 460800 |
+| Signals | Currently L1+L5 (auto-configured by ensure_receiver_ready); hardware natively L1/L2 |
+| Antenna | Shared with F9T-BOT and F9T-3RD via splitter (same ARP) |
+| Notes | EVK-F9T-10-00 is nominally L1/L2 hardware but ZED-F9T silicon supports L5. ensure_receiver_ready() auto-switches to L5 (tries L5 first). CFG-VALGET confirms L2C_ENA=0, L5_ENA=1. To test L2 AR, force `--receiver f9t`. |
 
 ### F9T-BOT
 
@@ -214,12 +214,13 @@ against ntp1. NTS is used for MITM protection on Internet sources.
 | EVK model | EVK-F9T-20-00 |
 | Module | u-blox ZED-F9T-20B |
 | Firmware | TIM 2.25 (PROTVER 29.25) |
-| Host | PiPuss |
-| Port | /dev/gnss-bot (udev symlink) |
-| Baud | 115200 |
-| Signals | GPS, Galileo, BeiDou, QZSS, SBAS |
+| SEC-UNIQID | 262843023907 |
+| Host | MadHat (was PiPuss, renamed 2026-04-13) |
+| Port | /dev/ttyACM0 |
+| Baud | 460800 |
+| Signals | GPS L1+L5, Galileo E1+E5a, BeiDou B1+B2a |
 | Limitation | **No GLONASS** (-20B hardware variant) |
-| Antenna | Patch3 via GUS splitter |
+| Antenna | Shared with F9T-TOP and F9T-3RD via splitter (same ARP) |
 | Notes | Physically on bottom of the stacked EVK pair |
 
 **USB serial note:** Both F9T EVKs present the same USB VID:PID and serial
@@ -360,25 +361,14 @@ directly to the result and must be accounted for.
 
 ### TAPR GUS Active Splitters (×2)
 
-**GUS #1** (West roof slope)
+**GUS #1 and #2** — wiring changed 2026-04-13. All three F9Ts
+(F9T-TOP on TimeHat, F9T-BOT on MadHat, F9T-3RD on clkPoC3) now
+share one antenna via a splitter (same ARP). Antenna and splitter
+identity needs verification — update this section once confirmed.
 
 | Field | Value |
 |-------|-------|
-| Model | TAPR GUS Active GPS Antenna Splitter |
-| Input | UFO antenna (SparkFun SPK6618H, West roof slope) |
-| Outputs | otcBob1 F9T, Onocoy PX1125T, TimeHat F9T-3RD |
-| Gain | Compensates splitting loss — no appreciable signal degradation |
-| Bandwidth | Covers all GNSS bands (L1/L5/E1/E5a/B1/B2a verified) |
-| Docs | [TAPR GUS Manual](https://web.tapr.org/~n8ur/GUS_Manual.pdf) |
-
-**GUS #2** (East roof slope)
-
-| Field | Value |
-|-------|-------|
-| Model | TAPR GUS Active GPS Antenna Splitter |
-| Input | Patch3 antenna (coax from roof, East roof slope) |
-| Outputs | F9T-BOT (PiPuss), F10T (Onocoy) |
-| Gain | Compensates splitting loss — no appreciable signal degradation |
+| Model | TAPR GUS Active GPS Antenna Splitter (×2) |
 | Bandwidth | Covers all GNSS bands (L1/L5/E1/E5a/B1/B2a verified) |
 | Docs | [TAPR GUS Manual](https://web.tapr.org/~n8ur/GUS_Manual.pdf) |
 

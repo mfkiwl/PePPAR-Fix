@@ -32,9 +32,9 @@ However, each chip has a unique hardware ID queryable via `UBX-SEC-UNIQID`:
 
 | Receiver | SEC-UNIQID | Model | Label |
 |---|---|---|---|
-| F9T-3RD | `394029318459` | ZED-F9T-20B | TimeHat primary |
-| F9T-TOP | `136395244089` | ZED-F9T | PiPuss testAnt |
-| F9T-BOT | `262843023907` | ZED-F9T-20B | PiPuss secondary |
+| F9T-TOP | `136395244089` | ZED-F9T | TimeHat /dev/gnss-top (as of 2026-04-13) |
+| F9T-BOT | `262843023907` | ZED-F9T-20B | MadHat /dev/ttyACM0 (as of 2026-04-13) |
+| F9T-3RD | `394029318459` | ZED-F9T-20B | clkPoC3 /dev/ttyACM1 (as of 2026-04-13) |
 
 The Deacon should periodically verify SEC-UNIQID matches expected
 receiver-to-host assignment (runs when host is idle, via a small

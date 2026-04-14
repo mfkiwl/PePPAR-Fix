@@ -2,10 +2,10 @@
 
 > **Diagram is a 2026-03-16 snapshot.**  See the change log at the
 > bottom for everything that has happened since.  Notably, **Onocoy
-> was mothballed 2026-04-08** — wherever the diagram or sourcetable
-> below shows Onocoy, F10T, or PX1125T, treat it as historical.
-> The current host for TICC #2 is `ocxo` (with the F9T-TOP and the
-> i226 add-in card), and Onocoy itself is powered down.
+> was mothballed 2026-04-08** and **receivers were shuffled 2026-04-13**
+> (F9T-TOP → TimeHat, F9T-3RD → clkPoC3, PiPuss renamed to MadHat,
+> all three F9Ts on same antenna).  Wherever the diagram shows
+> Onocoy, F10T, or PX1125T, treat as historical.
 
 ## Current connections
 
@@ -120,10 +120,9 @@ NTS is used on Internet sources for MITM protection.
 
 | Receiver | Host | Antenna | Splitter | Mount site |
 |----------|------|---------|----------|------------|
-| F9T-3RD (ZED-F9T-20B, TIM 2.25) | TimeHat | UFO (SPK6618H) | GUS #1 | West roof slope |
-| F9T-TOP (ZED-F9T, TIM 2.20) | PiPuss | Patch3 | GUS #2 | East roof slope |
-| F9T-BOT (ZED-F9T-20B, TIM 2.25) | PiPuss | Patch3 | GUS #2 | East roof slope |
-| F10T (ArduSimple, FTDI) | Onocoy | Patch3 | GUS #2 | East roof slope |
+| F9T-TOP (ZED-F9T, TIM 2.20) | TimeHat | shared (TBD) | splitter (TBD) | TBD |
+| F9T-BOT (ZED-F9T-20B, TIM 2.25) | MadHat | shared (TBD) | splitter (TBD) | TBD |
+| F9T-3RD (ZED-F9T-20B, TIM 2.25) | clkPoC3 | shared (TBD) | splitter (TBD) | TBD |
 | F9T (OTC SBC) | otcBob1 | UFO (SPK6618H) | GUS #1 | West roof slope |
 | PX1125T (SkyTraq) | Onocoy | UFO (SPK6618H) | GUS #1 | West roof slope |
 | Adafruit Ultimate GPS (MTK-3301) | bbb | Patch1 | SV1AFN L1 | East roof slope |
@@ -172,6 +171,23 @@ NTS is used on Internet sources for MITM protection.
 
 Record topology changes here so the history of what was connected when
 is preserved. Include date, what changed, and why.
+
+### 2026-04-13 — Receiver shuffle, PiPuss renamed to MadHat, all three F9Ts on one antenna
+
+- **PiPuss renamed to MadHat** (hostname changed, reachable via `ssh MadHat.local`)
+- **F9T-TOP** (EVK-F9T-10-00, ZED-F9T, TIM 2.20, uniqueId=136395244089)
+  moved from PiPuss/MadHat back to **TimeHat** on `/dev/gnss-top`
+- **F9T-3RD** (EVK-F9T-20-00, ZED-F9T-20B, TIM 2.25, uniqueId=394029318459)
+  moved from TimeHat to **clkPoC3** on `/dev/ttyACM1`
+- **F9T-BOT** (EVK-F9T-20-00, ZED-F9T-20B, TIM 2.25, uniqueId=262843023907)
+  stays on MadHat on `/dev/ttyACM0`
+- **All three F9Ts now share one antenna** via a splitter (same ARP).
+  Antenna and splitter identity TBD — verify which antenna/GUS.
+- Note: F9T-TOP is EVK-F9T-10-00 (L1/L2 hardware) but
+  `ensure_receiver_ready()` auto-configures it for L5 (ZED-F9T silicon
+  supports both L2 and L5). CFG-VALGET confirms L2C_ENA=0, L5_ENA=1.
+- Verified 2026-04-14 via MON-VER + CFG-VALGET + SEC-UNIQID on all
+  three hosts.
 
 ### 2026-04-08 — Onocoy mothballed; TICC #2 moved to ocxo for i226 bring-up
 
