@@ -1676,6 +1676,14 @@ def _log_do_characterization(args):
                      pair, hz, 1.0 / hz if hz > 0 else 0)
 
 
+def _init_noise_estimator(args):
+    """Create InBandNoiseEstimator if not in freerun mode."""
+    if args.freerun:
+        return None
+    from peppar_fix.noise_estimator import InBandNoiseEstimator
+    return InBandNoiseEstimator()
+
+
 def _init_carrier_tracker(args):
     """Create CarrierPhaseTracker, seeding D from state or drift file.
 
@@ -2739,6 +2747,7 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
         'ticc_prev_error_mono': None,
         'consecutive_outliers': 0,
         'ticc_settled_count': 0,
+        'noise_estimator': _init_noise_estimator(args),
         'holdover': {
             'active': False,
             'reason': '',
@@ -3440,6 +3449,14 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         ctx['consecutive_outliers'] = 0
 
     scheduler.accumulate(best.error_ns, best.confidence_ns, best.name)
+
+    # Feed in-band noise estimator (before correction decision)
+    noise_est = ctx.get('noise_estimator')
+    if noise_est is not None:
+        # will_correct is a lookahead — True if scheduler will flush this epoch
+        will_correct = scheduler.should_correct()
+        noise_est.feed(best.error_ns, ctx['adjfine_ppb'], will_correct)
+
     # Three-stage clockClass promotion: 248 (boot) → 52 (PHC bootstrapped,
     # set by wrapper after bootstrap) → 6 (servo settled).  Demote back
     # to 52 if the scheduler leaves settled state.
@@ -3594,6 +3611,10 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                      f"err={best.error_ns:+.1f}ns "
                      f"coast ({scheduler.n_accumulated}/{scheduler.interval}) "
                      f"adj={ctx['adjfine_ppb']:+.1f}ppb{mode_suffix}")
+
+    # Log noise estimator summary periodically
+    if noise_est is not None and n_epochs % 120 == 0 and noise_est.gap_samples >= 10:
+        log.info("  [noise] %s", noise_est.summary())
 
     # PHC time at PPS edge (from EXTTS hardware timestamp).
     phc_gettime_ns = phc_sec * 1_000_000_000 + phc_nsec
