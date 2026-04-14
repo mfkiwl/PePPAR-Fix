@@ -4403,6 +4403,10 @@ Two-phase operation:
                        help="Device/profile config TOML (default: config/receivers.toml)")
     servo.add_argument("--servo", default=None,
                        help="PTP device for PHC servo (e.g. /dev/ptp0)")
+    servo.add_argument("--no-do", action="store_true",
+                       help="Position-only mode: no DO, no servo, no PPS. "
+                            "Overrides --servo and host config ptp_dev. "
+                            "Useful for cold/warm position reproducibility testing.")
     servo.add_argument("--pps-pin", type=int, default=None,
                        help="PTP pin index for PPS input (profile/default if omitted)")
     servo.add_argument("--extts-channel", type=int, default=None,
@@ -4638,6 +4642,9 @@ Two-phase operation:
 
     args = ap.parse_args()
     _apply_host_config(args)
+    # --no-do overrides --servo from CLI or host config
+    if args.no_do:
+        args.servo = None
     # Apply defaults for args that are None after CLI + host config.
     # These were made nullable so host config can override them.
     if args.baud is None:
