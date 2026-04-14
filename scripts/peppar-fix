@@ -206,70 +206,11 @@ ntrip_args() {
     echo "${args[@]}"
 }
 
-# Ensure state directories exist for state persistence
-mkdir -p state/receivers state/dos state/phcs state/timestampers data
-
-# ── Step 1: Verify/configure receiver ───────────────────────────────────── #
-#
-# Single entry point: checks dual-freq observations, reconfigures signals
-# (L5 or L2C), applies L5 health override + warm restart if needed, sets
-# measurement rate and message routing, verifies the result.  All config
-# is saved to RAM + BBR + Flash.
-#
-# This replaces the old peppar_rx_config.py call.  ensure_receiver_ready
-# subsumes everything rx_config did, plus dual-freq validation and L5.
-
-echo "=== peppar-fix: Step 1 — Receiver configuration ==="
-
-rx_backoff=5
-rx_max_retries=3
-for ((rx_try=1; rx_try<=rx_max_retries; rx_try++)); do
-    rx_args=(
-        "$SERIAL"
-        --port-type "$UBX_PORT"
-        --systems "$SYSTEMS"
-    )
-    if [[ -n "$BAUD" ]]; then
-        rx_args+=(--baud "$BAUD")
-    fi
-    if DETECTED_OUTPUT=$("$PYTHON_BIN" "$SCRIPT_DIR/peppar_ensure_receiver.py" "${rx_args[@]}"); then
-        # Output: line 1 = driver name, line 2 = unique_id, line 3 = position status
-        DETECTED_DRIVER=$(echo "$DETECTED_OUTPUT" | sed -n '1p')
-        RECEIVER_UNIQUE_ID=$(echo "$DETECTED_OUTPUT" | sed -n '2p')
-        RECEIVER_HAS_POSITION=$(echo "$DETECTED_OUTPUT" | sed -n '3p')
-        if [[ "$RECEIVER_UNIQUE_ID" != "none" ]]; then
-            echo "  Receiver unique_id: $RECEIVER_UNIQUE_ID"
-        fi
-        # Map driver name to --receiver arg for downstream scripts
-        case "$DETECTED_DRIVER" in
-            *L1/L5*|*l5*)  RECEIVER="f9t-l5" ;;
-            *L1/L2*|*f9t*) RECEIVER="f9t" ;;
-        esac
-        break
-    fi
-    if [[ $rx_try -eq $rx_max_retries ]]; then
-        echo "ERROR: Receiver configuration failed after $rx_max_retries attempts" >&2
-        exit 1
-    fi
-    echo "  Retry in ${rx_backoff}s..."
-    sleep "$rx_backoff"
-    rx_backoff=$((rx_backoff * 2))
-done
-
-# ── Step 2: Position bootstrap ─────────────────────────────────────────── #
-# Position bootstrap is now handled internally by the engine.  The engine
-# loads from receiver state, falls back to legacy position file, or runs
-# PPPFilter from scratch — all inside run().  Known positions provided via
-# --known-pos are persisted to receiver state and legacy file by the engine.
-echo "  Position bootstrap: handled by engine (internal)"
-
-# ── Step 2b: PHC bootstrap ──────────────────────────────────────────────── #
-# PHC bootstrap is now handled internally by the engine when --servo is set.
-# The engine measures PPS frequency, evaluates PHC phase, and intervenes
-# (phase step + glide slope) if needed, all before starting the servo loop.
-echo "  PHC bootstrap: handled by engine (internal)"
-
-# ── Step 3: Run servo with retry logic ──────────────────────────────────── #
+# ── Run engine ─────────────────────────────────────────────────────────── #
+# Receiver config, position bootstrap, DO bootstrap, PPS retry, and PHC
+# re-bootstrap are all handled internally by the engine.  The wrapper's
+# remaining job: venv discovery, config resolution, one-time DO
+# characterization, and the engine invocation.
 
 # ── Step 2c: One-time DO characterization ──────────────────────────────── #
 # Run a 30-minute --freerun once per host to capture the DO's noise
