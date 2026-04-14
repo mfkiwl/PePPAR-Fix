@@ -361,15 +361,13 @@ def query_receiver_identity(port, baud=9600, ser=None, ubr=None):
         ver = _poll_ubx(ser, ubr, "MON", "MON-VER", "MON-VER", timeout=3.0)
         if ver is not None:
             sw_version = getattr(ver, "swVersion", b"")
-            hw_version = getattr(ver, "hwVersion", b"")
             if isinstance(sw_version, bytes):
                 sw_version = sw_version.decode("ascii", errors="replace").rstrip("\x00")
-            if isinstance(hw_version, bytes):
-                hw_version = hw_version.decode("ascii", errors="replace").rstrip("\x00")
             result["firmware"] = sw_version.strip() if sw_version else "unknown"
 
-            # Module name and protver are in the extension fields
-            # pyubx2 exposes them as extension_01, extension_02, etc.
+            # Module name, FWVER, and protver are in the extension fields.
+            # FWVER= is the application firmware name (e.g. "TIM 2.20"),
+            # while swVersion is the base core version — always prefer FWVER=.
             for i in range(1, 10):
                 ext = getattr(ver, f"extension_{i:02d}", None)
                 if ext is None:
@@ -382,35 +380,43 @@ def query_receiver_identity(port, baud=9600, ser=None, ubr=None):
                 elif ext.startswith("PROTVER="):
                     result["protver"] = ext[8:]
                 elif ext.startswith("FWVER="):
-                    # Some firmware puts the version here instead
-                    if result["firmware"] == "unknown":
-                        result["firmware"] = ext[6:]
+                    result["firmware"] = ext[6:]
         else:
             log.warning("MON-VER poll timed out — receiver may not be responding")
 
-        # Query SEC-UNIQID for hardware unique ID
-        uniq = _poll_ubx(ser, ubr, "SEC", "SEC-UNIQID", "SEC-UNIQID", timeout=3.0)
-        if uniq is not None:
-            # SEC-UNIQID returns a 5-byte unique ID.  pyubx2 exposes it
-            # as uniqueId (bytes) or as individual uniqueId_1..5 fields.
-            uid_bytes = getattr(uniq, "uniqueId", None)
-            if uid_bytes is not None and isinstance(uid_bytes, bytes):
-                result["unique_id"] = int.from_bytes(uid_bytes, "little")
-                result["unique_id_hex"] = uid_bytes.hex()
-            else:
-                # Fallback: assemble from individual byte fields
-                parts = []
-                for i in range(1, 6):
-                    b = getattr(uniq, f"uniqueId_{i}", None)
-                    if b is None:
+        # Query SEC-UNIQID for hardware unique ID.
+        # pyubx2 doesn't recognize the SEC class, so we send the raw
+        # UBX-SEC-UNIQID poll (class=0x27 id=0x03 len=0) and parse the
+        # response bytes directly from the serial stream.
+        import struct
+        _cls_id = bytes([0x27, 0x03])
+        _length = struct.pack("<H", 0)
+        _ck_a = _ck_b = 0
+        for _b in _cls_id + _length:
+            _ck_a = (_ck_a + _b) & 0xFF
+            _ck_b = (_ck_b + _ck_a) & 0xFF
+        ser.write(b"\xb5\x62" + _cls_id + _length + bytes([_ck_a, _ck_b]))
+
+        _deadline = time.monotonic() + 3.0
+        _buf = b""
+        while time.monotonic() < _deadline:
+            _chunk = ser.read(256)
+            if _chunk:
+                _buf += _chunk
+                if len(_buf) > 8192:
+                    _buf = _buf[-1024:]
+                _idx = _buf.find(b"\xb5\x62\x27\x03")
+                if _idx >= 0 and len(_buf) >= _idx + 6:
+                    _msg_len = struct.unpack_from("<H", _buf, _idx + 4)[0]
+                    if len(_buf) >= _idx + 6 + _msg_len + 2:
+                        _payload = _buf[_idx + 6:_idx + 6 + _msg_len]
+                        if _msg_len >= 9:
+                            uid_bytes = _payload[4:9]
+                            result["unique_id"] = int.from_bytes(uid_bytes, "little")
+                            result["unique_id_hex"] = uid_bytes.hex()
                         break
-                    parts.append(b & 0xFF)
-                if len(parts) == 5:
-                    uid_bytes = bytes(parts)
-                    result["unique_id"] = int.from_bytes(uid_bytes, "little")
-                    result["unique_id_hex"] = uid_bytes.hex()
-        else:
-            log.warning("SEC-UNIQID poll timed out — receiver may not support it")
+        if result["unique_id"] is None:
+            log.warning("SEC-UNIQID timed out — receiver may not support it")
 
     finally:
         if opened_here:
