@@ -4133,7 +4133,8 @@ def run(args):
     # post-hoc index-matching against TICC chB events.
     qerr_store = None
     qerr_log_f = None
-    if args.servo:
+    want_servo = args.servo or getattr(args, 'ticc_drive', False)
+    if want_servo:
         qerr_log_writer = None
         if getattr(args, 'qerr_log', None):
             try:
