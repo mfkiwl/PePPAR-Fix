@@ -4176,6 +4176,95 @@ def run(args):
     return exit_code
 
 
+# ── Host config resolution ────────────────────────────────────────── #
+
+
+def _apply_host_config(args):
+    """Apply host config TOML defaults to args that weren't set on CLI.
+
+    Resolves config/<hostname>.toml (or explicit --host-config) and fills
+    in any arg that is still at its argparse default.  CLI always wins.
+    """
+    import socket
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+
+    # Find config file
+    candidates = []
+    if args.host_config:
+        candidates = [args.host_config]
+    else:
+        hostname = socket.gethostname().split(".")[0].lower()
+        candidates = [
+            os.path.join(repo_root, "config", f"{hostname}.toml"),
+            "/etc/peppar-fix/config.toml",
+        ]
+
+    cfg = {}
+    cfg_path = None
+    for path in candidates:
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+            cfg = data.get("peppar", {})
+            cfg_path = path
+            break
+
+    if not cfg:
+        return  # no host config found
+
+    # Log after basicConfig (called later in main), so just stash the path.
+    args._host_config_path = cfg_path
+
+    # Map from TOML key → (argparse dest, type conversion).
+    # Only apply if the CLI arg is still at its default (None or argparse
+    # default).  This preserves "CLI overrides host config overrides defaults".
+    _MAP = {
+        "serial":           ("serial",           str),
+        "baud":             ("baud",             int),
+        "ubx_port":         ("port_type",        str),
+        "port_type":        ("port_type",        str),
+        "receiver":         ("receiver",         str),
+        "ptp_profile":      ("ptp_profile",      str),
+        "ptp_dev":          ("servo",            str),
+        "ntrip_conf":       ("ntrip_conf",       str),
+        "eph_mount":        ("eph_mount",        str),
+        "ssr_mount":        ("ssr_mount",        str),
+        "known_pos":        ("known_pos",        str),
+        "position_file":    ("position_file",    str),
+        "systems":          ("systems",          str),
+        "duration":         ("duration",         int),
+        "log":              ("servo_log",        str),
+        "do_label":         ("do_label",         str),
+        "do_type":          ("do_type",          str),
+        "dac_bus":          ("dac_bus",           int),
+        "dac_addr":         ("dac_addr",         str),
+        "dac_bits":         ("dac_bits",         int),
+        "dac_center_code":  ("dac_center_code",  int),
+        "dac_ppb_per_code": ("dac_ppb_per_code", float),
+        "dac_max_ppb":      ("dac_max_ppb",      float),
+        "dac_type":         ("dac_type",         str),
+        "tadd_gpio":        ("tadd_gpio",        int),
+        "tadd_hold_s":      ("tadd_hold_s",      float),
+        "phase_step_bias_ns": ("phase_step_bias_ns", float),
+        "pmc_uds":          ("pmc",              str),
+        "pmc_domain":       ("pmc_domain",       int),
+    }
+
+    for toml_key, (dest, conv) in _MAP.items():
+        if toml_key not in cfg:
+            continue
+        current = getattr(args, dest, None)
+        # Only apply if CLI didn't set it (still at default None or
+        # argparse default for special cases)
+        if current is not None:
+            continue
+        try:
+            setattr(args, dest, conv(cfg[toml_key]))
+        except (ValueError, TypeError) as e:
+            log.warning("Host config: bad value for %s: %s", toml_key, e)
+
+
 # ── CLI ──────────────────────────────────────────────────────────────── #
 
 def main():
@@ -4190,6 +4279,12 @@ Two-phase operation:
           Optional: --servo for PHC discipline, --out for CSV logging.
 """,
     )
+
+    # Host config (auto-discovered by hostname or explicit)
+    cfg = ap.add_argument_group("Host configuration")
+    cfg.add_argument("--host-config", default=None,
+                     help="Explicit host config TOML path. If omitted, auto-discovers "
+                          "config/<hostname>.toml or /etc/peppar-fix/config.toml")
 
     # Position
     pos = ap.add_argument_group("Position")
@@ -4208,8 +4303,9 @@ Two-phase operation:
 
     # Serial
     serial = ap.add_argument_group("Serial")
-    serial.add_argument("--serial", required=True,
-                        help="Serial port for F9T (e.g. /dev/gnss-top)")
+    serial.add_argument("--serial", default=None,
+                        help="Serial port for F9T (e.g. /dev/gnss-top). "
+                             "Required unless provided by host config.")
     serial.add_argument("--baud", type=int, default=115200)
     serial.add_argument("--receiver", default="f9t",
                         help="Receiver model/profile: f9t, f9t-l5, f10t (default: f9t)")
@@ -4507,6 +4603,7 @@ Two-phase operation:
     out.add_argument("-v", "--verbose", action="store_true")
 
     args = ap.parse_args()
+    _apply_host_config(args)
     apply_ptp_profile(args)
     # --ticc-port enables passive TICC measurement/logging.  --ticc-drive
     # additionally promotes TICC to the servo input.  Keep them separate
@@ -4567,8 +4664,20 @@ Two-phase operation:
         stream=sys.stderr,
     )
 
+    if getattr(args, '_host_config_path', None):
+        log.info("Host config: %s", args._host_config_path)
+
+    if not args.serial:
+        log.error("--serial is required (via CLI or host config)")
+        sys.exit(1)
+
     if args.caster:
         log.warning(f"NTRIP caster output ({args.caster}) not yet implemented")
+
+    # Ensure state directories exist
+    for d in ("state/receivers", "state/dos", "state/phcs",
+              "state/timestampers", "data"):
+        os.makedirs(d, exist_ok=True)
 
     sys.exit(run(args))
 
