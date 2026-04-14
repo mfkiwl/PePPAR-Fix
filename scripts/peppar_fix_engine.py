@@ -980,6 +980,24 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
                 '', '', '', len(filt.sv_to_idx),
             ])
 
+        # PPP-AR: Melbourne-Wubbena wide-lane update (every epoch)
+        for obs in observations:
+            sv = obs['sv']
+            phi1 = obs.get('phi1_cyc')
+            phi2 = obs.get('phi2_cyc')
+            pr1 = obs.get('pr1_m')
+            pr2 = obs.get('pr2_m')
+            wl1 = obs.get('wl_f1')
+            wl2 = obs.get('wl_f2')
+            if all(v is not None for v in (phi1, phi2, pr1, pr2, wl1, wl2)):
+                f1_hz = C / wl1
+                f2_hz = C / wl2
+                mw_tracker.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
+
+        # PPP-AR: narrow-lane resolution attempt (every epoch after warmup)
+        if n_epochs >= 30:
+            nl_resolver.attempt(filt, mw_tracker)
+
         if n_epochs % 5 == 0:
             log.info(
                 f"  [{n_epochs}] σ={sigma_3d:.3f}m "
@@ -987,24 +1005,6 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
                 f"n={n_used} amb={len(filt.sv_to_idx)} "
                 f"rms={rms:.3f}m [{elapsed:.0f}s]"
             )
-            # PPP-AR: Melbourne-Wubbena wide-lane update
-            for obs in observations:
-                sv = obs['sv']
-                phi1 = obs.get('phi1_cyc')
-                phi2 = obs.get('phi2_cyc')
-                pr1 = obs.get('pr1_m')
-                pr2 = obs.get('pr2_m')
-                wl1 = obs.get('wl_f1')
-                wl2 = obs.get('wl_f2')
-                if all(v is not None for v in (phi1, phi2, pr1, pr2, wl1, wl2)):
-                    f1_hz = C / wl1
-                    f2_hz = C / wl2
-                    mw_tracker.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
-
-            # PPP-AR: narrow-lane resolution attempt
-            if n_epochs >= 30:
-                newly_fixed = nl_resolver.attempt(filt, mw_tracker)
-
             # Log corrected integrality (WL/NL decomposition)
             if len(filt.sv_to_idx) > 0 and n_epochs % 10 == 0:
                 int_results = nl_resolver.integrality(filt, mw_tracker)
