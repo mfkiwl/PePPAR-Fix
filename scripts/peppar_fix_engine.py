@@ -4306,10 +4306,11 @@ Two-phase operation:
     serial.add_argument("--serial", default=None,
                         help="Serial port for F9T (e.g. /dev/gnss-top). "
                              "Required unless provided by host config.")
-    serial.add_argument("--baud", type=int, default=115200)
-    serial.add_argument("--receiver", default="f9t",
+    serial.add_argument("--baud", type=int, default=None,
+                        help="Baud rate (default: 115200, or from host config)")
+    serial.add_argument("--receiver", default=None,
                         help="Receiver model/profile: f9t, f9t-l5, f10t (default: f9t)")
-    serial.add_argument("--port-type", default="USB",
+    serial.add_argument("--port-type", default=None,
                         choices=["UART", "UART2", "USB", "SPI", "I2C"],
                         help="Receiver port type for UBX message routing (default: USB)")
     serial.add_argument("--measurement-rate-ms", type=int, default=None,
@@ -4319,7 +4320,7 @@ Two-phase operation:
 
     # GNSS
     gnss = ap.add_argument_group("GNSS")
-    gnss.add_argument("--systems", default="gps,gal,bds",
+    gnss.add_argument("--systems", default=None,
                       help="GNSS systems (default: gps,gal,bds)")
     gnss.add_argument("--leap", type=int, default=18,
                       help="GPS-UTC leap seconds (default: 18)")
@@ -4604,6 +4605,16 @@ Two-phase operation:
 
     args = ap.parse_args()
     _apply_host_config(args)
+    # Apply defaults for args that are None after CLI + host config.
+    # These were made nullable so host config can override them.
+    if args.baud is None:
+        args.baud = 115200
+    if args.receiver is None:
+        args.receiver = "f9t"
+    if args.port_type is None:
+        args.port_type = "USB"
+    if args.systems is None:
+        args.systems = "gps,gal,bds"
     apply_ptp_profile(args)
     # --ticc-port enables passive TICC measurement/logging.  --ticc-drive
     # additionally promotes TICC to the servo input.  Keep them separate
