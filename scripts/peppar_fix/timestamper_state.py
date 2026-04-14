@@ -18,7 +18,8 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-TIMESTAMPER_STATE_DIR = "state/timestampers"
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+TIMESTAMPER_STATE_DIR = os.path.join(_REPO_ROOT, "state", "timestampers")
 
 # Pessimistic defaults when no characterization is available.
 # These are safe starting points — real characterization will be better.

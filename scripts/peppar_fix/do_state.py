@@ -17,8 +17,9 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-DO_STATE_DIR = "state/dos"
-PHC_STATE_DIR = "state/phcs"
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DO_STATE_DIR = os.path.join(_REPO_ROOT, "state", "dos")
+PHC_STATE_DIR = os.path.join(_REPO_ROOT, "state", "phcs")
 
 
 # ── PHC unique ID discovery ─────────────────────────────────────────────── #

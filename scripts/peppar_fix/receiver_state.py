@@ -14,9 +14,10 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-# Default state directory, relative to the peppar-fix working directory.
-# Callers can override via the state_dir parameter.
-DEFAULT_STATE_DIR = "state/receivers"
+# Repo root: scripts/peppar_fix/../../ = repo root.
+# State directories are always relative to repo root, not CWD.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+DEFAULT_STATE_DIR = os.path.join(_REPO_ROOT, "state", "receivers")
 
 
 def _state_path(unique_id, state_dir=None):
