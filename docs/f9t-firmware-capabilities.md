@@ -46,10 +46,22 @@ Contrary to prior documentation (`docs/receiver-signals.md` line
 **accepts both L2C and L5 configuration**. It can run either signal
 plan, just not simultaneously (two-band RF chain limit).
 
-However, there is a sequencing constraint: when L2C is already
-enabled, setting L5_ENA=0 is NAK'd. Setting L5_ENA=1 succeeds and
-the receiver auto-clears L2C_ENA. This suggests L5 takes priority
-internally — switching from L5→L2 requires clearing L5 first.
+However, there is a sequencing constraint when changing bands via
+**individual** CFG-VALSET keys (not relevant when sending all keys
+in a single VALSET, which is what `configure_signals()` does):
+
+- Setting L5_ENA=1 when L2C is on: **ACK** — L2C auto-clears
+- Setting L2C_ENA=1 when L5 is on: **ACK** — appears to succeed
+- Setting L5_ENA=0 after L2C_ENA=1: **NAK** — even though L5 is
+  already off (the receiver treats this as a conflicting request)
+- After the NAK, both L2C and L5 read as 0 — the receiver is in
+  L1-only mode
+
+The safe pattern for individual key changes: always set the desired
+band to 1 first (which auto-clears the other), then explicitly set
+the other to 0. But the production code avoids this entirely —
+`configure_signals()` sends a complete signal config in one VALSET
+message, and the receiver applies it atomically.
 
 ### ZED-F9T-20B (TIM 2.25) lost L2C, gained NavIC
 

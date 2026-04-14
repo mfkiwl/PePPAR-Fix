@@ -34,6 +34,21 @@ def _ensure_imports():
 
 
 # ── Signal configuration ──────────────────────────────────────────────────── #
+#
+# The F9T supports only two frequency bands simultaneously (single RF
+# chain).  L2 and L5 are mutually exclusive — both signal configs
+# explicitly disable the unused band.  configure_signals() sends all
+# keys in a single VALSET so the receiver applies them atomically;
+# individual key changes have ordering constraints (see
+# docs/f9t-firmware-capabilities.md).
+#
+# L5 is the preferred second frequency for PPP-AR because:
+#   - GPS L5, GAL E5a, BDS B2a share 1176.45 MHz center frequency,
+#     giving consistent ionosphere-free combinations across constellations
+#   - L5 has better code structure and lower noise than L2C
+#   - CNES SSR phase biases match L5I (same carrier as L5Q)
+#   - Works on both ZED-F9T (TIM 2.20) and ZED-F9T-20B (TIM 2.25)
+# L2 is available on TIM 2.20 only (TIM 2.25 NAKs L2C).
 
 SIGNAL_CONFIG = {
     # GPS
@@ -51,13 +66,17 @@ SIGNAL_CONFIG = {
     "CFG_SIGNAL_BDS_B1_ENA": 1,
     "CFG_SIGNAL_BDS_B2A_ENA": 1,
     "CFG_SIGNAL_BDS_B2_ENA": 0,
-    # GLONASS off (FDMA)
+    # GLONASS off (NAKs on both TIM 2.20 and 2.25 despite MON-VER string)
     "CFG_SIGNAL_GLO_ENA": 0,
     # SBAS/QZSS off
     "CFG_SIGNAL_SBAS_ENA": 0,
     "CFG_SIGNAL_QZSS_ENA": 0,
 }
 
+# L2 signal plan: GPS L1+L2C, GAL E1+E5a, BDS B1+B2.
+# Only usable on ZED-F9T (TIM 2.20); ZED-F9T-20B NAKs L2C.
+# Uses E5a (not E5b) for Galileo because E5b NAKs on all tested
+# firmware versions — see docs/f9t-firmware-capabilities.md.
 F9T_SIGNAL_CONFIG = {
     "CFG_SIGNAL_GPS_ENA": 1,
     "CFG_SIGNAL_GPS_L1CA_ENA": 1,
@@ -65,8 +84,8 @@ F9T_SIGNAL_CONFIG = {
     "CFG_SIGNAL_GPS_L5_ENA": 0,
     "CFG_SIGNAL_GAL_ENA": 1,
     "CFG_SIGNAL_GAL_E1_ENA": 1,
-    "CFG_SIGNAL_GAL_E5A_ENA": 0,
-    "CFG_SIGNAL_GAL_E5B_ENA": 1,
+    "CFG_SIGNAL_GAL_E5A_ENA": 1,
+    "CFG_SIGNAL_GAL_E5B_ENA": 0,
     "CFG_SIGNAL_BDS_ENA": 1,
     "CFG_SIGNAL_BDS_B1_ENA": 1,
     "CFG_SIGNAL_BDS_B2_ENA": 1,
@@ -76,6 +95,8 @@ F9T_SIGNAL_CONFIG = {
     "CFG_SIGNAL_QZSS_ENA": 0,
 }
 
+# L5 signal plan: GPS L1+L5, GAL E1+E5a, BDS B1+B2a.
+# Preferred for PPP-AR (see rationale above).  Works on all F9T firmware.
 F9T_L5_SIGNAL_CONFIG = {
     "CFG_SIGNAL_GPS_ENA": 1,
     "CFG_SIGNAL_GPS_L1CA_ENA": 1,
@@ -169,7 +190,13 @@ class ReceiverDriver:
 
 
 class F9TDriver(ReceiverDriver):
-    name = "ZED-F9T"
+    """L2 signal plan: GPS L1+L2C, GAL E1+E5a, BDS B1+B2.
+
+    Only usable on ZED-F9T (TIM 2.20).  ZED-F9T-20B (TIM 2.25) NAKs
+    L2C and is locked to L5.  GAL uses E5a (not E5b) because E5b NAKs
+    on all tested firmware — see docs/f9t-firmware-capabilities.md.
+    """
+    name = "ZED-F9T (L1/L2 profile)"
     protver = "27"
     default_baud = 460800
     supports_timing_mode = True
@@ -177,7 +204,7 @@ class F9TDriver(ReceiverDriver):
     signal_config = F9T_SIGNAL_CONFIG
     if_pairs = (
         ('GPS', 'GPS-L1CA', 'GPS-L2CL', 'G'),
-        ('GAL', 'GAL-E1C', 'GAL-E5bQ', 'E'),
+        ('GAL', 'GAL-E1C', 'GAL-E5aQ', 'E'),
         ('BDS', 'BDS-B1I', 'BDS-B2I', 'C'),
     )
 
@@ -822,19 +849,29 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
     log.warning("Only %d/%d SVs have dual-freq observations — reconfiguring",
                 dual, total)
 
-    # Reconfigure: try L1+L5 first, fall back to L1+L2C if NAK'd.
-    # Newer F9T firmware (-20B) supports L5; older (-00B) only has L2C.
+    # Reconfigure: L5 first, L2C fallback.
+    #
+    # L5 is preferred for PPP-AR: GPS L5 + GAL E5a + BDS B2a all share
+    # 1176.45 MHz, CNES SSR phase biases match L5I, and L5 has lower
+    # code noise than L2C.  Both ZED-F9T (TIM 2.20) and ZED-F9T-20B
+    # (TIM 2.25) accept L5.  L2C is only available on TIM 2.20; the
+    # -20B NAKs it.  See docs/f9t-firmware-capabilities.md.
+    #
+    # configure_signals() sends all signal keys in a single VALSET,
+    # so the receiver applies them atomically.  Do NOT set L2C and L5
+    # keys individually — the receiver has ordering constraints when
+    # switching bands via individual key changes.
     _ensure_imports()
     port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4, "I2C": 0}
     pid = port_id.get(port_type, 3)
 
     ser, ubr = open_receiver(port, baud)
 
-    # Try L5 first (preferred — better geometry, no health override needed on newer FW)
+    # L5 first (preferred for PPP-AR — see rationale above)
     driver = F9TL5Driver()
     ok = configure_signals(ser, ubr, driver=driver)
     if not ok:
-        # L5 NAK'd — this firmware only supports L2C
+        # L5 NAK'd — fall back to L2C (only possible on TIM 2.20)
         log.info("L5 signal config NAK'd — falling back to L2C")
         driver = F9TDriver()
         ok = configure_signals(ser, ubr, driver=driver)
