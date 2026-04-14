@@ -2189,7 +2189,7 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
 
     Returns True on success, False on fatal error.
     """
-    from peppar_fix.timestamper import ExttsTimestamper, TiccTimestamper
+    from peppar_fix.timestamper import ExttsTimestamper, TiccDifferentialTimestamper
 
     do_type = getattr(args, 'do_type', 'phc')
 
@@ -2212,11 +2212,12 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
         log.info("Bootstrap timestamper: EXTTS (channel %d)", args.extts_channel)
     elif ticc_port:
         ticc_baud = getattr(args, 'ticc_baud', 115200)
-        timestamper = TiccTimestamper(
+        timestamper = TiccDifferentialTimestamper(
             ticc_port, ticc_baud,
-            phc_channel=getattr(args, 'ticc_phc_channel', 'chA'),
+            do_channel=getattr(args, 'ticc_phc_channel', 'chA'),
             ref_channel=getattr(args, 'ticc_ref_channel', 'chB'))
-        log.info("Bootstrap timestamper: TICC (%s)", ticc_port)
+        log.info("Bootstrap timestamper: TICC differential (%s, %s-%s)",
+                 ticc_port, timestamper.do_channel, timestamper.ref_channel)
     else:
         log.error("No timestamper available: need --servo (EXTTS) or --ticc-port")
         return False

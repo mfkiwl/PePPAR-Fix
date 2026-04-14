@@ -112,105 +112,213 @@ class ExttsTimestamper(Timestamper):
 
 
 class TiccTimestamper(Timestamper):
-    """Measures PPS edges via a TICC time interval counter.
+    """Measures PPS edges on a single TICC channel.
 
-    Uses chA-chB differentials: the slope of diff_ns vs time is the
-    DO frequency offset in ppb.  TICC resolution (~60 ps) is far
-    better than EXTTS (~8 ns), so even 10 samples give an excellent
-    frequency estimate.
+    A TICC is a two-channel time interval counter, but each channel is
+    an independent timestamper — just like an EXTTS channel on a PHC.
+    The TICC timestamps edges against its reference oscillator (a GPSDO
+    OCXO on our lab TICCs).
 
-    The TICC must have chA on the DO PPS and chB on the GNSS PPS
-    (or vice versa — phc_channel / ref_channel configure this).
+    Successive timestamps on one channel give the PPS interval; the
+    deviation from nominal 1e12 ps is the source's frequency offset
+    relative to the TICC reference.  With a GPSDO reference, this is
+    close to the absolute offset.
+
+    If you need the frequency offset between two PPS sources (e.g.,
+    DO vs GNSS), create two TiccTimestampers and subtract — or see
+    ``measure_differential_frequency`` which handles the pairing.
+
+    Resolution: ~60 ps single-shot noise.
     """
 
-    def __init__(self, ticc_port, ticc_baud=115200,
-                 phc_channel='chA', ref_channel='chB'):
+    def __init__(self, ticc_port, ticc_baud=115200, channel='chA'):
         self.ticc_port = ticc_port
         self.ticc_baud = ticc_baud
-        self.phc_channel = phc_channel
-        self.ref_channel = ref_channel
+        self.channel = channel
 
     def measure_pps_frequency(self, n_samples=10, timeout_s=30):
-        """Measure DO frequency offset from TICC chA-chB differential slope.
+        """Measure PPS frequency offset from successive single-channel intervals.
 
-        Collects paired (chA, chB) measurements at matching ref_sec,
-        computes the differential in ns, and fits a linear slope.
-        The slope (ns/s) is the frequency offset in ppb.
+        Each pair of successive edges gives one interval.  The deviation
+        from nominal (1 s = 1e12 ps) is the frequency offset in ppb.
+        Linear regression over the full baseline gives better precision
+        than averaging individual intervals.
 
         timeout_s default is 30 to allow for TICC boot (~10s) plus
         measurement (~n_samples seconds).
         """
         from ticc import Ticc
 
-        pairs = []  # (elapsed_sec, diff_ns)
-        pending = {}  # ref_sec → {channel: (ref_sec, ref_ps)}
-        first_ref_sec = None
-        boot_discard = 2  # skip first 2 seconds (TICC boot artifacts)
+        edges = []  # (ref_sec, ref_ps)
+        boot_discard = 2
 
         with Ticc(self.ticc_port, self.ticc_baud, wait_for_boot=True) as ticc:
             deadline = time.monotonic() + timeout_s
-            for channel, ref_sec, ref_ps in ticc:
+            for ch, ref_sec, ref_ps in ticc:
                 if time.monotonic() > deadline:
                     break
-                if channel not in (self.phc_channel, self.ref_channel):
+                if ch != self.channel:
                     continue
                 if ref_sec <= boot_discard:
                     continue
+                edges.append((ref_sec, ref_ps))
+                if len(edges) >= n_samples + 1:
+                    break
 
-                pending.setdefault(ref_sec, {})[channel] = (ref_sec, ref_ps)
-
-                if (self.phc_channel in pending.get(ref_sec, {}) and
-                        self.ref_channel in pending.get(ref_sec, {})):
-                    phc = pending[ref_sec][self.phc_channel]
-                    ref = pending[ref_sec][self.ref_channel]
-                    del pending[ref_sec]
-
-                    diff_ps = ((phc[0] - ref[0]) * 1_000_000_000_000
-                               + phc[1] - ref[1])
-                    diff_ns = diff_ps * 1e-3
-
-                    if first_ref_sec is None:
-                        first_ref_sec = ref_sec
-                    elapsed = ref_sec - first_ref_sec
-                    pairs.append((elapsed, diff_ns))
-
-                    if len(pairs) >= n_samples:
-                        break
-
-                # Evict stale pending entries
-                cutoff = ref_sec - 4
-                stale = [k for k in pending if k < cutoff]
-                for k in stale:
-                    del pending[k]
-
-        if len(pairs) < 3:
-            log.warning("TICC freq measurement: only %d pairs (need ≥3)",
-                        len(pairs))
+        if len(edges) < 3:
+            log.warning("TICC freq measurement (%s): only %d edges (need ≥3)",
+                        self.channel, len(edges))
             return None, None, 0
 
-        # Linear regression: diff_ns = a + b * elapsed
-        # b = frequency offset in ns/s = ppb
-        n = len(pairs)
-        sx = sum(t for t, _ in pairs)
-        sy = sum(d for _, d in pairs)
-        sxy = sum(t * d for t, d in pairs)
-        sxx = sum(t * t for t, _ in pairs)
-        denom = n * sxx - sx * sx
-        if denom == 0:
+        # Compute intervals in picoseconds
+        intervals_ps = []
+        for i in range(1, len(edges)):
+            dt_sec = edges[i][0] - edges[i - 1][0]
+            dt_ps = edges[i][1] - edges[i - 1][1]
+            total_ps = dt_sec * 1_000_000_000_000 + dt_ps
+            if total_ps > 0:
+                intervals_ps.append(total_ps)
+
+        if len(intervals_ps) < 2:
             return None, None, 0
 
-        slope = (n * sxy - sx * sy) / denom  # ppb
-        intercept = (sy - slope * sx) / n
+        # Full-baseline frequency: total drift over N intervals.
+        # Same approach as ExttsTimestamper — first-to-last, not averages.
+        first = edges[0]
+        last = edges[-1]
+        total_sec = last[0] - first[0]
+        total_ps_drift = (last[0] - first[0]) * 1_000_000_000_000 + (last[1] - first[1])
+        nominal_ps = total_sec * 1_000_000_000_000
+        if nominal_ps == 0:
+            return None, None, 0
 
-        # Residual jitter
-        residuals = [d - (intercept + slope * t) for t, d in pairs]
-        sigma = statistics.stdev(residuals) if len(residuals) >= 2 else 0.0
+        freq_ppb = (total_ps_drift - nominal_ps) / nominal_ps * 1e9
 
-        n_intervals = pairs[-1][0] - pairs[0][0]
-        if n_intervals <= 0:
-            n_intervals = len(pairs) - 1
+        # Per-interval residual jitter
+        nominal_1s_ps = 1_000_000_000_000
+        residuals = [iv - nominal_1s_ps - (freq_ppb * 1000) for iv in intervals_ps]
+        # freq_ppb * 1000 converts ppb to ps/interval for a 1-second nominal
+        sigma_ps = statistics.stdev(residuals) if len(residuals) >= 2 else 0.0
+        sigma_ppb = sigma_ps / nominal_1s_ps * 1e9
 
-        log.info("TICC freq measurement: %.1f ±%.1f ppb (%d pairs, %ds baseline)",
-                 slope, sigma / max(1, n_intervals), len(pairs), n_intervals)
+        log.info("TICC freq measurement (%s): %.1f ±%.1f ppb "
+                 "(%d intervals, %ds baseline)",
+                 self.channel, freq_ppb,
+                 sigma_ppb / math.sqrt(max(1, len(intervals_ps))),
+                 len(intervals_ps), total_sec)
 
-        return slope, sigma, n_intervals
+        return freq_ppb, sigma_ppb, len(intervals_ps)
+
+
+class TiccDifferentialTimestamper(Timestamper):
+    """Measures DO-vs-reference frequency via paired TICC channels.
+
+    Wraps ``measure_differential_frequency`` in the Timestamper interface
+    so bootstrap code can call ``timestamper.measure_pps_frequency()``
+    uniformly for both EXTTS and TICC paths.
+
+    This is NOT a single-channel timestamper — it uses two channels and
+    subtracts, cancelling the TICC reference oscillator's own drift.
+    Use ``TiccTimestamper`` for single-channel measurements.
+    """
+
+    def __init__(self, ticc_port, ticc_baud=115200,
+                 do_channel='chA', ref_channel='chB'):
+        self.ticc_port = ticc_port
+        self.ticc_baud = ticc_baud
+        self.do_channel = do_channel
+        self.ref_channel = ref_channel
+
+    def measure_pps_frequency(self, n_samples=10, timeout_s=30):
+        return measure_differential_frequency(
+            self.ticc_port, self.ticc_baud,
+            self.do_channel, self.ref_channel,
+            n_samples, timeout_s)
+
+
+def measure_differential_frequency(ticc_port, ticc_baud=115200,
+                                   do_channel='chA', ref_channel='chB',
+                                   n_samples=10, timeout_s=30):
+    """Measure DO frequency offset relative to a reference PPS via TICC.
+
+    Pairs timestamps on two TICC channels by ref_sec and computes the
+    slope of the differential — cancels the TICC reference oscillator's
+    own drift since both channels are timestamped against it within the
+    same epoch.
+
+    Returns (freq_ppb, sigma_ppb, n_pairs) or (None, None, 0).
+    """
+    from ticc import Ticc
+
+    pairs = []  # (elapsed_sec, diff_ns)
+    pending = {}  # ref_sec → {channel: (ref_sec, ref_ps)}
+    first_ref_sec = None
+    boot_discard = 2
+
+    with Ticc(ticc_port, ticc_baud, wait_for_boot=True) as ticc:
+        deadline = time.monotonic() + timeout_s
+        for channel, ref_sec, ref_ps in ticc:
+            if time.monotonic() > deadline:
+                break
+            if channel not in (do_channel, ref_channel):
+                continue
+            if ref_sec <= boot_discard:
+                continue
+
+            pending.setdefault(ref_sec, {})[channel] = (ref_sec, ref_ps)
+
+            if (do_channel in pending.get(ref_sec, {}) and
+                    ref_channel in pending.get(ref_sec, {})):
+                do = pending[ref_sec][do_channel]
+                ref = pending[ref_sec][ref_channel]
+                del pending[ref_sec]
+
+                diff_ps = ((do[0] - ref[0]) * 1_000_000_000_000
+                           + do[1] - ref[1])
+                diff_ns = diff_ps * 1e-3
+
+                if first_ref_sec is None:
+                    first_ref_sec = ref_sec
+                elapsed = ref_sec - first_ref_sec
+                pairs.append((elapsed, diff_ns))
+
+                if len(pairs) >= n_samples:
+                    break
+
+            # Evict stale pending entries
+            cutoff = ref_sec - 4
+            for k in [k for k in pending if k < cutoff]:
+                del pending[k]
+
+    if len(pairs) < 3:
+        log.warning("TICC differential: only %d pairs (need ≥3)", len(pairs))
+        return None, None, 0
+
+    # Linear regression: diff_ns = intercept + slope * elapsed
+    # slope = frequency offset in ns/s = ppb
+    n = len(pairs)
+    sx = sum(t for t, _ in pairs)
+    sy = sum(d for _, d in pairs)
+    sxy = sum(t * d for t, d in pairs)
+    sxx = sum(t * t for t, _ in pairs)
+    denom = n * sxx - sx * sx
+    if denom == 0:
+        return None, None, 0
+
+    slope = (n * sxy - sx * sy) / denom
+    intercept = (sy - slope * sx) / n
+
+    residuals = [d - (intercept + slope * t) for t, d in pairs]
+    sigma = statistics.stdev(residuals) if len(residuals) >= 2 else 0.0
+
+    n_intervals = pairs[-1][0] - pairs[0][0]
+    if n_intervals <= 0:
+        n_intervals = len(pairs) - 1
+
+    log.info("TICC differential freq (%s-%s): %.1f ±%.1f ppb "
+             "(%d pairs, %ds baseline)",
+             do_channel, ref_channel, slope,
+             sigma / math.sqrt(max(1, n_intervals)),
+             len(pairs), n_intervals)
+
+    return slope, sigma, n_intervals
