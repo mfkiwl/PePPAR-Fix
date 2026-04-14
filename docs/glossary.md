@@ -32,6 +32,11 @@ listed first.
 | **phase bias** | Per-satellite, per-signal correction that makes integer ambiguity resolution possible.  Only available from single analysis center SSR streams (CAS, CNES, WHU). |
 | **code bias** | Correction for signal-dependent pseudorange offsets between different GNSS signals. |
 | **dt_rx** | Receiver clock offset from GNSS time, estimated by the PPP filter.  In nanoseconds.  Tracks the rx TCXO phase. |
+| **MW** | Melbourne-Wubbena combination.  Geometry-free, ionosphere-free linear combination of dual-frequency code and carrier phase that isolates the wide-lane ambiguity N_WL = N1 − N2.  Converges by averaging out code noise (~60 s).  First step in two-step PPP-AR. |
+| **WL** | Wide-lane.  The carrier-phase combination with wavelength λ_WL = c/(f1−f2) ≈ 75 cm (L1/L5).  The wide-lane ambiguity N_WL = N1−N2 is integer and easy to fix from the MW combination because λ_WL is large. |
+| **NL** | Narrow-lane.  The carrier-phase combination with wavelength λ_NL = c/(f1+f2) ≈ 10.7 cm (L1/L5).  The narrow-lane ambiguity N1 is the precision target for PPP-AR.  Resolved from the float IF ambiguity once N_WL is known. |
+| **CNES** | Centre National d'Etudes Spatiales (French space agency).  Provides single-AC SSR corrections on `products.igs-ip.net` mount `SSRA00CNE0`.  CNES phase biases match F9T Galileo signals (L1C, L5Q, L7Q) — the only confirmed source for PPP-AR. |
+| **CAS** | Chinese Academy of Sciences.  SSR provider on `SSRA00BKG0`.  Phase biases use I-component (data) codes that don't match F9T's Q-component (pilot) observations.  Cannot be used for PPP-AR. |
 
 ## PPS and timing
 
