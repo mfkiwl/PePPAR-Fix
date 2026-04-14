@@ -1126,6 +1126,11 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             log.info("PHC bootstrap succeeded")
 
         servo_result = _setup_servo(args, known_ecef, qerr_store, ptp=ptp)
+        # Promote clockClass to 52 (initialized) after successful bootstrap
+        # and servo setup — mirrors what the wrapper's
+        # promote_clock_class_initialized did.
+        if not isinstance(servo_result, int) and servo_result.get('pmc'):
+            _set_clock_class(servo_result, "initialized")
         if isinstance(servo_result, int):
             log.error("Failed to set up PHC servo (exit code %d)", servo_result)
             return servo_result
@@ -3968,25 +3973,33 @@ def run(args):
         if stop_event.is_set():
             return 0
 
-        # Phase 2: Steady state
-        steady_result = run_steady_state(
-            args,
-            known_ecef,
-            obs_queue,
-            corrections,
-            beph,
-            ssr,
-            stop_event,
-            qerr_store=qerr_store,
-            out_w=out_w,
-            nav2_store=nav2_store,
-        )
-        # run_steady_state returns an int exit code on error,
-        # or a gate_stats dict on normal completion.
-        if isinstance(steady_result, int):
-            exit_code = steady_result
-        else:
-            gate_stats = steady_result
+        # Phase 2: Steady state (with internal re-bootstrap on PHC divergence)
+        max_rebootstrap = 3
+        for _attempt in range(1, max_rebootstrap + 1):
+            steady_result = run_steady_state(
+                args,
+                known_ecef,
+                obs_queue,
+                corrections,
+                beph,
+                ssr,
+                stop_event,
+                qerr_store=qerr_store,
+                out_w=out_w,
+                nav2_store=nav2_store,
+            )
+            # run_steady_state returns an int exit code on error,
+            # or a gate_stats dict on normal completion.
+            if isinstance(steady_result, int):
+                if steady_result == 5 and _attempt < max_rebootstrap:
+                    log.warning(
+                        "PHC diverged — internal re-bootstrap "
+                        "(attempt %d/%d)", _attempt, max_rebootstrap)
+                    continue  # run_steady_state will re-bootstrap internally
+                exit_code = steady_result
+            else:
+                gate_stats = steady_result
+            break
 
     except KeyboardInterrupt:
         log.info("Interrupted")
