@@ -67,6 +67,7 @@ from peppar_fix import (
     estimate_correlation_confidence,
     match_pps_event_from_history,
     load_position,
+    save_position,
 )
 from peppar_fix.event_time import PpsEvent
 from peppar_fix.fault_injection import get_delay_injector, get_source_mute_controller
@@ -4006,6 +4007,13 @@ def run(args):
         lat, lon, alt = [float(v) for v in args.known_pos.split(',')]
         known_ecef = lla_to_ecef(lat, lon, alt)
         log.info(f"Position (CLI): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
+        # Persist known position to receiver state and legacy file
+        uid = getattr(args, 'receiver_unique_id', None)
+        if uid is not None:
+            save_position_to_receiver(uid, known_ecef, 0.0, "known_pos")
+            log.info("Position saved to receiver state for %s", uid)
+        if args.position_file:
+            save_position(args.position_file, known_ecef, 0.0, "known_pos")
     elif args.position_file:
         # Try receiver state first, then fall back to legacy position file.
         pos_source = None

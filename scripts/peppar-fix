@@ -256,65 +256,12 @@ for ((rx_try=1; rx_try<=rx_max_retries; rx_try++)); do
     rx_backoff=$((rx_backoff * 2))
 done
 
-# ── Step 2: Bootstrap position if needed ────────────────────────────────── #
-
-bootstrap_position() {
-    echo "=== peppar-fix: Step 2 — Position bootstrap ==="
-    local pos_args=(
-        --serial "$SERIAL"
-        --receiver "$RECEIVER"
-        --systems "$SYSTEMS"
-        --save --position-file "$POSITION_FILE"
-    )
-    if [[ -n "$BAUD" ]]; then
-        pos_args+=(--baud "$BAUD")
-    fi
-    if [[ -n "$KNOWN_POS" ]]; then
-        pos_args+=(--seed-pos "$KNOWN_POS")
-    fi
-    if [[ "$RECEIVER_UNIQUE_ID" != "none" ]] && [[ -n "$RECEIVER_UNIQUE_ID" ]]; then
-        pos_args+=(--receiver-id "$RECEIVER_UNIQUE_ID")
-    fi
-    # shellcheck disable=SC2046
-    pos_args+=($(ntrip_args))
-
-    "$PYTHON_BIN" "$SCRIPT_DIR/peppar_find_position.py" "${pos_args[@]}"
-}
-
-if [[ -n "$KNOWN_POS" ]]; then
-    echo "  Known position provided: $KNOWN_POS (skipping bootstrap)"
-    # Save known position to receiver state if we have a receiver identity.
-    # Legacy position file kept for ntrip_caster compatibility.
-    IFS=',' read -r kp_lat kp_lon kp_alt <<< "$KNOWN_POS"
-    "$PYTHON_BIN" -c "
-import json, sys, os
-sys.path.insert(0, '$SCRIPT_DIR')
-from solve_pseudorange import lla_to_ecef
-lat, lon, alt = $kp_lat, $kp_lon, $kp_alt
-ecef = lla_to_ecef(lat, lon, alt)
-# Save to receiver state
-uid = '$RECEIVER_UNIQUE_ID'
-if uid and uid != 'none':
-    uid = int(uid)
-    from peppar_fix.receiver_state import save_position_to_receiver
-    save_position_to_receiver(uid, ecef, 0.0, 'known_pos')
-    print(f'  Position saved to receiver state for {uid}')
-# Legacy file for PHC bootstrap compatibility
-os.makedirs(os.path.dirname('$POSITION_FILE') or '.', exist_ok=True)
-json.dump({'lat': lat, 'lon': lon, 'alt_m': alt,
-           'ecef_m': [round(x,3) for x in ecef],
-           'sigma_m': 0.0, 'source': 'known_pos'}, open('$POSITION_FILE','w'), indent=2)
-"
-elif [[ "$RECEIVER_HAS_POSITION" == "has_position" ]]; then
-    echo "  Position found in receiver state (id=$RECEIVER_UNIQUE_ID)"
-elif [[ -f "$POSITION_FILE" ]]; then
-    echo "  Legacy position file exists: $POSITION_FILE (will migrate to receiver state)"
-else
-    bootstrap_position || exit 2
-fi
-
-# clockClass management is now handled internally by the engine via
-# its --pmc flag and _set_clock_class() function.
+# ── Step 2: Position bootstrap ─────────────────────────────────────────── #
+# Position bootstrap is now handled internally by the engine.  The engine
+# loads from receiver state, falls back to legacy position file, or runs
+# PPPFilter from scratch — all inside run().  Known positions provided via
+# --known-pos are persisted to receiver state and legacy file by the engine.
+echo "  Position bootstrap: handled by engine (internal)"
 
 # ── Step 2b: PHC bootstrap ──────────────────────────────────────────────── #
 # PHC bootstrap is now handled internally by the engine when --servo is set.
@@ -466,12 +413,6 @@ while true; do
                     --phc "$PTP_DEV" || true
             fi
             exit 0
-            ;;
-        2)
-            echo "peppar-fix: position moved — re-bootstrapping"
-            bootstrap_position || exit 2
-            servo_backoff=5
-            continue
             ;;
         3)
             echo "peppar-fix: no PPS — retry in ${servo_backoff}s"
