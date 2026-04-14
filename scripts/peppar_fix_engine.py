@@ -1783,27 +1783,27 @@ def _resolve_do_uid(args):
 # ── DO bootstrap (absorbed from phc_bootstrap.py) ─────────────────── #
 
 
-def _bootstrap_measure_freq_and_clock(args, ptp, known_ecef, obs_queue,
+def _bootstrap_measure_freq_and_clock(args, timestamper, known_ecef, obs_queue,
                                        beph, ssr, stop_event):
     """Shared bootstrap preamble: measure PPS frequency and run a short
     FixedPosFilter to estimate dt_rx.
 
+    timestamper: a Timestamper instance (ExttsTimestamper or TiccTimestamper).
+    The frequency measurement runs concurrently with obs_queue filling from
+    the serial/NTRIP threads that are already active.
+
     Returns (pps_freq_ppb, pps_freq_unc, dt_rx_ns, dt_rx_series) on
     success, or None on fatal error.
     """
-    from phc_bootstrap import measure_pps_frequency
-
-    extts_ch = args.extts_channel
-
     # ── 1. Measure PPS frequency ──────────────────────────────────── #
     log.info("=== DO Bootstrap: measuring DO frequency from PPS ===")
-    pps_freq_ppb, pps_freq_sigma, pps_freq_n = measure_pps_frequency(
-        ptp, extts_ch, n_samples=args.bootstrap_epochs,
-        timeout_s=args.bootstrap_epochs + 3)
+    pps_freq_ppb, pps_freq_sigma, pps_freq_n = timestamper.measure_pps_frequency(
+        n_samples=args.bootstrap_epochs,
+        timeout_s=args.bootstrap_epochs + 15)  # +15 for TICC boot headroom
     if pps_freq_ppb is None:
         log.error("No PPS events — cannot bootstrap DO")
         return None
-    pps_freq_unc = pps_freq_sigma / math.sqrt(pps_freq_n)
+    pps_freq_unc = pps_freq_sigma / math.sqrt(max(1, pps_freq_n))
     log.info("PPS frequency error: %.1f ±%.1f ppb (σ=%.1f, n=%d)",
              pps_freq_ppb, pps_freq_unc, pps_freq_sigma, pps_freq_n)
 
@@ -1913,21 +1913,8 @@ def _bootstrap_compute_base_freq(args, pps_freq_ppb, pps_freq_unc,
     return base_freq, tcxo_freq_corr_ppb
 
 
-def _do_bootstrap_vcocxo_no_phc(args, known_ecef, obs_queue, beph, ssr,
-                                 stop_event):
-    """Bootstrap VCOCXO without a PHC: TADD ARM + drift-file frequency seed.
-
-    No EXTTS-based PPS frequency measurement — we can't measure DO frequency
-    without a PHC.  Instead, trust the drift file for initial frequency and
-    run a short FixedPosFilter for dt_rx estimation.
-
-    Returns True on success, False on fatal error.
-    """
-    from phc_bootstrap import load_drift, save_drift
-
-    do_label = getattr(args, 'do_label', None) or 'vcocxo'
-
-    # ── 1. ARM the TADD divider ───────────────────────────────────── #
+def _do_tadd_arm(args):
+    """ARM the TADD divider if configured.  Extracted for reuse."""
     tadd_gpio = getattr(args, 'tadd_gpio', None)
     if tadd_gpio is not None:
         from peppar_fix.tadd import TADDDivider
@@ -1935,108 +1922,13 @@ def _do_bootstrap_vcocxo_no_phc(args, known_ecef, obs_queue, beph, ssr,
         tadd = TADDDivider(arm_gpio=tadd_gpio, arm_hold_s=tadd_hold)
         tadd.setup()
         try:
-            arm_mono = tadd.arm()
+            tadd.arm()
             log.info("TADD ARM complete (GPIO%d) — DO PPS synced to GNSS PPS "
                      "(phase offset ≤%d ns)", tadd_gpio, tadd.max_phase_offset_ns)
         finally:
             tadd.teardown()
     else:
         log.info("No TADD GPIO configured — assuming DO PPS already synced")
-
-    # ── 2. Seed DAC frequency from drift file ────────────────────── #
-    dac_bus = getattr(args, 'dac_bus', None)
-    if dac_bus is None:
-        log.error("VCOCXO bootstrap requires --dac-bus")
-        return False
-
-    from peppar_fix.dac_actuator import DacActuator
-
-    dac_addr = int(getattr(args, 'dac_addr', '0x60'), 0)
-    ppb_per_code = getattr(args, 'dac_ppb_per_code', None)
-    if ppb_per_code is None:
-        log.error("VCOCXO bootstrap requires --dac-ppb-per-code")
-        return False
-
-    dac = DacActuator(
-        bus_num=dac_bus,
-        addr=dac_addr,
-        bits=getattr(args, 'dac_bits', 12),
-        center_code=getattr(args, 'dac_center_code', None),
-        ppb_per_code=ppb_per_code,
-        max_ppb=getattr(args, 'dac_max_ppb', None),
-        dac_type=getattr(args, 'dac_type', 'mcp4725'),
-    )
-    dac.setup()
-
-    # Without EXTTS we can't measure PPS frequency — use drift file.
-    drift = load_drift(getattr(args, 'drift_file', None) or 'data/drift.json')
-    if drift:
-        base_freq = drift["adjfine_ppb"]
-        log.info("TICC-only bootstrap: frequency from drift file: %.1f ppb",
-                 base_freq)
-    else:
-        base_freq = 0.0
-        log.warning("TICC-only bootstrap: no drift file — seeding DAC at 0 ppb "
-                    "(TICC servo will converge)")
-
-    actual = dac.adjust_frequency_ppb(base_freq)
-    log.info("DAC frequency set: requested=%.1f ppb, actual=%.1f ppb",
-             base_freq, actual)
-    dac.teardown()
-
-    # ── 3. Estimate dt_rx (doesn't need PHC) ─────────────────────── #
-    dt_rx_ns = None
-    if drift and 'dt_rx_ns' in drift:
-        dt_rx_ns = drift['dt_rx_ns']
-        log.info("dt_rx from drift file: %.1f ns", dt_rx_ns)
-    else:
-        log.info("Running short FixedPosFilter for dt_rx estimate...")
-        filt = FixedPosFilter(known_ecef)
-        filt.initialized = True
-        prev_t = None
-        n_epochs = 0
-        bootstrap_epochs = args.bootstrap_epochs
-
-        for _ in range(bootstrap_epochs * 3):
-            if stop_event.is_set():
-                break
-            try:
-                gps_time, observations = obs_queue.get(timeout=5)
-            except Exception:
-                continue
-            if len(observations) < 4:
-                continue
-
-            corrections = RealtimeCorrections(beph, ssr)
-            dt = (gps_time - prev_t).total_seconds() if prev_t else 1.0
-            if prev_t and 0 < dt <= 30:
-                filt.predict(dt)
-            prev_t = gps_time
-
-            n_used, resid, n_td = filt.update(
-                observations, corrections, gps_time, clk_file=corrections)
-            if n_used < 4:
-                continue
-
-            dt_rx_ns = filt.x[filt.IDX_CLK] / C * 1e9
-            n_epochs += 1
-            if n_epochs >= bootstrap_epochs:
-                break
-
-        if dt_rx_ns is not None:
-            log.info("dt_rx estimated: %.1f ns (%d epochs)", dt_rx_ns, n_epochs)
-        else:
-            log.warning("Could not estimate dt_rx — servo will start without it")
-
-    # Save drift file for next run
-    drift_file = getattr(args, 'drift_file', None) or 'data/drift.json'
-    save_drift(drift_file, base_freq, do_label, None, dt_rx_ns=dt_rx_ns)
-    log.info("Drift file updated: %s (base=%.1f ppb, dt_rx=%s)",
-             drift_file, base_freq,
-             f"{dt_rx_ns:.1f} ns" if dt_rx_ns is not None else "None")
-
-    log.info("VCOCXO bootstrap complete (no PHC) — TICC servo may start")
-    return True
 
 
 def _do_bootstrap_vcocxo(args, ptp, pps_freq_ppb, pps_freq_unc,
@@ -2044,8 +1936,13 @@ def _do_bootstrap_vcocxo(args, ptp, pps_freq_ppb, pps_freq_unc,
     """Bootstrap an external VCOCXO: ARM TADD divider, seed DAC frequency.
 
     The TADD ARM synchronizes the divider's 1 PPS output to the GNSS PPS.
-    The DAC is set to the drift-file frequency (or center if no drift).
+    The DAC is set to compensate the measured frequency offset.
     No PHC phase step — the TADD ARM handles phase alignment.
+
+    When called from the TICC-only path, TADD ARM was already done
+    before the frequency measurement (the TICC needs DO PPS aligned
+    first).  When called from the PHC path, TADD ARM happens here
+    (EXTTS can measure the free-running DO before ARM).
 
     Returns True on success, False on fatal error.
     """
@@ -2053,21 +1950,12 @@ def _do_bootstrap_vcocxo(args, ptp, pps_freq_ppb, pps_freq_unc,
 
     do_label = getattr(args, 'do_label', None) or 'vcocxo'
 
-    # ── 1. ARM the TADD divider ───────────────────────────────────── #
-    tadd_gpio = getattr(args, 'tadd_gpio', None)
-    if tadd_gpio is not None:
-        from peppar_fix.tadd import TADDDivider
-        tadd_hold = getattr(args, 'tadd_hold_s', 1.1)
-        tadd = TADDDivider(arm_gpio=tadd_gpio, arm_hold_s=tadd_hold)
-        tadd.setup()
-        try:
-            arm_mono = tadd.arm()
-            log.info("TADD ARM complete (GPIO%d) — DO PPS synced to GNSS PPS "
-                     "(phase offset ≤%d ns)", tadd_gpio, tadd.max_phase_offset_ns)
-        finally:
-            tadd.teardown()
-    else:
-        log.info("No TADD GPIO configured — assuming DO PPS already synced")
+    # ── 1. ARM the TADD divider (skipped if already done) ─────────── #
+    if ptp is not None:
+        # PHC path: ARM happens here, after EXTTS frequency measurement.
+        _do_tadd_arm(args)
+    # else: TICC-only path — ARM was done in _do_bootstrap_init before
+    # the TICC frequency measurement.
 
     # ── 2. Seed DAC frequency ─────────────────────────────────────── #
     dac_bus = getattr(args, 'dac_bus', None)
@@ -2295,32 +2183,49 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
     - vcocxo: TADD ARM + DAC frequency seed
     - clockmatrix: PHC phase step + ClockMatrix FCW (handled within PHC path)
 
-    When ptp is None (TICC-only mode), only the VCOCXO path is valid —
-    EXTTS-based PPS frequency measurement is skipped and the drift file
-    supplies the initial frequency.
+    Creates the appropriate Timestamper (EXTTS or TICC) for frequency
+    measurement.  When ptp is None (TICC-only mode), only the VCOCXO
+    path is valid.
 
     Returns True on success, False on fatal error.
     """
+    from peppar_fix.timestamper import ExttsTimestamper, TiccTimestamper
+
     do_type = getattr(args, 'do_type', 'phc')
 
     if ptp is None:
-        # TICC-only mode: no PHC available for EXTTS-based frequency
-        # measurement.  Only VCOCXO bootstrap is supported.
         if do_type != 'vcocxo':
             log.error("TICC-only servo requires do_type=vcocxo (got %s). "
                       "PHC-based DOs need --servo.", do_type)
             return False
-        return _do_bootstrap_vcocxo_no_phc(
-            args, known_ecef, obs_queue, beph, ssr, stop_event)
+        # For VCOCXO without PHC: ARM TADD first (syncs DO PPS to GNSS PPS),
+        # then use TICC to measure the resulting frequency offset.
+        _do_tadd_arm(args)
+    else:
+        # phc_bootstrap helpers expect args.ptp_dev; engine uses args.servo
+        args.ptp_dev = args.servo
 
-    from peppar_fix.ptp_device import DualEdgeFilter
+    # Build the timestamper for frequency measurement.
+    ticc_port = getattr(args, 'ticc_port', None)
+    if ptp is not None:
+        timestamper = ExttsTimestamper(ptp, args.extts_channel)
+        log.info("Bootstrap timestamper: EXTTS (channel %d)", args.extts_channel)
+    elif ticc_port:
+        ticc_baud = getattr(args, 'ticc_baud', 115200)
+        timestamper = TiccTimestamper(
+            ticc_port, ticc_baud,
+            phc_channel=getattr(args, 'ticc_phc_channel', 'chA'),
+            ref_channel=getattr(args, 'ticc_ref_channel', 'chB'))
+        log.info("Bootstrap timestamper: TICC (%s)", ticc_port)
+    else:
+        log.error("No timestamper available: need --servo (EXTTS) or --ticc-port")
+        return False
 
-    # phc_bootstrap helpers expect args.ptp_dev; engine uses args.servo
-    args.ptp_dev = args.servo
-
-    # Shared preamble: measure PPS frequency and estimate dt_rx
+    # Shared preamble: measure PPS frequency and estimate dt_rx.
+    # The TICC frequency measurement runs here — overlapping with the
+    # obs_queue filling from serial/NTRIP threads already active.
     result = _bootstrap_measure_freq_and_clock(
-        args, ptp, known_ecef, obs_queue, beph, ssr, stop_event)
+        args, timestamper, known_ecef, obs_queue, beph, ssr, stop_event)
     if result is None:
         return False
     pps_freq_ppb, pps_freq_unc, dt_rx_ns, dt_rx_series = result
