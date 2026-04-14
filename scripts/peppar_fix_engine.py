@@ -4503,7 +4503,7 @@ Two-phase operation:
                        help="Label for the disciplined oscillator (overrides auto-detected PHC "
                             "MAC as the DO unique_id in state persistence). Required for external "
                             "DOs (VCOCXO, ClockMatrix) that aren't bundled inside a PHC.")
-    servo.add_argument("--do-type", default="phc",
+    servo.add_argument("--do-type", default=None,
                        choices=["phc", "vcocxo", "clockmatrix"],
                        help="Type of disciplined oscillator: phc (default, NIC crystal via "
                             "adjfine), vcocxo (external OCXO/TCXO via DAC), clockmatrix "
@@ -4512,7 +4512,7 @@ Two-phase operation:
                        help="I2C bus for DAC-driven VCOCXO (e.g. 1 for /dev/i2c-1)")
     servo.add_argument("--dac-addr", default=None,
                        help="I2C address for DAC (e.g. 0x60)")
-    servo.add_argument("--dac-bits", type=int, default=12,
+    servo.add_argument("--dac-bits", type=int, default=None,
                        help="DAC resolution in bits (default: 12 for MCP4725)")
     servo.add_argument("--dac-center-code", type=int, default=None,
                        help="DAC code for nominal frequency (default: midscale)")
@@ -4520,7 +4520,7 @@ Two-phase operation:
                        help="Tuning sensitivity in ppb per DAC LSB (must be characterized)")
     servo.add_argument("--dac-max-ppb", type=float, default=None,
                        help="Maximum frequency adjustment in ppb (default: computed from range)")
-    servo.add_argument("--dac-type", default="mcp4725",
+    servo.add_argument("--dac-type", default=None,
                        choices=["mcp4725", "ad5693r", "generic"],
                        help="DAC chip type (default: mcp4725)")
 
@@ -4615,6 +4615,12 @@ Two-phase operation:
         args.port_type = "USB"
     if args.systems is None:
         args.systems = "gps,gal,bds"
+    if args.do_type is None:
+        args.do_type = "phc"
+    if args.dac_bits is None:
+        args.dac_bits = 12
+    if args.dac_type is None:
+        args.dac_type = "mcp4725"
     apply_ptp_profile(args)
     # --ticc-port enables passive TICC measurement/logging.  --ticc-drive
     # additionally promotes TICC to the servo input.  Keep them separate
