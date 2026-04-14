@@ -3543,6 +3543,8 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
 
 def _cleanup_servo(ctx):
     """Clean up servo resources."""
+    # Degrade clockClass to 248 (freerun) on engine exit
+    _set_clock_class(ctx, "freerun")
     ctx['stop_pps'].set()
     if 'stop_ticc' in ctx:
         ctx['stop_ticc'].set()
