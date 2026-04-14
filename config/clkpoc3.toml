@@ -1,0 +1,21 @@
+[peppar]
+serial = "/dev/ttyACM1"
+baud = 9600
+ubx_port = "USB"
+receiver = "f9t-l5"
+ptp_dev = "/dev/ptp0"
+ntrip_conf = "ntrip.conf"
+eph_mount = "BCEP00BKG0"
+known_pos = "41.8430626,-88.1037190,201.671"
+systems = "gps,gal"
+
+# CTI OSC5A2B02 OCXO via AD5693R DAC on I2C bus 1.
+# Characterized 2026-04-14: gain=1.062, linearity <5 ppb over ±200 ppb.
+# OCXO runs +149 ppb high at DAC midscale.
+do_label = "ocxo-clkpoc3"
+do_type = "vcocxo"
+dac_bus = 1
+dac_addr = "0x4C"
+dac_bits = 16
+dac_ppb_per_code = "-0.0361"
+dac_type = "ad5693r"
