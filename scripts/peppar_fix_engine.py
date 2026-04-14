@@ -2214,8 +2214,10 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
     # Build the timestamper for frequency measurement.
     ticc_port = getattr(args, 'ticc_port', None)
     if ptp is not None:
-        timestamper = ExttsTimestamper(ptp, args.extts_channel)
-        log.info("Bootstrap timestamper: EXTTS (channel %d)", args.extts_channel)
+        timestamper = ExttsTimestamper(ptp, args.extts_channel,
+                                       pps_pin=getattr(args, 'pps_pin', None))
+        log.info("Bootstrap timestamper: EXTTS (channel %d, pin %s)",
+                 args.extts_channel, args.pps_pin)
     elif ticc_port:
         ticc_baud = getattr(args, 'ticc_baud', 115200)
         timestamper = TiccDifferentialTimestamper(

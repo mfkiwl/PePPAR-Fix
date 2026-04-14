@@ -42,15 +42,24 @@ class ExttsTimestamper(Timestamper):
     logic is moved here.
     """
 
-    def __init__(self, ptp, channel):
+    def __init__(self, ptp, channel, pps_pin=None):
         self.ptp = ptp
         self.channel = channel
+        self.pps_pin = pps_pin
 
     def measure_pps_frequency(self, n_samples=10, timeout_s=20):
-        from peppar_fix.ptp_device import DualEdgeFilter
+        from peppar_fix.ptp_device import DualEdgeFilter, PTP_PF_EXTTS
 
         ptp = self.ptp
         channel = self.channel
+
+        # i226 requires pin→function assignment before EXTTS enable.
+        # Without it, enable_extts returns EBUSY.
+        if self.pps_pin is not None:
+            try:
+                ptp.set_pin_function(self.pps_pin, PTP_PF_EXTTS, channel)
+            except OSError:
+                pass  # sysfs fallback or implicit mapping
 
         ptp.enable_extts(channel, rising_edge=True)
         samples = []   # (elapsed_sec, nsec)
