@@ -1484,59 +1484,107 @@ def _set_clock_class(ctx, state):
 def _save_osc_freq_corr(ctx):
     """Save refined oscillator frequency corrections on clean shutdown.
 
+    Saves to DO state (state/dos/<id>.json) and also to the TCXO offset
+    in receiver state.  Legacy drift.json is kept for backward compat.
+
     Skipped in --freerun mode: the live adjfine there is what the servo
     *would have* written if it were actuating, not a value the PHC has
     actually been steered to.  Persisting it would poison the next
     bootstrap with a fictitious frequency.
     """
     if ctx.get('freerun'):
-        log.info("Skipping drift.json save (freerun mode)")
+        log.info("Skipping drift save (freerun mode)")
         return
     drift_path = ctx.get('drift_file', 'data/drift.json')
     adjfine = ctx.get('adjfine_ppb', 0.0)
     carrier_tracker = ctx.get('carrier_tracker')
+    phc_dev = ctx.get('phc_dev', '/dev/ptp0')
+
+    tcxo_corr = None
+    if (carrier_tracker is not None and carrier_tracker._n_d > 0
+            and carrier_tracker.drift_rate_ppb != 0):
+        tcxo_corr = adjfine - carrier_tracker.drift_rate_ppb
+
+    # Save to DO state (primary)
     try:
-        import json, os
+        from peppar_fix.do_state import phc_unique_id, save_do_freq_offset
+        do_uid = phc_unique_id(phc_dev)
+        save_do_freq_offset(do_uid, adjfine)
+        log.info("Saved DO freq offset: adjfine=%.1f ppb (DO %s)", adjfine, do_uid)
+    except Exception as e:
+        log.warning("Failed to save DO state: %s", e)
+
+    # Save TCXO offset to receiver state if available
+    if tcxo_corr is not None:
+        try:
+            receiver_uid = ctx.get('receiver_unique_id')
+            if receiver_uid is not None:
+                from peppar_fix.receiver_state import load_receiver_state, save_receiver_state
+                state = load_receiver_state(receiver_uid)
+                if state is not None:
+                    state.setdefault("tcxo", {})
+                    state["tcxo"]["last_known_freq_offset_ppb"] = tcxo_corr
+                    state["tcxo"]["updated"] = time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    save_receiver_state(state)
+        except Exception as e:
+            log.warning("Failed to save TCXO offset to receiver state: %s", e)
+
+    # Legacy drift.json (kept for backward compat and carrier tracker seeding)
+    try:
+        import json as _json
         data = {}
         try:
             with open(drift_path) as f:
-                data = json.load(f)
+                data = _json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             pass
         data['adjfine_ppb'] = adjfine
-        data['phc'] = ctx.get('phc_dev', '/dev/ptp0')
+        data['phc'] = phc_dev
         data['timestamp'] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        if (carrier_tracker is not None and carrier_tracker._n_d > 0
-                and carrier_tracker.drift_rate_ppb != 0):
-            data['tcxo_freq_corr_ppb'] = adjfine - carrier_tracker.drift_rate_ppb
-        # Update dt_rx_ns for next DOFreqEst initialization
+        if tcxo_corr is not None:
+            data['tcxo_freq_corr_ppb'] = tcxo_corr
         if ctx.get('_prev_dt_rx_ns') is not None:
             data['dt_rx_ns'] = ctx['_prev_dt_rx_ns']
         os.makedirs(os.path.dirname(drift_path) or '.', exist_ok=True)
         with open(drift_path, 'w') as f:
-            json.dump(data, f, indent=2)
-        log.info("Saved osc freq corrections: adjfine=%.1f ppb, %s",
-                 adjfine, drift_path)
+            _json.dump(data, f, indent=2)
     except Exception as e:
-        log.warning("Failed to save osc freq corrections: %s", e)
+        log.warning("Failed to save legacy drift.json: %s", e)
 
 
 def _log_do_characterization(args):
-    """Read data/do_characterization.json and log inform-mode summary.
+    """Log DO characterization summary from state or legacy file.
 
     Reports DO noise floor, dominant noise types, source crossovers,
     and a recommended loop bandwidth for the active servo input
     (informational only — does not auto-tune).
     """
-    char_path = getattr(args, 'do_char_file', None) or 'data/do_characterization.json'
-    try:
-        import json
-        with open(char_path) as f:
-            char = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        log.info("DO characterization: no file at %s "
-                 "(run with --freerun to create one)", char_path)
-        return
+    char = None
+
+    # Try DO state first
+    phc_dev = getattr(args, 'servo', None)
+    if phc_dev:
+        try:
+            from peppar_fix.do_state import phc_unique_id, load_do_state
+            do_uid = phc_unique_id(phc_dev)
+            do_state = load_do_state(do_uid)
+            if do_state is not None and do_state.get("characterization"):
+                char = do_state["characterization"]
+        except Exception:
+            pass
+
+    # Fall back to legacy file
+    if char is None:
+        char_path = getattr(args, 'do_char_file', None) or 'data/do_characterization.json'
+        try:
+            import json as _json
+            with open(char_path) as f:
+                char = _json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            log.info("DO characterization: not available "
+                     "(run with --freerun to create one)")
+            return
 
     log.info("DO characterization: %s @ %s (captured %s)",
              char.get('do_label', 'unknown'),
@@ -1561,27 +1609,64 @@ def _log_do_characterization(args):
 
 
 def _init_carrier_tracker(args):
-    """Create CarrierPhaseTracker, seeding D from drift file if available.
+    """Create CarrierPhaseTracker, seeding D from state or drift file.
 
     D = phc_freq_corr - tcxo_freq_corr, computed from two independently
-    measured oscillator frequency corrections stored in the drift file.
+    measured oscillator frequency corrections.  Tries DO + receiver state
+    first, falls back to legacy drift.json.
     """
     tracker = CarrierPhaseTracker()
-    drift_path = getattr(args, 'drift_file', None) or 'data/drift.json'
-    try:
-        import json
-        with open(drift_path) as f:
-            drift = json.load(f)
-        phc_corr = drift.get('adjfine_ppb')
-        tcxo_corr = drift.get('tcxo_freq_corr_ppb')
-        if phc_corr is not None and tcxo_corr is not None:
-            d = phc_corr - tcxo_corr
-            tracker.drift_rate_ppb = d
-            log.info("Carrier tracker: D=%.1f ppb "
-                     "(phc_corr=%.1f - tcxo_corr=%.1f) from %s",
-                     d, phc_corr, tcxo_corr, drift_path)
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+
+    phc_corr = None
+    tcxo_corr = None
+    source = None
+
+    # Try state files first
+    phc_dev = getattr(args, 'servo', None)
+    receiver_uid = getattr(args, 'receiver_unique_id', None)
+    if phc_dev:
+        try:
+            from peppar_fix.do_state import phc_unique_id, load_do_state
+            do_uid = phc_unique_id(phc_dev)
+            do_state = load_do_state(do_uid)
+            if do_state is not None:
+                phc_corr = do_state.get("last_known_freq_offset_ppb")
+        except Exception:
+            pass
+    if receiver_uid is not None:
+        try:
+            from peppar_fix.receiver_state import load_receiver_state
+            rx_state = load_receiver_state(receiver_uid)
+            if rx_state is not None:
+                tcxo = rx_state.get("tcxo", {})
+                tcxo_corr = tcxo.get("last_known_freq_offset_ppb")
+        except Exception:
+            pass
+    if phc_corr is not None and tcxo_corr is not None:
+        source = "state"
+
+    # Fall back to legacy drift.json
+    if phc_corr is None or tcxo_corr is None:
+        drift_path = getattr(args, 'drift_file', None) or 'data/drift.json'
+        try:
+            import json as _json
+            with open(drift_path) as f:
+                drift = _json.load(f)
+            if phc_corr is None:
+                phc_corr = drift.get('adjfine_ppb')
+            if tcxo_corr is None:
+                tcxo_corr = drift.get('tcxo_freq_corr_ppb')
+            if phc_corr is not None and tcxo_corr is not None and source is None:
+                source = drift_path
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+    if phc_corr is not None and tcxo_corr is not None:
+        d = phc_corr - tcxo_corr
+        tracker.drift_rate_ppb = d
+        log.info("Carrier tracker: D=%.1f ppb "
+                 "(phc_corr=%.1f - tcxo_corr=%.1f) from %s",
+                 d, phc_corr, tcxo_corr, source)
     return tracker
 
 
@@ -2065,6 +2150,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'ptp': ptp,
         'phc_dev': args.servo,
         'drift_file': getattr(args, 'drift_file', None) or 'data/drift.json',
+        'receiver_unique_id': getattr(args, 'receiver_unique_id', None),
         'actuator': actuator,
         'cm_phase_source': cm_phase_source,
         'servo': servo,

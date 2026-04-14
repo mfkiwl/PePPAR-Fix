@@ -206,8 +206,8 @@ ntrip_args() {
     echo "${args[@]}"
 }
 
-# Ensure state directories exist for receiver state persistence
-mkdir -p state/receivers data
+# Ensure state directories exist for state persistence
+mkdir -p state/receivers state/dos state/phcs data
 
 # ── Step 1: Verify/configure receiver ───────────────────────────────────── #
 #

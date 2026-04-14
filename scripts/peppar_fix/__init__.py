@@ -19,6 +19,7 @@ from peppar_fix.event_time import (
 from peppar_fix.timebase_estimator import TimebaseRelationEstimator
 from peppar_fix import receiver
 from peppar_fix import receiver_state
+from peppar_fix import do_state
 
 __all__ = [
     'PtpDevice',

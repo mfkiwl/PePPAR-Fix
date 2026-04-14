@@ -556,13 +556,23 @@ def main():
         log.error("No position available — run position bootstrap first")
         return 1
 
-    # Load drift file
-    drift = load_drift(args.drift_file)
-    if drift:
-        log.info("Drift file: adjfine=%.1f ppb (from %s)",
-                 drift["adjfine_ppb"], drift.get("timestamp", "?"))
-    else:
-        log.info("No drift file found")
+    # Load drift — DO state is primary, legacy file is fallback
+    drift = None
+    try:
+        from peppar_fix.do_state import load_drift_from_state
+        drift = load_drift_from_state(args.ptp_dev)
+        if drift:
+            log.info("Drift (DO state): adjfine=%.1f ppb (from %s)",
+                     drift["adjfine_ppb"], drift.get("timestamp", "?"))
+    except Exception:
+        pass
+    if drift is None:
+        drift = load_drift(args.drift_file)
+        if drift:
+            log.info("Drift (legacy): adjfine=%.1f ppb (from %s)",
+                     drift["adjfine_ppb"], drift.get("timestamp", "?"))
+    if drift is None:
+        log.info("No drift data found")
 
     # Open PHC
     ptp = PtpDevice(args.ptp_dev)
@@ -1011,11 +1021,16 @@ def main():
             log.info("ClockMatrix FCW set: %.1f ppb (base=%.1f + glide=%.1f)",
                      target_freq, base_freq, glide_offset)
 
-            # Save base frequency to drift file
+            # Save to DO state and legacy drift file
             save_drift(args.drift_file, base_freq, args.ptp_dev,
                        tcxo_freq_corr_ppb, dt_rx_ns=dt_rx_ns)
-            log.info("Drift file updated: %s (base=%.1f ppb, dt_rx=%.1f ns)",
-                     args.drift_file, base_freq, dt_rx_ns)
+            try:
+                from peppar_fix.do_state import phc_unique_id, save_do_freq_offset
+                save_do_freq_offset(phc_unique_id(args.ptp_dev), base_freq)
+            except Exception:
+                pass
+            log.info("Drift saved: base=%.1f ppb, dt_rx=%.1f ns",
+                     base_freq, dt_rx_ns)
 
             # Don't close cm_i2c — the engine will reopen its own handle.
             # Don't teardown actuator — engine inherits write_freq mode.
@@ -1036,11 +1051,16 @@ def main():
              target_freq, base_freq, glide_offset)
     ptp.adjfine(target_freq)
 
-    # Save base frequency to drift file (not the transient glide offset)
+    # Save to DO state and legacy drift file (not the transient glide offset)
     save_drift(args.drift_file, base_freq, args.ptp_dev, tcxo_freq_corr_ppb,
                dt_rx_ns=dt_rx_ns)
-    log.info("Drift file updated: %s (base=%.1f ppb, dt_rx=%.1f ns)",
-             args.drift_file, base_freq, dt_rx_ns)
+    try:
+        from peppar_fix.do_state import phc_unique_id, save_do_freq_offset
+        save_do_freq_offset(phc_unique_id(args.ptp_dev), base_freq)
+    except Exception:
+        pass
+    log.info("Drift saved: base=%.1f ppb, dt_rx=%.1f ns",
+             base_freq, dt_rx_ns)
 
     _enable_pps_out(ptp, args)
     ptp.close()
