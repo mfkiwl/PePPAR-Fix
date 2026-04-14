@@ -1011,15 +1011,20 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
                 if int_results:
                     fracs = [abs(r[1]) for r in int_results]
                     n_fixable = sum(1 for r in int_results if abs(r[1]) < 0.15)
-                    mean_frac = np.mean(fracs)
-                    log.info(f"    AR: mean|N1_frac|={mean_frac:.3f} "
-                             f"(n={len(fracs)}, fixable={n_fixable}, "
-                             f"{mw_tracker.summary()}, {nl_resolver.summary()})")
+                    # Split by constellation
+                    gal = [(sv, f, s, fx) for sv, f, s, fx in int_results if sv.startswith('E')]
+                    gps = [(sv, f, s, fx) for sv, f, s, fx in int_results if sv.startswith('G')]
+                    gal_frac = np.mean([abs(f) for _, f, _, _ in gal]) if gal else float('nan')
+                    gps_frac = np.mean([abs(f) for _, f, _, _ in gps]) if gps else float('nan')
+                    log.info(f"    AR: GAL|frac|={gal_frac:.3f}({len(gal)}) "
+                             f"GPS|frac|={gps_frac:.3f}({len(gps)}) "
+                             f"fixable={n_fixable} "
+                             f"{mw_tracker.summary()} {nl_resolver.summary()}")
                     if n_epochs % 30 == 0:
                         for sv, frac, sigma, fixed in int_results:
                             tag = "FIXED" if fixed else ""
-                            log.debug(f"    {sv}: N1_frac={frac:+.3f} "
-                                      f"σ_N1={sigma:.3f} {tag}")
+                            log.info(f"      {sv}: N1_frac={frac:+.3f} "
+                                     f"σ_N1={sigma:.3f} {tag}")
 
         # Convergence check
         pos_stable = True
