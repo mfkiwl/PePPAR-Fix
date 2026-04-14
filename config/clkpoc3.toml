@@ -19,3 +19,6 @@ dac_addr = "0x4C"
 dac_bits = 16
 dac_ppb_per_code = "-0.0361"
 dac_type = "ad5693r"
+
+# TADD-2 Mini divider: ARM on GPIO 16, syncs 10 MHz → 1 PPS.
+tadd_gpio = 16

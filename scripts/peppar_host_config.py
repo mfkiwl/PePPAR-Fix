@@ -40,6 +40,8 @@ KEYS = (
     "dac_ppb_per_code",
     "dac_max_ppb",
     "dac_type",
+    "tadd_gpio",
+    "tadd_hold_s",
 )
 
 

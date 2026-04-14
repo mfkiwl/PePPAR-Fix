@@ -67,6 +67,7 @@ from peppar_fix import (
     estimate_correlation_confidence,
     match_pps_event_from_history,
     load_position,
+    save_position,
 )
 from peppar_fix.event_time import PpsEvent
 from peppar_fix.fault_injection import get_delay_injector, get_source_mute_controller
@@ -622,6 +623,27 @@ def apply_ptp_profile(args):
                 "clockmatrix_dpll_phase", 2)
             args.clockmatrix_pps_clk = profile.get(
                 "clockmatrix_pps_clk", 2)
+    # Bootstrap parameters (from phc_bootstrap.py profile loading)
+    if getattr(args, 'phc_settime_lag_ns', 0) == 0:
+        args.phc_settime_lag_ns = profile.get(
+            "phc_settime_lag_ns", getattr(args, 'phc_settime_lag_ns', 0))
+    if getattr(args, 'phc_step_threshold_ns', 10000) == 10000:
+        args.phc_step_threshold_ns = profile.get(
+            "phc_step_threshold_ns",
+            getattr(args, 'phc_step_threshold_ns', 10000))
+    if getattr(args, 'phc_optimal_stop_limit_s', 1.0) == 1.0:
+        args.phc_optimal_stop_limit_s = profile.get(
+            "phc_optimal_stop_limit_s",
+            getattr(args, 'phc_optimal_stop_limit_s', 1.0))
+    if getattr(args, 'glide_zeta', 0.7) == 0.7:
+        args.glide_zeta = profile.get(
+            "glide_zeta", getattr(args, 'glide_zeta', 0.7))
+    if getattr(args, 'pps_out_pin', -1) == -1:
+        args.pps_out_pin = profile.get(
+            "pps_out_pin", getattr(args, 'pps_out_pin', -1))
+    if getattr(args, 'pps_out_channel', 0) == 0:
+        args.pps_out_channel = profile.get(
+            "pps_out_channel", getattr(args, 'pps_out_channel', 0))
 
 
 def apply_ticc_drive_defaults(args):
@@ -1080,8 +1102,54 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
 
     # Optional servo setup (PTP imports only loaded when needed)
     servo_ctx = None
+    ptp = None
     if args.servo:
-        servo_result = _setup_servo(args, known_ecef, qerr_store)
+        # Open PTP device for bootstrap and servo
+        try:
+            from peppar_fix import PtpDevice
+        except ImportError:
+            log.error("peppar_fix library not available for servo")
+            return 1
+        try:
+            ptp = PtpDevice(args.servo)
+        except OSError as e:
+            log.error(f"Cannot open PTP device {args.servo}: {e}")
+            return 1
+
+        # DO bootstrap: ensure phase ±10µs and frequency ±5ppb before
+        # servo starts.  Skipped if --skip-bootstrap or --freerun.
+        # For PHC DOs: phase step + adjfine.
+        # For VCOCXO DOs: TADD ARM + DAC frequency seed.
+        if not getattr(args, 'skip_bootstrap', False) and not args.freerun:
+            if not _do_bootstrap_init(args, ptp, known_ecef, obs_queue,
+                                        beph, ssr, stop_event):
+                log.error("DO bootstrap failed — cannot start servo")
+                ptp.close()
+                return 1
+            log.info("DO bootstrap succeeded (%s)", getattr(args, 'do_type', 'phc'))
+
+        # Set up servo with PPS retry (absorbs wrapper's exit-code-3 retry).
+        # No-PPS (return 3) is retryable — PPS may appear after a few seconds
+        # if the receiver just started or the cable was reconnected.
+        pps_max_retries = 3
+        pps_backoff = 5
+        servo_result = None
+        for pps_attempt in range(1, pps_max_retries + 1):
+            servo_result = _setup_servo(args, known_ecef, qerr_store, ptp=ptp)
+            if not isinstance(servo_result, int) or servo_result != 3:
+                break
+            if pps_attempt < pps_max_retries:
+                log.warning("No PPS — retry %d/%d in %ds",
+                            pps_attempt, pps_max_retries, pps_backoff)
+                time.sleep(pps_backoff)
+                pps_backoff = min(pps_backoff * 2, 60)
+            else:
+                log.error("No PPS after %d attempts — giving up", pps_max_retries)
+        # Promote clockClass to 52 (initialized) after successful bootstrap
+        # and servo setup — mirrors what the wrapper's
+        # promote_clock_class_initialized did.
+        if not isinstance(servo_result, int) and servo_result.get('pmc'):
+            _set_clock_class(servo_result, "initialized")
         if isinstance(servo_result, int):
             log.error("Failed to set up PHC servo (exit code %d)", servo_result)
             return servo_result
@@ -1608,6 +1676,19 @@ def _log_do_characterization(args):
                      pair, hz, 1.0 / hz if hz > 0 else 0)
 
 
+def _init_noise_estimator(args):
+    """Create InBandNoiseEstimator, warm-starting from saved state if available."""
+    if args.freerun:
+        return None
+    from peppar_fix.noise_estimator import load_noise_state, InBandNoiseEstimator
+    do_uid = _resolve_do_uid(args)
+    if do_uid is not None:
+        est = load_noise_state(do_uid)
+        if est is not None:
+            return est
+    return InBandNoiseEstimator()
+
+
 def _init_carrier_tracker(args):
     """Create CarrierPhaseTracker, seeding D from state or drift file.
 
@@ -1688,11 +1769,434 @@ def _resolve_do_uid(args):
     return None
 
 
-def _setup_servo(args, known_ecef, qerr_store):
+# ── DO bootstrap (absorbed from phc_bootstrap.py) ─────────────────── #
+
+
+def _bootstrap_measure_freq_and_clock(args, ptp, known_ecef, obs_queue,
+                                       beph, ssr, stop_event):
+    """Shared bootstrap preamble: measure PPS frequency and run a short
+    FixedPosFilter to estimate dt_rx.
+
+    Returns (pps_freq_ppb, pps_freq_unc, dt_rx_ns, dt_rx_series) on
+    success, or None on fatal error.
+    """
+    from phc_bootstrap import measure_pps_frequency
+
+    extts_ch = args.extts_channel
+
+    # ── 1. Measure PPS frequency ──────────────────────────────────── #
+    log.info("=== DO Bootstrap: measuring DO frequency from PPS ===")
+    pps_freq_ppb, pps_freq_sigma, pps_freq_n = measure_pps_frequency(
+        ptp, extts_ch, n_samples=args.bootstrap_epochs,
+        timeout_s=args.bootstrap_epochs + 3)
+    if pps_freq_ppb is None:
+        log.error("No PPS events — cannot bootstrap DO")
+        return None
+    pps_freq_unc = pps_freq_sigma / math.sqrt(pps_freq_n)
+    log.info("PPS frequency error: %.1f ±%.1f ppb (σ=%.1f, n=%d)",
+             pps_freq_ppb, pps_freq_unc, pps_freq_sigma, pps_freq_n)
+
+    # ── 2. Short FixedPosFilter for dt_rx ─────────────────────────── #
+    log.info("Running %d-epoch FixedPosFilter for clock estimate...",
+             args.bootstrap_epochs)
+    filt = FixedPosFilter(known_ecef)
+    filt.initialized = True
+    prev_t = None
+    dt_rx_ns = None
+    dt_rx_sigma_ns = None
+    dt_rx_series = []
+    n_epochs = 0
+
+    for _ in range(args.bootstrap_epochs * 3):  # generous timeout
+        if stop_event.is_set():
+            return None
+        try:
+            gps_time, observations = obs_queue.get(timeout=5)
+        except Exception:
+            continue
+        if len(observations) < 4:
+            continue
+
+        corrections = RealtimeCorrections(beph, ssr)
+        dt = (gps_time - prev_t).total_seconds() if prev_t else 1.0
+        if prev_t and 0 < dt <= 30:
+            filt.predict(dt)
+        prev_t = gps_time
+
+        n_used, resid, n_td = filt.update(
+            observations, corrections, gps_time, clk_file=corrections)
+        if n_used < 4:
+            continue
+
+        dt_rx_ns = filt.x[filt.IDX_CLK] / C * 1e9
+        p_clk = filt.P[filt.IDX_CLK, filt.IDX_CLK]
+        dt_rx_sigma_ns = math.sqrt(max(0, p_clk)) / C * 1e9
+        dt_rx_series.append(dt_rx_ns)
+        n_epochs += 1
+
+        if n_epochs % 5 == 0 or n_epochs == args.bootstrap_epochs:
+            log.info("  [%d/%d] dt_rx=%.1f ±%.1f ns  n_used=%d",
+                     n_epochs, args.bootstrap_epochs, dt_rx_ns,
+                     dt_rx_sigma_ns, n_used)
+
+        if n_epochs >= args.bootstrap_epochs:
+            break
+
+    if dt_rx_ns is None:
+        log.error("Filter did not converge in %d epochs", args.bootstrap_epochs)
+        return None
+
+    log.info("Clock estimate: dt_rx=%.1f ±%.1f ns after %d epochs",
+             dt_rx_ns, dt_rx_sigma_ns, n_epochs)
+
+    return pps_freq_ppb, pps_freq_unc, dt_rx_ns, dt_rx_series
+
+
+def _bootstrap_compute_base_freq(args, pps_freq_ppb, pps_freq_unc,
+                                  current_adj_ppb, dt_rx_series):
+    """Compute base frequency and rx TCXO correction from bootstrap data.
+
+    Returns (base_freq, tcxo_freq_corr_ppb).
+    """
+    from phc_bootstrap import load_drift
+
+    freq_sane = abs(pps_freq_ppb) <= args.freq_tolerance_ppb
+    if freq_sane:
+        log.info("Frequency sane: PPS=%.1f ±%.1f ppb (within ±%.1f ppb)",
+                 pps_freq_ppb, pps_freq_unc, args.freq_tolerance_ppb)
+    else:
+        log.warning("Frequency error: PPS=%.1f ±%.1f ppb — outside ±%.1f ppb",
+                    pps_freq_ppb, pps_freq_unc, args.freq_tolerance_ppb)
+
+    if freq_sane:
+        base_freq = current_adj_ppb
+        log.info("Base frequency: %.1f ppb (current, freq sane)", base_freq)
+    else:
+        drift = load_drift(args.drift_file)
+        if pps_freq_unc is not None and pps_freq_unc <= args.freq_tolerance_ppb:
+            base_freq = current_adj_ppb - pps_freq_ppb
+            freq_source = ("PPS correction: %.1f - %.1f"
+                           % (current_adj_ppb, pps_freq_ppb))
+        elif drift:
+            base_freq = drift["adjfine_ppb"]
+            freq_source = "drift file"
+        else:
+            base_freq = 0.0
+            freq_source = "default (no data)"
+        log.info("Base frequency: %.1f ppb (%s)", base_freq, freq_source)
+
+    # rx TCXO frequency correction from dt_rx series
+    tcxo_freq_corr_ppb = None
+    if len(dt_rx_series) >= 3:
+        n_dt = len(dt_rx_series)
+        sx = sum(range(n_dt))
+        sy = sum(dt_rx_series)
+        sxy = sum(i * v for i, v in enumerate(dt_rx_series))
+        sxx = sum(i * i for i in range(n_dt))
+        denom = n_dt * sxx - sx * sx
+        if denom != 0:
+            tcxo_freq_corr_ppb = (n_dt * sxy - sx * sy) / denom
+            log.info("F9T TCXO freq correction: %.1f ppb (from %d samples)",
+                     tcxo_freq_corr_ppb, n_dt)
+
+    return base_freq, tcxo_freq_corr_ppb
+
+
+def _do_bootstrap_vcocxo(args, ptp, pps_freq_ppb, pps_freq_unc,
+                          dt_rx_ns, dt_rx_series):
+    """Bootstrap an external VCOCXO: ARM TADD divider, seed DAC frequency.
+
+    The TADD ARM synchronizes the divider's 1 PPS output to the GNSS PPS.
+    The DAC is set to the drift-file frequency (or center if no drift).
+    No PHC phase step — the TADD ARM handles phase alignment.
+
+    Returns True on success, False on fatal error.
+    """
+    from phc_bootstrap import load_drift, save_drift
+
+    do_label = getattr(args, 'do_label', None) or 'vcocxo'
+
+    # ── 1. ARM the TADD divider ───────────────────────────────────── #
+    tadd_gpio = getattr(args, 'tadd_gpio', None)
+    if tadd_gpio is not None:
+        from peppar_fix.tadd import TADDDivider
+        tadd_hold = getattr(args, 'tadd_hold_s', 1.1)
+        tadd = TADDDivider(arm_gpio=tadd_gpio, arm_hold_s=tadd_hold)
+        tadd.setup()
+        try:
+            arm_mono = tadd.arm()
+            log.info("TADD ARM complete (GPIO%d) — DO PPS synced to GNSS PPS "
+                     "(phase offset ≤%d ns)", tadd_gpio, tadd.max_phase_offset_ns)
+        finally:
+            tadd.teardown()
+    else:
+        log.info("No TADD GPIO configured — assuming DO PPS already synced")
+
+    # ── 2. Seed DAC frequency ─────────────────────────────────────── #
+    dac_bus = getattr(args, 'dac_bus', None)
+    if dac_bus is None:
+        log.error("VCOCXO bootstrap requires --dac-bus")
+        return False
+
+    from peppar_fix.dac_actuator import DacActuator
+
+    dac_addr = int(getattr(args, 'dac_addr', '0x60'), 0)
+    ppb_per_code = getattr(args, 'dac_ppb_per_code', None)
+    if ppb_per_code is None:
+        log.error("VCOCXO bootstrap requires --dac-ppb-per-code")
+        return False
+
+    dac = DacActuator(
+        bus_num=dac_bus,
+        addr=dac_addr,
+        bits=getattr(args, 'dac_bits', 12),
+        center_code=getattr(args, 'dac_center_code', None),
+        ppb_per_code=ppb_per_code,
+        max_ppb=getattr(args, 'dac_max_ppb', None),
+        dac_type=getattr(args, 'dac_type', 'mcp4725'),
+    )
+    dac.setup()
+
+    # Compute base frequency from drift file or PPS measurement
+    base_freq, tcxo_freq_corr_ppb = _bootstrap_compute_base_freq(
+        args, pps_freq_ppb, pps_freq_unc, dac.read_frequency_ppb(),
+        dt_rx_series)
+
+    actual = dac.adjust_frequency_ppb(base_freq)
+    log.info("DAC frequency set: requested=%.1f ppb, actual=%.1f ppb",
+             base_freq, actual)
+
+    dac.teardown()
+
+    save_drift(args.drift_file, base_freq, do_label,
+               tcxo_freq_corr_ppb, dt_rx_ns=dt_rx_ns)
+    log.info("Drift file updated: %s (base=%.1f ppb, dt_rx=%.1f ns)",
+             args.drift_file, base_freq, dt_rx_ns)
+
+    log.info("VCOCXO bootstrap complete — servo may start")
+    return True
+
+
+def _do_bootstrap_phc(args, ptp, pps_freq_ppb, pps_freq_unc,
+                       dt_rx_ns, dt_rx_series, stop_event):
+    """Bootstrap a PHC-based DO: evaluate phase, step if needed, glide slope.
+
+    This is the original PHC bootstrap path.
+    Returns True on success, False on fatal error.
+    """
+    from phc_bootstrap import (
+        load_drift, save_drift,
+        _realtime_to_phc_offset_s, _enable_pps_out,
+    )
+
+    extts_ch = args.extts_channel
+
+    # ── 3. Evaluate PHC phase ─────────────────────────────────────── #
+    ptp.enable_extts(extts_ch, rising_edge=True)
+    pps_event = ptp.read_one_rising_edge(timeout_s=3.0)
+    pps_realtime_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
+    ptp.disable_extts(extts_ch)
+
+    if pps_event is None:
+        log.error("No PPS event — cannot evaluate DO phase")
+        return False
+
+    phc_sec, phc_nsec, _idx, _mono, _qr, _pa = pps_event
+    phc_rounded_sec = phc_sec if phc_nsec < 500_000_000 else phc_sec + 1
+
+    offset_s = _realtime_to_phc_offset_s(
+        args.phc_timescale, args.leap, args.tai_minus_gps)
+    utc_sec = round(pps_realtime_ns / 1_000_000_000)
+    target_sec = utc_sec + offset_s
+
+    epoch_offset = phc_rounded_sec - target_sec
+    pps_error_ns = (phc_nsec if phc_nsec < 500_000_000
+                    else phc_nsec - 1_000_000_000)
+    phase_error_ns = epoch_offset * 1_000_000_000 + pps_error_ns
+
+    log.info("DO phase: epoch_offset=%ds, pps_error=%+.0f ns, "
+             "total_phase_error=%+.0f ns",
+             epoch_offset, pps_error_ns, phase_error_ns)
+
+    # ── 4. Frequency + phase sanity check ─────────────────────────── #
+    freq_sane = abs(pps_freq_ppb) <= args.freq_tolerance_ppb
+    phase_sane = abs(phase_error_ns) < args.phc_step_threshold_ns
+
+    if phase_sane and freq_sane:
+        log.info("PHC state is sane — blessing without intervention")
+        _enable_pps_out(ptp, args)
+        return True
+
+    # ── 5. Compute base frequency ─────────────────────────────────── #
+    base_freq, tcxo_freq_corr_ppb = _bootstrap_compute_base_freq(
+        args, pps_freq_ppb, pps_freq_unc, ptp.read_adjfine(),
+        dt_rx_series)
+
+    phi_0 = phase_error_ns
+
+    if not phase_sane:
+        # Disable PEROUT before stepping (i226 safety)
+        if args.pps_out_pin >= 0:
+            ptp.disable_perout(args.pps_out_channel)
+            log.info("Disabled PEROUT before PHC step")
+        try:
+            log.info("Stepping PHC by %+.0f ns (ADJ_SETOFFSET)", -phase_error_ns)
+            ptp.adj_setoffset(-phase_error_ns)
+        except OSError as e:
+            log.warning("ADJ_SETOFFSET failed (%s), falling back to optimal stopping", e)
+            pps_anchor_ns = target_sec * 1_000_000_000
+            residual, attempts, met = ptp.step_to(
+                pps_anchor_ns=pps_anchor_ns,
+                pps_realtime_ns=pps_realtime_ns,
+                phc_optimal_stop_limit_s=args.phc_optimal_stop_limit_s,
+                phc_settime_lag_ns=args.phc_settime_lag_ns,
+            )
+            log.info("Step: residual=%+.0f ns, attempts=%d, %s",
+                     residual, attempts, "ACCEPTED" if met else "DEADLINE")
+
+        # Verify via next PPS edge
+        ptp.enable_extts(extts_ch, rising_edge=True)
+        evt = ptp.read_one_rising_edge(timeout_s=3.0)
+        if evt is not None:
+            v_realtime_ns = time.clock_gettime_ns(time.CLOCK_REALTIME)
+            v_sec, v_nsec = evt[0], evt[1]
+            v_rounded = v_sec if v_nsec < 500_000_000 else v_sec + 1
+            v_target = round(v_realtime_ns / 1_000_000_000) + offset_s
+            v_epoch_off = v_rounded - v_target
+            v_sub_ns = (v_nsec if v_nsec < 500_000_000
+                        else v_nsec - 1_000_000_000)
+            phi_0 = v_epoch_off * 1_000_000_000 + v_sub_ns
+            log.info("PPS verify: phi_0 = %+.0f ns (epoch_offset=%d)",
+                     phi_0, v_epoch_off)
+        else:
+            log.warning("No PPS event — assuming step landed at 0")
+            phi_0 = 0
+        ptp.disable_extts(extts_ch)
+    else:
+        log.info("Phase OK (%+.0f ns) — frequency-only correction",
+                 phase_error_ns)
+
+    # Glide slope
+    glide_offset = 0.0
+    if args.no_glide:
+        log.info("Glide disabled (--no-glide): adjfine = base frequency only")
+    elif not phase_sane and args.track_ki > 0:
+        omega_n = math.sqrt(args.track_ki)
+        zeta = args.glide_zeta
+        glide_offset = -zeta * omega_n * phi_0
+        # Clamp within servo control authority
+        if args.track_max_ppb:
+            max_glide = args.track_max_ppb - abs(base_freq)
+            if abs(glide_offset) > max_glide:
+                clamped = math.copysign(max_glide, glide_offset)
+                log.warning("Glide clamped: %.0f → %.0f ppb (track_max=%.0f)",
+                            glide_offset, clamped, args.track_max_ppb)
+                glide_offset = clamped
+        t_cross = abs(phi_0 / glide_offset) if glide_offset != 0 else float('inf')
+        log.info("Glide: zeta=%.2f, omega_n=%.4f, phi_0=%+.0f ns, "
+                 "offset=%+.1f ppb, zero-crossing ~%.0fs",
+                 zeta, omega_n, phi_0, glide_offset, t_cross)
+
+    target_freq = base_freq + glide_offset
+
+    # ClockMatrix handoff (OTC hardware)
+    cm_bus = getattr(args, 'clockmatrix_bus', None)
+    if cm_bus is not None:
+        try:
+            from peppar_fix.clockmatrix import ClockMatrixI2C
+            from peppar_fix.clockmatrix_actuator import (
+                ClockMatrixActuator, ppb_to_fcw)
+
+            cm_addr = int(getattr(args, 'clockmatrix_addr', '0x58'), 0)
+            cm_dpll = getattr(args, 'clockmatrix_dpll_actuator', 3)
+            cm_i2c = ClockMatrixI2C(cm_bus, cm_addr)
+
+            log.info("Zeroing PHC adjfine (frequency goes to ClockMatrix FCW)")
+            ptp.adjfine(0.0)
+
+            actuator = ClockMatrixActuator(cm_i2c, dpll_id=cm_dpll)
+            actuator.setup()
+            actuator.adjust_frequency_ppb(target_freq)
+
+            log.info("ClockMatrix FCW set: %.1f ppb (base=%.1f + glide=%.1f)",
+                     target_freq, base_freq, glide_offset)
+
+            save_drift(args.drift_file, base_freq, args.servo,
+                       tcxo_freq_corr_ppb, dt_rx_ns=dt_rx_ns)
+            cm_i2c.close()
+
+            _enable_pps_out(ptp, args)
+            log.info("PHC bootstrap complete (ClockMatrix)")
+            return True
+
+        except ImportError:
+            log.warning("smbus2 not available — falling back to PHC adjfine")
+        except Exception as e:
+            log.error("ClockMatrix handoff failed: %s — falling back", e)
+
+    # Normal PHC-only path
+    log.info("Setting adjfine: %.1f ppb (base=%.1f + glide=%.1f)",
+             target_freq, base_freq, glide_offset)
+    ptp.adjfine(target_freq)
+
+    save_drift(args.drift_file, base_freq, args.servo,
+               tcxo_freq_corr_ppb, dt_rx_ns=dt_rx_ns)
+    log.info("Drift file updated: %s (base=%.1f ppb, dt_rx=%.1f ns)",
+             args.drift_file, base_freq, dt_rx_ns)
+
+    _enable_pps_out(ptp, args)
+    log.info("PHC bootstrap complete — servo may start")
+    return True
+
+
+def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
+                        stop_event):
+    """Bootstrap DO phase and frequency before servo starts.
+
+    Dispatches to the appropriate bootstrap path based on --do-type:
+    - phc: PHC phase step + adjfine (original path)
+    - vcocxo: TADD ARM + DAC frequency seed
+    - clockmatrix: PHC phase step + ClockMatrix FCW (handled within PHC path)
+
+    All paths share PPS frequency measurement and a short FixedPosFilter
+    for dt_rx estimation.
+
+    Returns True on success, False on fatal error.
+    """
+    from peppar_fix.ptp_device import DualEdgeFilter
+
+    # phc_bootstrap helpers expect args.ptp_dev; engine uses args.servo
+    args.ptp_dev = args.servo
+
+    # Shared preamble: measure PPS frequency and estimate dt_rx
+    result = _bootstrap_measure_freq_and_clock(
+        args, ptp, known_ecef, obs_queue, beph, ssr, stop_event)
+    if result is None:
+        return False
+    pps_freq_ppb, pps_freq_unc, dt_rx_ns, dt_rx_series = result
+
+    do_type = getattr(args, 'do_type', 'phc')
+
+    if do_type == 'vcocxo':
+        return _do_bootstrap_vcocxo(
+            args, ptp, pps_freq_ppb, pps_freq_unc,
+            dt_rx_ns, dt_rx_series)
+    else:
+        # PHC and ClockMatrix both go through the PHC path
+        # (ClockMatrix is a PHC + external frequency actuator)
+        return _do_bootstrap_phc(
+            args, ptp, pps_freq_ppb, pps_freq_unc,
+            dt_rx_ns, dt_rx_series, stop_event)
+
+
+def _setup_servo(args, known_ecef, qerr_store, ptp=None):
     """Set up PHC servo.
 
     Returns context dict on success, or an int exit code on failure:
     1 = fatal (device or library error), 3 = no PPS (retryable).
+
+    If ptp is provided, uses that PtpDevice instead of opening a new one
+    (e.g., when bootstrap already opened it).
     """
     gate_stats = None
     try:
@@ -1707,11 +2211,12 @@ def _setup_servo(args, known_ecef, qerr_store):
     ts_params = TimestamperParams.resolve(args)
     log.info("Timestamper params: %s", ts_params)
 
-    try:
-        ptp = PtpDevice(args.servo)
-    except OSError as e:
-        log.error(f"Cannot open PTP device {args.servo}: {e}")
-        return 1
+    if ptp is None:
+        try:
+            ptp = PtpDevice(args.servo)
+        except OSError as e:
+            log.error(f"Cannot open PTP device {args.servo}: {e}")
+            return 1
 
     caps = ptp.get_caps()
     log.info(f"PHC: {args.servo}, max_adj={caps['max_adj']} ppb, "
@@ -2247,6 +2752,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'ticc_prev_error_mono': None,
         'consecutive_outliers': 0,
         'ticc_settled_count': 0,
+        'noise_estimator': _init_noise_estimator(args),
         'holdover': {
             'active': False,
             'reason': '',
@@ -2948,6 +3454,14 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         ctx['consecutive_outliers'] = 0
 
     scheduler.accumulate(best.error_ns, best.confidence_ns, best.name)
+
+    # Feed in-band noise estimator (before correction decision)
+    noise_est = ctx.get('noise_estimator')
+    if noise_est is not None:
+        # will_correct is a lookahead — True if scheduler will flush this epoch
+        will_correct = scheduler.should_correct()
+        noise_est.feed(best.error_ns, ctx['adjfine_ppb'], will_correct)
+
     # Three-stage clockClass promotion: 248 (boot) → 52 (PHC bootstrapped,
     # set by wrapper after bootstrap) → 6 (servo settled).  Demote back
     # to 52 if the scheduler leaves settled state.
@@ -3103,6 +3617,10 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                      f"coast ({scheduler.n_accumulated}/{scheduler.interval}) "
                      f"adj={ctx['adjfine_ppb']:+.1f}ppb{mode_suffix}")
 
+    # Log noise estimator summary periodically
+    if noise_est is not None and n_epochs % 120 == 0 and noise_est.gap_samples >= 10:
+        log.info("  [noise] %s", noise_est.summary())
+
     # PHC time at PPS edge (from EXTTS hardware timestamp).
     phc_gettime_ns = phc_sec * 1_000_000_000 + phc_nsec
     carrier_error_ns = None
@@ -3196,6 +3714,8 @@ def _log_servo(log_w, log_f, ts_str, gps_unix_sec, phc_sec, phc_nsec,
 
 def _cleanup_servo(ctx):
     """Clean up servo resources."""
+    # Degrade clockClass to 248 (freerun) on engine exit
+    _set_clock_class(ctx, "freerun")
     ctx['stop_pps'].set()
     if 'stop_ticc' in ctx:
         ctx['stop_ticc'].set()
@@ -3227,6 +3747,13 @@ def _cleanup_servo(ctx):
     pmc = ctx.get('pmc')
     if pmc is not None:
         pmc.close()
+    # Save noise estimator state for warm-start on next run
+    noise_est = ctx.get('noise_estimator')
+    if noise_est is not None:
+        do_uid = ctx.get('do_unique_id')
+        if do_uid is not None:
+            from peppar_fix.noise_estimator import save_noise_state
+            save_noise_state(do_uid, noise_est)
     # Save refined oscillator corrections for next bootstrap
     _save_osc_freq_corr(ctx)
     log.info("PHC servo cleaned up")
@@ -3529,6 +4056,13 @@ def run(args):
         lat, lon, alt = [float(v) for v in args.known_pos.split(',')]
         known_ecef = lla_to_ecef(lat, lon, alt)
         log.info(f"Position (CLI): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
+        # Persist known position to receiver state and legacy file
+        uid = getattr(args, 'receiver_unique_id', None)
+        if uid is not None:
+            save_position_to_receiver(uid, known_ecef, 0.0, "known_pos")
+            log.info("Position saved to receiver state for %s", uid)
+        if args.position_file:
+            save_position(args.position_file, known_ecef, 0.0, "known_pos")
     elif args.position_file:
         # Try receiver state first, then fall back to legacy position file.
         pos_source = None
@@ -3629,25 +4163,33 @@ def run(args):
         if stop_event.is_set():
             return 0
 
-        # Phase 2: Steady state
-        steady_result = run_steady_state(
-            args,
-            known_ecef,
-            obs_queue,
-            corrections,
-            beph,
-            ssr,
-            stop_event,
-            qerr_store=qerr_store,
-            out_w=out_w,
-            nav2_store=nav2_store,
-        )
-        # run_steady_state returns an int exit code on error,
-        # or a gate_stats dict on normal completion.
-        if isinstance(steady_result, int):
-            exit_code = steady_result
-        else:
-            gate_stats = steady_result
+        # Phase 2: Steady state (with internal re-bootstrap on PHC divergence)
+        max_rebootstrap = 3
+        for _attempt in range(1, max_rebootstrap + 1):
+            steady_result = run_steady_state(
+                args,
+                known_ecef,
+                obs_queue,
+                corrections,
+                beph,
+                ssr,
+                stop_event,
+                qerr_store=qerr_store,
+                out_w=out_w,
+                nav2_store=nav2_store,
+            )
+            # run_steady_state returns an int exit code on error,
+            # or a gate_stats dict on normal completion.
+            if isinstance(steady_result, int):
+                if steady_result == 5 and _attempt < max_rebootstrap:
+                    log.warning(
+                        "PHC diverged — internal re-bootstrap "
+                        "(attempt %d/%d)", _attempt, max_rebootstrap)
+                    continue  # run_steady_state will re-bootstrap internally
+                exit_code = steady_result
+            else:
+                gate_stats = steady_result
+            break
 
     except KeyboardInterrupt:
         log.info("Interrupted")
@@ -3667,6 +4209,95 @@ def run(args):
     return exit_code
 
 
+# ── Host config resolution ────────────────────────────────────────── #
+
+
+def _apply_host_config(args):
+    """Apply host config TOML defaults to args that weren't set on CLI.
+
+    Resolves config/<hostname>.toml (or explicit --host-config) and fills
+    in any arg that is still at its argparse default.  CLI always wins.
+    """
+    import socket
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
+
+    # Find config file
+    candidates = []
+    if args.host_config:
+        candidates = [args.host_config]
+    else:
+        hostname = socket.gethostname().split(".")[0].lower()
+        candidates = [
+            os.path.join(repo_root, "config", f"{hostname}.toml"),
+            "/etc/peppar-fix/config.toml",
+        ]
+
+    cfg = {}
+    cfg_path = None
+    for path in candidates:
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+            cfg = data.get("peppar", {})
+            cfg_path = path
+            break
+
+    if not cfg:
+        return  # no host config found
+
+    # Log after basicConfig (called later in main), so just stash the path.
+    args._host_config_path = cfg_path
+
+    # Map from TOML key → (argparse dest, type conversion).
+    # Only apply if the CLI arg is still at its default (None or argparse
+    # default).  This preserves "CLI overrides host config overrides defaults".
+    _MAP = {
+        "serial":           ("serial",           str),
+        "baud":             ("baud",             int),
+        "ubx_port":         ("port_type",        str),
+        "port_type":        ("port_type",        str),
+        "receiver":         ("receiver",         str),
+        "ptp_profile":      ("ptp_profile",      str),
+        "ptp_dev":          ("servo",            str),
+        "ntrip_conf":       ("ntrip_conf",       str),
+        "eph_mount":        ("eph_mount",        str),
+        "ssr_mount":        ("ssr_mount",        str),
+        "known_pos":        ("known_pos",        str),
+        "position_file":    ("position_file",    str),
+        "systems":          ("systems",          str),
+        "duration":         ("duration",         int),
+        "log":              ("servo_log",        str),
+        "do_label":         ("do_label",         str),
+        "do_type":          ("do_type",          str),
+        "dac_bus":          ("dac_bus",           int),
+        "dac_addr":         ("dac_addr",         str),
+        "dac_bits":         ("dac_bits",         int),
+        "dac_center_code":  ("dac_center_code",  int),
+        "dac_ppb_per_code": ("dac_ppb_per_code", float),
+        "dac_max_ppb":      ("dac_max_ppb",      float),
+        "dac_type":         ("dac_type",         str),
+        "tadd_gpio":        ("tadd_gpio",        int),
+        "tadd_hold_s":      ("tadd_hold_s",      float),
+        "phase_step_bias_ns": ("phase_step_bias_ns", float),
+        "pmc_uds":          ("pmc",              str),
+        "pmc_domain":       ("pmc_domain",       int),
+    }
+
+    for toml_key, (dest, conv) in _MAP.items():
+        if toml_key not in cfg:
+            continue
+        current = getattr(args, dest, None)
+        # Only apply if CLI didn't set it (still at default None or
+        # argparse default for special cases)
+        if current is not None:
+            continue
+        try:
+            setattr(args, dest, conv(cfg[toml_key]))
+        except (ValueError, TypeError) as e:
+            log.warning("Host config: bad value for %s: %s", toml_key, e)
+
+
 # ── CLI ──────────────────────────────────────────────────────────────── #
 
 def main():
@@ -3681,6 +4312,12 @@ Two-phase operation:
           Optional: --servo for PHC discipline, --out for CSV logging.
 """,
     )
+
+    # Host config (auto-discovered by hostname or explicit)
+    cfg = ap.add_argument_group("Host configuration")
+    cfg.add_argument("--host-config", default=None,
+                     help="Explicit host config TOML path. If omitted, auto-discovers "
+                          "config/<hostname>.toml or /etc/peppar-fix/config.toml")
 
     # Position
     pos = ap.add_argument_group("Position")
@@ -3699,12 +4336,14 @@ Two-phase operation:
 
     # Serial
     serial = ap.add_argument_group("Serial")
-    serial.add_argument("--serial", required=True,
-                        help="Serial port for F9T (e.g. /dev/gnss-top)")
-    serial.add_argument("--baud", type=int, default=115200)
-    serial.add_argument("--receiver", default="f9t",
+    serial.add_argument("--serial", default=None,
+                        help="Serial port for F9T (e.g. /dev/gnss-top). "
+                             "Required unless provided by host config.")
+    serial.add_argument("--baud", type=int, default=None,
+                        help="Baud rate (default: 115200, or from host config)")
+    serial.add_argument("--receiver", default=None,
                         help="Receiver model/profile: f9t, f9t-l5, f10t (default: f9t)")
-    serial.add_argument("--port-type", default="USB",
+    serial.add_argument("--port-type", default=None,
                         choices=["UART", "UART2", "USB", "SPI", "I2C"],
                         help="Receiver port type for UBX message routing (default: USB)")
     serial.add_argument("--measurement-rate-ms", type=int, default=None,
@@ -3714,7 +4353,7 @@ Two-phase operation:
 
     # GNSS
     gnss = ap.add_argument_group("GNSS")
-    gnss.add_argument("--systems", default="gps,gal,bds",
+    gnss.add_argument("--systems", default=None,
                       help="GNSS systems (default: gps,gal,bds)")
     gnss.add_argument("--leap", type=int, default=18,
                       help="GPS-UTC leap seconds (default: 18)")
@@ -3764,6 +4403,10 @@ Two-phase operation:
                        help="Device/profile config TOML (default: config/receivers.toml)")
     servo.add_argument("--servo", default=None,
                        help="PTP device for PHC servo (e.g. /dev/ptp0)")
+    servo.add_argument("--no-do", action="store_true",
+                       help="Position-only mode: no DO, no servo, no PPS. "
+                            "Overrides --servo and host config ptp_dev. "
+                            "Useful for cold/warm position reproducibility testing.")
     servo.add_argument("--pps-pin", type=int, default=None,
                        help="PTP pin index for PPS input (profile/default if omitted)")
     servo.add_argument("--extts-channel", type=int, default=None,
@@ -3897,11 +4540,16 @@ Two-phase operation:
                        help="Label for the disciplined oscillator (overrides auto-detected PHC "
                             "MAC as the DO unique_id in state persistence). Required for external "
                             "DOs (VCOCXO, ClockMatrix) that aren't bundled inside a PHC.")
+    servo.add_argument("--do-type", default=None,
+                       choices=["phc", "vcocxo", "clockmatrix"],
+                       help="Type of disciplined oscillator: phc (default, NIC crystal via "
+                            "adjfine), vcocxo (external OCXO/TCXO via DAC), clockmatrix "
+                            "(Renesas 8A34002 via I2C FCW)")
     servo.add_argument("--dac-bus", type=int, default=None,
                        help="I2C bus for DAC-driven VCOCXO (e.g. 1 for /dev/i2c-1)")
     servo.add_argument("--dac-addr", default=None,
                        help="I2C address for DAC (e.g. 0x60)")
-    servo.add_argument("--dac-bits", type=int, default=12,
+    servo.add_argument("--dac-bits", type=int, default=None,
                        help="DAC resolution in bits (default: 12 for MCP4725)")
     servo.add_argument("--dac-center-code", type=int, default=None,
                        help="DAC code for nominal frequency (default: midscale)")
@@ -3909,9 +4557,39 @@ Two-phase operation:
                        help="Tuning sensitivity in ppb per DAC LSB (must be characterized)")
     servo.add_argument("--dac-max-ppb", type=float, default=None,
                        help="Maximum frequency adjustment in ppb (default: computed from range)")
-    servo.add_argument("--dac-type", default="mcp4725",
+    servo.add_argument("--dac-type", default=None,
                        choices=["mcp4725", "ad5693r", "generic"],
                        help="DAC chip type (default: mcp4725)")
+
+    # DO bootstrap (absorbed from phc_bootstrap.py)
+    boot = ap.add_argument_group("DO bootstrap (automatic when --servo)")
+    boot.add_argument("--drift-file", default="data/drift.json",
+                      help="Drift file for warm-start frequency seed (default: data/drift.json)")
+    boot.add_argument("--pps-out-pin", type=int, default=-1,
+                      help="SDP pin for PPS OUT (PEROUT), -1 = none")
+    boot.add_argument("--pps-out-channel", type=int, default=0,
+                      help="PEROUT channel for PPS OUT (default: 0)")
+    boot.add_argument("--phc-step-threshold-ns", type=int, default=10000,
+                      help="Skip phase step if error already within this (default: 10000)")
+    boot.add_argument("--phc-settime-lag-ns", type=int, default=0,
+                      help="Mean clock_settime-to-PHC lag in ns (default: 0)")
+    boot.add_argument("--phc-optimal-stop-limit-s", type=float, default=1.0,
+                      help="Phase step optimal stopping budget in seconds (default: 1.0)")
+    boot.add_argument("--glide-zeta", type=float, default=0.7,
+                      help="Target damping ratio for servo glide (default: 0.7)")
+    boot.add_argument("--no-glide", action="store_true",
+                      help="Skip glide slope — set adjfine to base frequency only")
+    boot.add_argument("--bootstrap-epochs", type=int, default=10,
+                      help="Filter epochs before PHC evaluation (default: 10)")
+    boot.add_argument("--freq-tolerance-ppb", type=float, default=10.0,
+                      help="Frequency sanity threshold in ppb (default: 10.0)")
+    boot.add_argument("--skip-bootstrap", action="store_true",
+                      help="Skip DO bootstrap even when --servo is set")
+    boot.add_argument("--tadd-gpio", type=int, default=None,
+                      help="BCM GPIO pin for TADD-2 Mini ARM sync (enables TADD ARM "
+                           "during bootstrap for external DOs with a divider)")
+    boot.add_argument("--tadd-hold-s", type=float, default=1.1,
+                      help="TADD ARM hold time in seconds (default: 1.1, spec requires >1s)")
 
     ticc = ap.add_argument_group("TICC experimental input (optional)")
     ticc.add_argument("--ticc-port", default=None,
@@ -3963,6 +4641,26 @@ Two-phase operation:
     out.add_argument("-v", "--verbose", action="store_true")
 
     args = ap.parse_args()
+    _apply_host_config(args)
+    # --no-do overrides --servo from CLI or host config
+    if args.no_do:
+        args.servo = None
+    # Apply defaults for args that are None after CLI + host config.
+    # These were made nullable so host config can override them.
+    if args.baud is None:
+        args.baud = 115200
+    if args.receiver is None:
+        args.receiver = "f9t"
+    if args.port_type is None:
+        args.port_type = "USB"
+    if args.systems is None:
+        args.systems = "gps,gal,bds"
+    if args.do_type is None:
+        args.do_type = "phc"
+    if args.dac_bits is None:
+        args.dac_bits = 12
+    if args.dac_type is None:
+        args.dac_type = "mcp4725"
     apply_ptp_profile(args)
     # --ticc-port enables passive TICC measurement/logging.  --ticc-drive
     # additionally promotes TICC to the servo input.  Keep them separate
@@ -4023,8 +4721,20 @@ Two-phase operation:
         stream=sys.stderr,
     )
 
+    if getattr(args, '_host_config_path', None):
+        log.info("Host config: %s", args._host_config_path)
+
+    if not args.serial:
+        log.error("--serial is required (via CLI or host config)")
+        sys.exit(1)
+
     if args.caster:
         log.warning(f"NTRIP caster output ({args.caster}) not yet implemented")
+
+    # Ensure state directories exist
+    for d in ("state/receivers", "state/dos", "state/phcs",
+              "state/timestampers", "data"):
+        os.makedirs(d, exist_ok=True)
 
     sys.exit(run(args))
 

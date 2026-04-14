@@ -1,40 +1,23 @@
 #!/usr/bin/env bash
 # peppar-fix — GNSS-disciplined PTP clock appliance
 #
-# Composes three tools with retry logic and exponential backoff:
-#   1. peppar-rx-config   — verify/configure receiver
-#   2. peppar-find-position — bootstrap antenna position (if needed)
-#   3. peppar-fix-engine  — maintain software clock, optionally discipline PHC
+# Thin launcher: discovers the Python venv, sets PYTHONPATH, and execs
+# peppar_fix_engine.py.  All intelligence (receiver config, position
+# bootstrap, DO bootstrap, PPS retry, PHC re-bootstrap, host config
+# resolution) lives in the engine.
 #
-# Exit codes from peppar-fix-engine drive retry behavior:
-#   0 = clean shutdown
-#   1 = error (fatal)
-#   2 = position moved (re-bootstrap position, then restart servo)
-#   3 = no PPS (retry with backoff)
-#   4 = divergence (fatal)
-#   5 = PHC diverged (re-bootstrap PHC, then restart servo)
+# The wrapper still owns two bash-specific responsibilities:
+#   - Venv/Python discovery (no good cross-platform way in Python)
+#   - One-time DO characterization (runs engine in --freerun mode,
+#     then post-processes with build_do_characterization.py)
 #
-# Configuration via environment variables or command-line overrides:
-#   PEPPAR_SERIAL       Serial port (e.g. /dev/gnss-top)
-#   PEPPAR_BAUD         Baud rate (default: 9600)
-#   PEPPAR_UBX_PORT     u-blox logical output port: UART, UART2, USB, or SPI (default: USB)
-#   PEPPAR_PORT_TYPE    Deprecated alias for PEPPAR_UBX_PORT
-#   PEPPAR_RECEIVER     Receiver profile (default: f9t)
-#   PEPPAR_PTP_PROFILE  PTP profile (optional)
-#   PEPPAR_HOST_CONFIG  Explicit host config TOML (optional)
-#   PEPPAR_PTP_DEV      PTP device (no default — must be set explicitly or via host config)
-#   PEPPAR_NTRIP_CONF   NTRIP config file
-#   PEPPAR_EPH_MOUNT    Ephemeris mountpoint
-#   PEPPAR_SSR_MOUNT    SSR mountpoint (optional)
-#   PEPPAR_KNOWN_POS    Known position as lat,lon,alt (optional)
-#   PEPPAR_POSITION_FILE Position file (default: data/position.json)
-#   PEPPAR_SYSTEMS      GNSS systems (default: gps,gal,bds)
-#   PEPPAR_DURATION     Servo duration in seconds (optional)
-#   PEPPAR_LOG          CSV log file (optional)
+# Configuration: the engine auto-discovers config/<hostname>.toml or
+# accepts --host-config.  CLI args and PEPPAR_* env vars override.
 #
 # Usage:
-#   peppar-fix                              # use env vars
+#   peppar-fix                              # auto-discover host config
 #   peppar-fix --serial /dev/gnss-top ...   # override on CLI
+#   peppar-fix --host-config config/clkpoc3.toml  # explicit host config
 
 set -euo pipefail
 
@@ -48,553 +31,66 @@ elif [[ -x "$HOME/pygpsclient/bin/python" ]]; then
 fi
 export PYTHONPATH="$REPO_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
 
-# ── Defaults from environment ───────────────────────────────────────────── #
-
-SERIAL="${PEPPAR_SERIAL:-}"
-BAUD="${PEPPAR_BAUD:-}"
-UBX_PORT="${PEPPAR_UBX_PORT:-${PEPPAR_PORT_TYPE:-}}"
-RECEIVER="${PEPPAR_RECEIVER:-}"
-PTP_PROFILE="${PEPPAR_PTP_PROFILE:-}"
-PTP_DEV="${PEPPAR_PTP_DEV:-}"
-NTRIP_CONF="${PEPPAR_NTRIP_CONF:-}"
-EPH_MOUNT="${PEPPAR_EPH_MOUNT:-}"
-SSR_MOUNT="${PEPPAR_SSR_MOUNT:-}"
-KNOWN_POS="${PEPPAR_KNOWN_POS:-}"
-POSITION_FILE="${PEPPAR_POSITION_FILE:-}"
-SYSTEMS="${PEPPAR_SYSTEMS:-}"
-DURATION="${PEPPAR_DURATION:-}"
-LOG_FILE="${PEPPAR_LOG:-}"
-PHASE_STEP_BIAS_NS="${PEPPAR_PHASE_STEP_BIAS_NS:-}"
-PMC_UDS="${PEPPAR_PMC_UDS:-}"
-PMC_DOMAIN="${PEPPAR_PMC_DOMAIN:-0}"
-ENGINE_EXTRA_ARGS=()
-FREERUN=""
-
-is_kernel_gnss_device() {
-    local path="${1:-}"
-    local base
-    base="$(basename "$path")"
-    [[ "$base" =~ ^gnss[0-9]+$ ]]
-}
-
-# ── Parse CLI overrides ─────────────────────────────────────────────────── #
-
-usage() {
-    cat <<'EOF'
-Usage: peppar-fix [options]
-
-GNSS-disciplined PTP clock appliance.
-
-Options:
-  --serial PORT        Serial port (e.g. /dev/gnss-top)
-  --baud RATE          Baud rate (default: 9600)
-  --ubx-port TYPE      u-blox logical output port: UART, UART2, USB, or SPI (default: USB)
-  --port-type TYPE     Deprecated alias for --ubx-port
-  --receiver NAME      Receiver profile (default: f9t)
-  --ptp-profile NAME   PTP profile (e.g. i226, e810)
-  --host-config FILE   Explicit host config TOML
-  --ptp-dev DEV        PTP device (default: /dev/ptp0)
-  --ntrip-conf FILE    NTRIP config file
-  --eph-mount MOUNT    Broadcast ephemeris mountpoint
-  --ssr-mount MOUNT    SSR corrections mountpoint
-  --known-pos LAT,LON,ALT  Known position (skips position bootstrap)
-  --position-file FILE Position file (default: data/position.json)
-  --systems SYS        GNSS systems (default: gps,gal,bds)
-  --duration SECS      Servo duration in seconds
-  --log FILE           CSV log file
-  --phase-step-bias-ns NS  Per-host PHC phase-step bias compensation in ns
-  --pmc UDS_PATH       ptp4l UDS path for clockClass supervision
-  --pmc-domain NUM     PTP domain (must match ptp4l, default: 0)
-  --freerun            Run without steering PHC (characterization mode)
-  --engine-arg ARG     Extra argument passed through to peppar-fix-engine
-  -h, --help           Show this help
-
-Environment variables (PEPPAR_*) provide defaults. CLI overrides them.
-EOF
-    exit 0
-}
-
-HOST_CONFIG="${PEPPAR_HOST_CONFIG:-}"
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --serial)       SERIAL="$2"; shift 2 ;;
-        --baud)         BAUD="$2"; shift 2 ;;
-        --ubx-port|--port-type) UBX_PORT="$2"; shift 2 ;;
-        --receiver)     RECEIVER="$2"; shift 2 ;;
-        --ptp-profile)  PTP_PROFILE="$2"; shift 2 ;;
-        --host-config)  HOST_CONFIG="$2"; shift 2 ;;
-        --ptp-dev)      PTP_DEV="$2"; shift 2 ;;
-        --ntrip-conf)   NTRIP_CONF="$2"; shift 2 ;;
-        --eph-mount)    EPH_MOUNT="$2"; shift 2 ;;
-        --ssr-mount)    SSR_MOUNT="$2"; shift 2 ;;
-        --known-pos)    KNOWN_POS="$2"; shift 2 ;;
-        --position-file) POSITION_FILE="$2"; shift 2 ;;
-        --systems)      SYSTEMS="$2"; shift 2 ;;
-        --duration)     DURATION="$2"; shift 2 ;;
-        --log)          LOG_FILE="$2"; shift 2 ;;
-        --phase-step-bias-ns) PHASE_STEP_BIAS_NS="$2"; shift 2 ;;
-        --pmc)          PMC_UDS="$2"; shift 2 ;;
-        --pmc-domain)   PMC_DOMAIN="$2"; shift 2 ;;
-        --freerun)       FREERUN=1; shift ;;
-        --engine-arg)   ENGINE_EXTRA_ARGS+=("$2"); shift 2 ;;
-        -h|--help)      usage ;;
-        *)              echo "Unknown option: $1" >&2; exit 1 ;;
-    esac
-done
-
-HOSTCFG_PATH=""
-if hostcfg_eval="$("$PYTHON_BIN" "$SCRIPT_DIR/peppar_host_config.py" --repo-root "$REPO_ROOT" --explicit "$HOST_CONFIG")"; then
-    eval "$hostcfg_eval"
-fi
-
-SERIAL="${SERIAL:-${HOSTCFG_SERIAL:-}}"
-BAUD="${BAUD:-${HOSTCFG_BAUD:-9600}}"
-if is_kernel_gnss_device "$SERIAL"; then
-    BAUD=""
-fi
-UBX_PORT="${UBX_PORT:-${HOSTCFG_UBX_PORT:-${HOSTCFG_PORT_TYPE:-USB}}}"
-RECEIVER="${RECEIVER:-${HOSTCFG_RECEIVER:-f9t}}"
-PTP_PROFILE="${PTP_PROFILE:-${HOSTCFG_PTP_PROFILE:-}}"
-PTP_DEV="${PTP_DEV:-${HOSTCFG_PTP_DEV:-}}"
-NTRIP_CONF="${NTRIP_CONF:-${HOSTCFG_NTRIP_CONF:-}}"
-EPH_MOUNT="${EPH_MOUNT:-${HOSTCFG_EPH_MOUNT:-}}"
-SSR_MOUNT="${SSR_MOUNT:-${HOSTCFG_SSR_MOUNT:-}}"
-KNOWN_POS="${KNOWN_POS:-${HOSTCFG_KNOWN_POS:-}}"
-POSITION_FILE="${POSITION_FILE:-${HOSTCFG_POSITION_FILE:-data/position.json}}"
-SYSTEMS="${SYSTEMS:-${HOSTCFG_SYSTEMS:-gps,gal,bds}}"
-DURATION="${DURATION:-${HOSTCFG_DURATION:-}}"
-LOG_FILE="${LOG_FILE:-${HOSTCFG_LOG:-}}"
-PHASE_STEP_BIAS_NS="${PHASE_STEP_BIAS_NS:-${HOSTCFG_PHASE_STEP_BIAS_NS:-}}"
-PMC_UDS="${PMC_UDS:-${HOSTCFG_PMC_UDS:-}}"
-PMC_DOMAIN="${PMC_DOMAIN:-${HOSTCFG_PMC_DOMAIN:-0}}"
-
-# Extract --ticc-port from engine args so bootstrap can verify PEROUT phase
-TICC_PORT=""
-for ((i=0; i<${#ENGINE_EXTRA_ARGS[@]}; i++)); do
-    if [[ "${ENGINE_EXTRA_ARGS[i]}" == "--ticc-port" ]] && [[ $((i+1)) -lt ${#ENGINE_EXTRA_ARGS[@]} ]]; then
-        TICC_PORT="${ENGINE_EXTRA_ARGS[i+1]}"
-        break
-    fi
-done
-
-# ── Validate required config ────────────────────────────────────────────── #
-
-if [[ -z "$SERIAL" ]]; then
-    echo "ERROR: --serial or PEPPAR_SERIAL required" >&2
-    exit 1
-fi
-
-if [[ -z "$EPH_MOUNT" && -z "$NTRIP_CONF" ]]; then
-    echo "ERROR: --eph-mount or --ntrip-conf required" >&2
-    exit 1
-fi
-
-# ── Helper: build common NTRIP args ─────────────────────────────────────── #
-
-ntrip_args() {
-    local args=()
-    if [[ -n "$NTRIP_CONF" ]]; then
-        args+=(--ntrip-conf "$NTRIP_CONF")
-    fi
-    if [[ -n "$EPH_MOUNT" ]]; then
-        args+=(--eph-mount "$EPH_MOUNT")
-    fi
-    if [[ -n "$SSR_MOUNT" ]]; then
-        args+=(--ssr-mount "$SSR_MOUNT")
-    fi
-    echo "${args[@]}"
-}
-
-# Ensure state directories exist for state persistence
-mkdir -p state/receivers state/dos state/phcs state/timestampers data
-
-# ── Step 1: Verify/configure receiver ───────────────────────────────────── #
+# ── One-time DO characterization ───────────────────────────────────────── #
+# Run a 30-minute --freerun once per host to capture the DO's noise floor.
+# Skipped if data/do_characterization.json already exists.  This stays in
+# the wrapper because it orchestrates two engine invocations (freerun +
+# build_do_characterization.py) and the engine shouldn't invoke itself.
 #
-# Single entry point: checks dual-freq observations, reconfigures signals
-# (L5 or L2C), applies L5 health override + warm restart if needed, sets
-# measurement rate and message routing, verifies the result.  All config
-# is saved to RAM + BBR + Flash.
-#
-# This replaces the old peppar_rx_config.py call.  ensure_receiver_ready
-# subsumes everything rx_config did, plus dual-freq validation and L5.
-
-echo "=== peppar-fix: Step 1 — Receiver configuration ==="
-
-rx_backoff=5
-rx_max_retries=3
-for ((rx_try=1; rx_try<=rx_max_retries; rx_try++)); do
-    rx_args=(
-        "$SERIAL"
-        --port-type "$UBX_PORT"
-        --systems "$SYSTEMS"
-    )
-    if [[ -n "$BAUD" ]]; then
-        rx_args+=(--baud "$BAUD")
-    fi
-    if DETECTED_OUTPUT=$("$PYTHON_BIN" "$SCRIPT_DIR/peppar_ensure_receiver.py" "${rx_args[@]}"); then
-        # Output: line 1 = driver name, line 2 = unique_id, line 3 = position status
-        DETECTED_DRIVER=$(echo "$DETECTED_OUTPUT" | sed -n '1p')
-        RECEIVER_UNIQUE_ID=$(echo "$DETECTED_OUTPUT" | sed -n '2p')
-        RECEIVER_HAS_POSITION=$(echo "$DETECTED_OUTPUT" | sed -n '3p')
-        if [[ "$RECEIVER_UNIQUE_ID" != "none" ]]; then
-            echo "  Receiver unique_id: $RECEIVER_UNIQUE_ID"
-        fi
-        # Map driver name to --receiver arg for downstream scripts
-        case "$DETECTED_DRIVER" in
-            *L1/L5*|*l5*)  RECEIVER="f9t-l5" ;;
-            *L1/L2*|*f9t*) RECEIVER="f9t" ;;
-        esac
-        break
-    fi
-    if [[ $rx_try -eq $rx_max_retries ]]; then
-        echo "ERROR: Receiver configuration failed after $rx_max_retries attempts" >&2
-        exit 1
-    fi
-    echo "  Retry in ${rx_backoff}s..."
-    sleep "$rx_backoff"
-    rx_backoff=$((rx_backoff * 2))
-done
-
-# ── Step 2: Bootstrap position if needed ────────────────────────────────── #
-
-bootstrap_position() {
-    echo "=== peppar-fix: Step 2 — Position bootstrap ==="
-    local pos_args=(
-        --serial "$SERIAL"
-        --receiver "$RECEIVER"
-        --systems "$SYSTEMS"
-        --save --position-file "$POSITION_FILE"
-    )
-    if [[ -n "$BAUD" ]]; then
-        pos_args+=(--baud "$BAUD")
-    fi
-    if [[ -n "$KNOWN_POS" ]]; then
-        pos_args+=(--seed-pos "$KNOWN_POS")
-    fi
-    if [[ "$RECEIVER_UNIQUE_ID" != "none" ]] && [[ -n "$RECEIVER_UNIQUE_ID" ]]; then
-        pos_args+=(--receiver-id "$RECEIVER_UNIQUE_ID")
-    fi
-    # shellcheck disable=SC2046
-    pos_args+=($(ntrip_args))
-
-    "$PYTHON_BIN" "$SCRIPT_DIR/peppar_find_position.py" "${pos_args[@]}"
-}
-
-if [[ -n "$KNOWN_POS" ]]; then
-    echo "  Known position provided: $KNOWN_POS (skipping bootstrap)"
-    # Save known position to receiver state if we have a receiver identity.
-    # Legacy position file kept for ntrip_caster compatibility.
-    IFS=',' read -r kp_lat kp_lon kp_alt <<< "$KNOWN_POS"
-    "$PYTHON_BIN" -c "
-import json, sys, os
-sys.path.insert(0, '$SCRIPT_DIR')
-from solve_pseudorange import lla_to_ecef
-lat, lon, alt = $kp_lat, $kp_lon, $kp_alt
-ecef = lla_to_ecef(lat, lon, alt)
-# Save to receiver state
-uid = '$RECEIVER_UNIQUE_ID'
-if uid and uid != 'none':
-    uid = int(uid)
-    from peppar_fix.receiver_state import save_position_to_receiver
-    save_position_to_receiver(uid, ecef, 0.0, 'known_pos')
-    print(f'  Position saved to receiver state for {uid}')
-# Legacy file for PHC bootstrap compatibility
-os.makedirs(os.path.dirname('$POSITION_FILE') or '.', exist_ok=True)
-json.dump({'lat': lat, 'lon': lon, 'alt_m': alt,
-           'ecef_m': [round(x,3) for x in ecef],
-           'sigma_m': 0.0, 'source': 'known_pos'}, open('$POSITION_FILE','w'), indent=2)
-"
-elif [[ "$RECEIVER_HAS_POSITION" == "has_position" ]]; then
-    echo "  Position found in receiver state (id=$RECEIVER_UNIQUE_ID)"
-elif [[ -f "$POSITION_FILE" ]]; then
-    echo "  Legacy position file exists: $POSITION_FILE (will migrate to receiver state)"
-else
-    bootstrap_position || exit 2
-fi
-
-# ── pmc helpers for clockClass management ──────────────────────────── #
-
-promote_clock_class_initialized() {
-    if [[ -z "$PMC_UDS" ]]; then
-        return
-    fi
-    echo "  Promoting clockClass to 52 (initialized) via pmc"
-    pmc -u -i "/tmp/peppar-pmc.$$" -s "$PMC_UDS" -d "$PMC_DOMAIN" -b 0 \
-        "SET GRANDMASTER_SETTINGS_NP \
-            clockClass 52 \
-            clockAccuracy 0x23 \
-            offsetScaledLogVariance 0xffff \
-            currentUtcOffset 37 \
-            leap61 0 \
-            leap59 0 \
-            currentUtcOffsetValid 1 \
-            ptpTimescale 1 \
-            timeTraceable 1 \
-            frequencyTraceable 0 \
-            timeSource 0x20" 2>/dev/null || true
-}
-
-degrade_clock_class() {
-    if [[ -z "$PMC_UDS" ]]; then
-        return
-    fi
-    echo "  Degrading clockClass to 248 (freerun) via pmc"
-    pmc -u -i "/tmp/peppar-pmc.$$" -s "$PMC_UDS" -d "$PMC_DOMAIN" -b 0 \
-        "SET GRANDMASTER_SETTINGS_NP \
-            clockClass 248 \
-            clockAccuracy 0xfe \
-            offsetScaledLogVariance 0xffff \
-            currentUtcOffset 37 \
-            leap61 0 \
-            leap59 0 \
-            currentUtcOffsetValid 0 \
-            ptpTimescale 1 \
-            timeTraceable 0 \
-            frequencyTraceable 0 \
-            timeSource 0xa0" 2>/dev/null || true
-}
-
-# ── Step 2b: PHC bootstrap (if PTP device configured) ──────────────────── #
-# Sets PHC phase within ±10µs and frequency within ±10ppb so the engine's
-# servo can start PI tracking from epoch 1 with no warmup or step logic.
-
-if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
-    echo "=== peppar-fix: Step 2b — PHC bootstrap ==="
-    bootstrap_phc_args=(
-        --serial "$SERIAL"
-        --port-type "$UBX_PORT"
-        --ptp-dev "$PTP_DEV"
-    )
-    # Pass legacy position file as fallback for migration
-    if [[ -f "$POSITION_FILE" ]]; then
-        bootstrap_phc_args+=(--position-file "$POSITION_FILE")
-    fi
-    if [[ -n "$BAUD" ]]; then
-        bootstrap_phc_args+=(--baud "$BAUD")
-    fi
-    if [[ -n "$PTP_PROFILE" ]]; then
-        bootstrap_phc_args+=(--ptp-profile "$PTP_PROFILE")
-    fi
-    # shellcheck disable=SC2046
-    bootstrap_phc_args+=($(ntrip_args))
-    if [[ -n "$FREERUN" ]]; then
-        bootstrap_phc_args+=(--no-glide)
-    fi
-    if [[ -n "$TICC_PORT" ]]; then
-        bootstrap_phc_args+=(--ticc-port "$TICC_PORT")
-    fi
-    phc_bootstrap_ok=false
-    for ((phc_try=1; phc_try<=3; phc_try++)); do
-        if "$PYTHON_BIN" "$SCRIPT_DIR/phc_bootstrap.py" "${bootstrap_phc_args[@]}"; then
-            echo "  PHC bootstrap complete"
-            promote_clock_class_initialized
-            phc_bootstrap_ok=true
-            break
-        fi
-        if [[ $phc_try -lt 3 ]]; then
-            echo "  PHC bootstrap failed (attempt $phc_try/3), retrying in 5s..." >&2
-            sleep 5
-        fi
-    done
-    if [[ "$phc_bootstrap_ok" != "true" ]]; then
-        echo "ERROR: PHC bootstrap failed after 3 attempts — cannot start servo" >&2
-        echo "  The servo requires a bootstrapped PHC (phase ±10µs, frequency ±5ppb)." >&2
-        echo "  Check PPS signal, EXTTS wiring, and PTP device." >&2
-        exit 1
-    fi
-else
-    echo "  No PTP device — skipping PHC bootstrap"
-fi
-
-# ── Step 3: Run servo with retry logic ──────────────────────────────────── #
-
-# ── Step 2c: One-time DO characterization ──────────────────────────────── #
-# Run a 30-minute --freerun once per host to capture the DO's noise
-# floor and the PSDs of every error source.  Stored in
-# data/do_characterization.json.  Skipped if the file already exists.
-# The engine reads this file at startup and prints recommended loop
-# bandwidths for each candidate servo input.
+# TODO: Move to a separate tool (peppar-characterize-do) or systemd oneshot.
 
 DO_CHAR_FILE="${PEPPAR_DO_CHAR_FILE:-data/do_characterization.json}"
-DO_CHAR_DURATION="${PEPPAR_DO_CHAR_DURATION:-1800}"
 
-if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]] && [[ -z "$FREERUN" ]] \
-        && [[ ! -f "$DO_CHAR_FILE" ]] && [[ -n "$KNOWN_POS" ]]; then
-    echo "=== peppar-fix: Step 2c — One-time DO characterization (${DO_CHAR_DURATION}s freerun) ==="
-    echo "  Building $DO_CHAR_FILE"
-    char_csv="data/freerun_char.csv"
-    char_args=(
-        --serial "$SERIAL"
-        --port-type "$UBX_PORT"
-        --known-pos "$KNOWN_POS"
-        --servo "$PTP_DEV"
-        --freerun
-        --duration "$DO_CHAR_DURATION"
-        --servo-log "$char_csv"
-        --watchdog-threshold 1000000000
-        --freerun-max-error-ns 100000000
-        --track-outlier-ns 100000000
-        --track-restep-ns 100000000
-    )
-    if [[ -n "$BAUD" ]]; then
-        char_args+=(--baud "$BAUD")
+if [[ ! -f "$DO_CHAR_FILE" ]]; then
+    # Resolve host config to check for PTP_DEV and KNOWN_POS
+    _hc_eval=""
+    _hc_explicit=""
+    for arg in "$@"; do
+        if [[ "$_hc_flag" == "1" ]]; then
+            _hc_explicit="$arg"
+            _hc_flag=""
+            break
+        fi
+        [[ "$arg" == "--host-config" ]] && _hc_flag=1
+    done
+    if _hc_eval="$("$PYTHON_BIN" "$SCRIPT_DIR/peppar_host_config.py" \
+            --repo-root "$REPO_ROOT" --explicit "${_hc_explicit:-${PEPPAR_HOST_CONFIG:-}}" 2>/dev/null)"; then
+        eval "$_hc_eval"
     fi
-    if [[ -n "$PTP_PROFILE" ]]; then
-        char_args+=(--ptp-profile "$PTP_PROFILE")
-    fi
-    # shellcheck disable=SC2046
-    char_args+=($(ntrip_args))
-    if "$PYTHON_BIN" "$SCRIPT_DIR/peppar_fix_engine.py" "${char_args[@]}"; then
-        do_label="${PEPPAR_DO_LABEL:-${PTP_PROFILE:-unknown}}"
-        "$PYTHON_BIN" "$SCRIPT_DIR/../tools/build_do_characterization.py" \
-            --input "$char_csv" \
-            --output "$DO_CHAR_FILE" \
-            --do-label "$do_label" \
-            --phc "$PTP_DEV" || \
-            echo "  WARNING: characterization build failed; continuing without file" >&2
-    else
-        echo "  WARNING: freerun characterization failed (rc=$?); continuing without file" >&2
+    _ptp_dev="${PEPPAR_PTP_DEV:-${HOSTCFG_PTP_DEV:-}}"
+    _known_pos="${PEPPAR_KNOWN_POS:-${HOSTCFG_KNOWN_POS:-}}"
+    # Check CLI args for --servo or --known-pos overrides
+    _prev=""
+    for arg in "$@"; do
+        [[ "$_prev" == "--servo" ]] && _ptp_dev="$arg"
+        [[ "$_prev" == "--known-pos" ]] && _known_pos="$arg"
+        _prev="$arg"
+    done
+
+    if [[ -n "$_ptp_dev" ]] && [[ -e "$_ptp_dev" ]] && [[ -n "$_known_pos" ]]; then
+        DO_CHAR_DURATION="${PEPPAR_DO_CHAR_DURATION:-1800}"
+        echo "=== peppar-fix: One-time DO characterization (${DO_CHAR_DURATION}s freerun) ==="
+        char_csv="data/freerun_char.csv"
+        mkdir -p data
+        if "$PYTHON_BIN" "$SCRIPT_DIR/peppar_fix_engine.py" "$@" \
+                --freerun --duration "$DO_CHAR_DURATION" \
+                --servo-log "$char_csv" \
+                --watchdog-threshold 1000000000 \
+                --freerun-max-error-ns 100000000 \
+                --track-outlier-ns 100000000 \
+                --track-restep-ns 100000000; then
+            do_label="${PEPPAR_DO_LABEL:-${HOSTCFG_DO_LABEL:-unknown}}"
+            "$PYTHON_BIN" "$SCRIPT_DIR/../tools/build_do_characterization.py" \
+                --input "$char_csv" \
+                --output "$DO_CHAR_FILE" \
+                --do-label "$do_label" \
+                --phc "$_ptp_dev" || \
+                echo "  WARNING: characterization build failed; continuing without" >&2
+        else
+            echo "  WARNING: freerun characterization failed; continuing without" >&2
+        fi
     fi
 fi
 
-echo "=== peppar-fix: Step 3 — Unified engine ==="
-
-servo_backoff=5
-
-build_servo_args() {
-    local args=(
-        --serial "$SERIAL"
-        --receiver "$RECEIVER"
-        --systems "$SYSTEMS"
-    )
-    if [[ -n "$BAUD" ]]; then
-        args+=(--baud "$BAUD")
-    fi
-    if [[ -n "$PTP_PROFILE" ]]; then
-        args+=(--ptp-profile "$PTP_PROFILE")
-    fi
-    if [[ -n "$PTP_DEV" ]]; then
-        args+=(--servo "$PTP_DEV")
-    fi
-    if [[ -n "$KNOWN_POS" ]]; then
-        args+=(--known-pos "$KNOWN_POS")
-    elif [[ -f "$POSITION_FILE" ]]; then
-        args+=(--position-file "$POSITION_FILE")
-    fi
-    # shellcheck disable=SC2046
-    args+=($(ntrip_args))
-    if [[ -n "$DURATION" ]]; then
-        args+=(--duration "$DURATION")
-    fi
-    if [[ -n "$LOG_FILE" ]]; then
-        args+=(--servo-log "$LOG_FILE")
-    fi
-    if [[ -n "$PHASE_STEP_BIAS_NS" ]]; then
-        args+=(--phase-step-bias-ns "$PHASE_STEP_BIAS_NS")
-    fi
-    if [[ -n "$PMC_UDS" ]]; then
-        args+=(--pmc "$PMC_UDS" --pmc-domain "$PMC_DOMAIN")
-    fi
-    if [[ -n "$FREERUN" ]]; then
-        args+=(--freerun)
-    fi
-    # External DO support
-    if [[ -n "${HOSTCFG_DO_LABEL:-}" ]]; then
-        args+=(--do-label "$HOSTCFG_DO_LABEL")
-    fi
-    if [[ -n "${HOSTCFG_DAC_BUS:-}" ]]; then
-        args+=(--dac-bus "$HOSTCFG_DAC_BUS")
-        [[ -n "${HOSTCFG_DAC_ADDR:-}" ]] && args+=(--dac-addr "$HOSTCFG_DAC_ADDR")
-        [[ -n "${HOSTCFG_DAC_BITS:-}" ]] && args+=(--dac-bits "$HOSTCFG_DAC_BITS")
-        [[ -n "${HOSTCFG_DAC_CENTER_CODE:-}" ]] && args+=(--dac-center-code "$HOSTCFG_DAC_CENTER_CODE")
-        [[ -n "${HOSTCFG_DAC_PPB_PER_CODE:-}" ]] && args+=(--dac-ppb-per-code "$HOSTCFG_DAC_PPB_PER_CODE")
-        [[ -n "${HOSTCFG_DAC_MAX_PPB:-}" ]] && args+=(--dac-max-ppb "$HOSTCFG_DAC_MAX_PPB")
-        [[ -n "${HOSTCFG_DAC_TYPE:-}" ]] && args+=(--dac-type "$HOSTCFG_DAC_TYPE")
-    fi
-    if [[ ${#ENGINE_EXTRA_ARGS[@]} -gt 0 ]]; then
-        args+=("${ENGINE_EXTRA_ARGS[@]}")
-    fi
-    echo "${args[@]}"
-}
-
-while true; do
-    set +e
-    # shellcheck disable=SC2046
-    "$PYTHON_BIN" "$SCRIPT_DIR/peppar_fix_engine.py" $(build_servo_args)
-    rc=$?
-    set -e
-
-    # Layer 2: degrade clockClass on any engine exit
-    degrade_clock_class
-
-    case $rc in
-        0)
-            echo "peppar-fix: clean shutdown"
-            # If this was an explicit --freerun, build the DO
-            # characterization file from the resulting servo log.
-            if [[ -n "$FREERUN" ]] && [[ -n "$LOG_FILE" ]] && [[ -f "$LOG_FILE" ]]; then
-                do_label="${PEPPAR_DO_LABEL:-${PTP_PROFILE:-unknown}}"
-                echo "=== Building DO characterization from $LOG_FILE ==="
-                "$PYTHON_BIN" "$SCRIPT_DIR/../tools/build_do_characterization.py" \
-                    --input "$LOG_FILE" \
-                    --output "$DO_CHAR_FILE" \
-                    --do-label "$do_label" \
-                    --phc "$PTP_DEV" || true
-            fi
-            exit 0
-            ;;
-        2)
-            echo "peppar-fix: position moved — re-bootstrapping"
-            bootstrap_position || exit 2
-            servo_backoff=5
-            continue
-            ;;
-        3)
-            echo "peppar-fix: no PPS — retry in ${servo_backoff}s"
-            sleep "$servo_backoff"
-            servo_backoff=$((servo_backoff * 2))
-            [[ $servo_backoff -gt 300 ]] && servo_backoff=300
-            continue
-            ;;
-        5)
-            if [[ -n "$FREERUN" ]]; then
-                echo "peppar-fix: freerun auto-stop (PPS error exceeded threshold)"
-                exit 0
-            fi
-            echo "peppar-fix: PHC diverged — re-bootstrapping PHC"
-            if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
-                bootstrap_phc_args=(
-                    --serial "$SERIAL"
-                    --port-type "$UBX_PORT"
-                    --position-file "$POSITION_FILE"
-                    --ptp-dev "$PTP_DEV"
-                )
-                if [[ -n "$BAUD" ]]; then
-                    bootstrap_phc_args+=(--baud "$BAUD")
-                fi
-                if [[ -n "$PTP_PROFILE" ]]; then
-                    bootstrap_phc_args+=(--ptp-profile "$PTP_PROFILE")
-                fi
-                # shellcheck disable=SC2046
-                bootstrap_phc_args+=($(ntrip_args))
-                if [[ -n "$TICC_PORT" ]]; then
-                    bootstrap_phc_args+=(--ticc-port "$TICC_PORT")
-                fi
-                if "$PYTHON_BIN" "$SCRIPT_DIR/phc_bootstrap.py" "${bootstrap_phc_args[@]}"; then
-                    echo "  PHC re-bootstrap complete"
-                    promote_clock_class_initialized
-                else
-                    echo "  PHC re-bootstrap failed" >&2
-                    exit 5
-                fi
-            fi
-            servo_backoff=5
-            continue
-            ;;
-        *)
-            echo "peppar-fix: fatal error (exit code $rc)" >&2
-            exit "$rc"
-            ;;
-    esac
-done
+# ── Run engine ─────────────────────────────────────────────────────────── #
+exec "$PYTHON_BIN" "$SCRIPT_DIR/peppar_fix_engine.py" "$@"
