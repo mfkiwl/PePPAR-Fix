@@ -49,8 +49,8 @@ class InBandNoiseEstimator:
         # Running state
         self._last_correction_mono = None
         self._last_adjfine_ppb = None
-        self._gap_adev = {}         # tau -> adev_ns
-        self._corr_adev = {}
+        self._gap_tdev = {}         # tau -> tdev_ns
+        self._corr_tdev = {}
         self._gap_count = 0
         self._corr_count = 0
 
@@ -109,22 +109,22 @@ class InBandNoiseEstimator:
 
         # Periodically recompute ADEV (every 60 samples)
         if self._corr_count % 60 == 0:
-            self._recompute_adev()
+            self._recompute_tdev()
 
-    def _recompute_adev(self):
+    def _recompute_tdev(self):
         """Recompute overlapping ADEV for both channels."""
-        self._gap_adev = _compute_adev(self._gap_phases)
-        self._corr_adev = _compute_adev(self._corr_phases)
+        self._gap_tdev = _compute_tdev(self._gap_phases)
+        self._corr_tdev = _compute_tdev(self._corr_phases)
 
     @property
-    def gap_adev(self):
-        """Gap channel ADEV: {tau_s: adev_ns}."""
-        return dict(self._gap_adev)
+    def gap_tdev(self):
+        """Gap channel TDEV: {tau_s: tdev_ns}."""
+        return dict(self._gap_tdev)
 
     @property
-    def correction_adev(self):
-        """Correction channel ADEV: {tau_s: adev_ns}."""
-        return dict(self._corr_adev)
+    def correction_tdev(self):
+        """Correction channel TDEV: {tau_s: tdev_ns}."""
+        return dict(self._corr_tdev)
 
     @property
     def gap_samples(self):
@@ -137,52 +137,65 @@ class InBandNoiseEstimator:
     def summary(self):
         """One-line summary for logging."""
         parts = [f"gap={self.gap_samples} corr={self.total_samples}"]
-        if self._gap_adev:
-            tau1 = self._gap_adev.get(1)
+        if self._gap_tdev:
+            tau1 = self._gap_tdev.get(1)
             if tau1 is not None:
-                parts.append(f"gap_ADEV(1s)={tau1:.2f}ns")
-        if self._corr_adev:
-            tau1 = self._corr_adev.get(1)
+                parts.append(f"gap_TDEV(1s)={tau1:.2f}ns")
+        if self._corr_tdev:
+            tau1 = self._corr_tdev.get(1)
             if tau1 is not None:
-                parts.append(f"corr_ADEV(1s)={tau1:.2f}ns")
+                parts.append(f"corr_TDEV(1s)={tau1:.2f}ns")
         return " ".join(parts)
 
 
-def _compute_adev(phases, taus=None):
-    """Compute overlapping Allan deviation from phase samples.
+def _compute_tdev(phases, taus=None):
+    """Compute time deviation (TDEV) from phase samples.
+
+    TDEV has units of time (ns when phase is in ns), unlike ADEV which
+    is dimensionless.  Uses the overlapping TDEV estimator:
+
+        TDEV²(nτ₀) = τ₀²/(6n²(N-3n+1)) Σ_{j=0}^{N-3n} [Σ_{i=j}^{j+n-1} (x[i+2n] - 2x[i+n] + x[i])]²
+
+    This is equivalent to TDEV(τ) = τ/√3 × MDEV(τ), where MDEV is the
+    modified Allan deviation computed with nested averaging.
 
     Args:
         phases: list of phase values (ns), equally spaced at tau0=1s
-        taus: list of tau values to compute (default: 1, 2, 4, ..., N/3)
+        taus: list of averaging factors n to compute (default: 1, 2, 4, ..., N/4)
 
     Returns:
-        dict {tau: adev_ns}
+        dict {tau_s: tdev_ns}
     """
-    n = len(phases)
-    if n < 3:
+    N = len(phases)
+    if N < 4:
         return {}
 
     if taus is None:
         taus = []
-        tau = 1
-        while tau <= n // 3:
-            taus.append(tau)
-            tau *= 2
+        n = 1
+        while 3 * n < N:
+            taus.append(n)
+            n *= 2
 
     result = {}
-    for tau in taus:
-        if 2 * tau >= n:
+    for n in taus:
+        if 3 * n >= N:
             break
-        # Overlapping ADEV: σ²(τ) = 1/(2τ²(N-2m)) Σ(x[i+2m] - 2x[i+m] + x[i])²
-        m = tau
+        # Outer sum: j = 0 .. N-3n
+        outer_count = N - 3 * n + 1
+        if outer_count < 1:
+            break
         total = 0.0
-        count = 0
-        for i in range(n - 2 * m):
-            diff = phases[i + 2 * m] - 2 * phases[i + m] + phases[i]
-            total += diff * diff
-            count += 1
-        if count > 0:
-            adev = math.sqrt(total / (2.0 * tau * tau * count))
-            result[tau] = adev
+        for j in range(outer_count):
+            # Inner sum: average n consecutive second-differences
+            inner = 0.0
+            for i in range(j, j + n):
+                inner += phases[i + 2 * n] - 2 * phases[i + n] + phases[i]
+            total += inner * inner
+        # τ₀ = 1s, so τ₀² = 1
+        tdev_sq = total / (6.0 * n * n * outer_count)
+        result[n] = math.sqrt(tdev_sq)
+
+    return result
 
     return result
