@@ -1016,8 +1016,12 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
                     gps = [(sv, f, s, fx) for sv, f, s, fx in int_results if sv.startswith('G')]
                     gal_frac = np.mean([abs(f) for _, f, _, _ in gal]) if gal else float('nan')
                     gps_frac = np.mean([abs(f) for _, f, _, _ in gps]) if gps else float('nan')
-                    log.info(f"    AR: GAL|frac|={gal_frac:.3f}({len(gal)}) "
-                             f"GPS|frac|={gps_frac:.3f}({len(gps)}) "
+                    gal_sig = [s for _, _, s, _ in gal] if gal else []
+                    gps_sig = [s for _, _, s, _ in gps] if gps else []
+                    gal_sig_str = f"σ={min(gal_sig):.3f}-{max(gal_sig):.3f}" if gal_sig else ""
+                    gps_sig_str = f"σ={min(gps_sig):.3f}-{max(gps_sig):.3f}" if gps_sig else ""
+                    log.info(f"    AR: GAL|frac|={gal_frac:.3f}({len(gal)}) {gal_sig_str} "
+                             f"GPS|frac|={gps_frac:.3f}({len(gps)}) {gps_sig_str} "
                              f"fixable={n_fixable} "
                              f"{mw_tracker.summary()} {nl_resolver.summary()}")
                     if n_epochs % 30 == 0:

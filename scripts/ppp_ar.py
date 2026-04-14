@@ -36,7 +36,7 @@ class MelbourneWubbenaTracker:
     After averaging, N_WL = round(MW_avg / lambda_WL).
     """
 
-    def __init__(self, tau_s=60.0, fix_threshold=0.25, min_epochs=30):
+    def __init__(self, tau_s=60.0, fix_threshold=0.15, min_epochs=60):
         self.tau_s = tau_s              # exponential averaging time constant
         self.fix_threshold = fix_threshold  # |frac| < this to fix
         self.min_epochs = min_epochs    # minimum epochs before fixing
