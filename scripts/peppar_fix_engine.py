@@ -1757,6 +1757,9 @@ def _phc_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
     )
     from peppar_fix.ptp_device import DualEdgeFilter
 
+    # phc_bootstrap helpers expect args.ptp_dev; engine uses args.servo
+    args.ptp_dev = args.servo
+
     extts_ch = args.extts_channel
 
     # ── 1. Measure PPS frequency ──────────────────────────────────── #
