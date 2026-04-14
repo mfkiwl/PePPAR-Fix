@@ -313,99 +313,14 @@ else
     bootstrap_position || exit 2
 fi
 
-# ── pmc helpers for clockClass management ──────────────────────────── #
+# clockClass management is now handled internally by the engine via
+# its --pmc flag and _set_clock_class() function.
 
-promote_clock_class_initialized() {
-    if [[ -z "$PMC_UDS" ]]; then
-        return
-    fi
-    echo "  Promoting clockClass to 52 (initialized) via pmc"
-    pmc -u -i "/tmp/peppar-pmc.$$" -s "$PMC_UDS" -d "$PMC_DOMAIN" -b 0 \
-        "SET GRANDMASTER_SETTINGS_NP \
-            clockClass 52 \
-            clockAccuracy 0x23 \
-            offsetScaledLogVariance 0xffff \
-            currentUtcOffset 37 \
-            leap61 0 \
-            leap59 0 \
-            currentUtcOffsetValid 1 \
-            ptpTimescale 1 \
-            timeTraceable 1 \
-            frequencyTraceable 0 \
-            timeSource 0x20" 2>/dev/null || true
-}
-
-degrade_clock_class() {
-    if [[ -z "$PMC_UDS" ]]; then
-        return
-    fi
-    echo "  Degrading clockClass to 248 (freerun) via pmc"
-    pmc -u -i "/tmp/peppar-pmc.$$" -s "$PMC_UDS" -d "$PMC_DOMAIN" -b 0 \
-        "SET GRANDMASTER_SETTINGS_NP \
-            clockClass 248 \
-            clockAccuracy 0xfe \
-            offsetScaledLogVariance 0xffff \
-            currentUtcOffset 37 \
-            leap61 0 \
-            leap59 0 \
-            currentUtcOffsetValid 0 \
-            ptpTimescale 1 \
-            timeTraceable 0 \
-            frequencyTraceable 0 \
-            timeSource 0xa0" 2>/dev/null || true
-}
-
-# ── Step 2b: PHC bootstrap (if PTP device configured) ──────────────────── #
-# Sets PHC phase within ±10µs and frequency within ±10ppb so the engine's
-# servo can start PI tracking from epoch 1 with no warmup or step logic.
-
-if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
-    echo "=== peppar-fix: Step 2b — PHC bootstrap ==="
-    bootstrap_phc_args=(
-        --serial "$SERIAL"
-        --port-type "$UBX_PORT"
-        --ptp-dev "$PTP_DEV"
-    )
-    # Pass legacy position file as fallback for migration
-    if [[ -f "$POSITION_FILE" ]]; then
-        bootstrap_phc_args+=(--position-file "$POSITION_FILE")
-    fi
-    if [[ -n "$BAUD" ]]; then
-        bootstrap_phc_args+=(--baud "$BAUD")
-    fi
-    if [[ -n "$PTP_PROFILE" ]]; then
-        bootstrap_phc_args+=(--ptp-profile "$PTP_PROFILE")
-    fi
-    # shellcheck disable=SC2046
-    bootstrap_phc_args+=($(ntrip_args))
-    if [[ -n "$FREERUN" ]]; then
-        bootstrap_phc_args+=(--no-glide)
-    fi
-    if [[ -n "$TICC_PORT" ]]; then
-        bootstrap_phc_args+=(--ticc-port "$TICC_PORT")
-    fi
-    phc_bootstrap_ok=false
-    for ((phc_try=1; phc_try<=3; phc_try++)); do
-        if "$PYTHON_BIN" "$SCRIPT_DIR/phc_bootstrap.py" "${bootstrap_phc_args[@]}"; then
-            echo "  PHC bootstrap complete"
-            promote_clock_class_initialized
-            phc_bootstrap_ok=true
-            break
-        fi
-        if [[ $phc_try -lt 3 ]]; then
-            echo "  PHC bootstrap failed (attempt $phc_try/3), retrying in 5s..." >&2
-            sleep 5
-        fi
-    done
-    if [[ "$phc_bootstrap_ok" != "true" ]]; then
-        echo "ERROR: PHC bootstrap failed after 3 attempts — cannot start servo" >&2
-        echo "  The servo requires a bootstrapped PHC (phase ±10µs, frequency ±5ppb)." >&2
-        echo "  Check PPS signal, EXTTS wiring, and PTP device." >&2
-        exit 1
-    fi
-else
-    echo "  No PTP device — skipping PHC bootstrap"
-fi
+# ── Step 2b: PHC bootstrap ──────────────────────────────────────────────── #
+# PHC bootstrap is now handled internally by the engine when --servo is set.
+# The engine measures PPS frequency, evaluates PHC phase, and intervenes
+# (phase step + glide slope) if needed, all before starting the servo loop.
+echo "  PHC bootstrap: handled by engine (internal)"
 
 # ── Step 3: Run servo with retry logic ──────────────────────────────────── #
 
@@ -525,8 +440,9 @@ while true; do
     rc=$?
     set -e
 
-    # Layer 2: degrade clockClass on any engine exit
-    degrade_clock_class
+    # clockClass is now managed internally by the engine.
+    # The engine degrades to 248 (freerun) on exit and promotes to
+    # 52 (initialized) after bootstrap / 6 (locked) during tracking.
 
     case $rc in
         0)
@@ -562,35 +478,11 @@ while true; do
                 echo "peppar-fix: freerun auto-stop (PPS error exceeded threshold)"
                 exit 0
             fi
-            echo "peppar-fix: PHC diverged — re-bootstrapping PHC"
-            if [[ -n "$PTP_DEV" ]] && [[ -e "$PTP_DEV" ]]; then
-                bootstrap_phc_args=(
-                    --serial "$SERIAL"
-                    --port-type "$UBX_PORT"
-                    --position-file "$POSITION_FILE"
-                    --ptp-dev "$PTP_DEV"
-                )
-                if [[ -n "$BAUD" ]]; then
-                    bootstrap_phc_args+=(--baud "$BAUD")
-                fi
-                if [[ -n "$PTP_PROFILE" ]]; then
-                    bootstrap_phc_args+=(--ptp-profile "$PTP_PROFILE")
-                fi
-                # shellcheck disable=SC2046
-                bootstrap_phc_args+=($(ntrip_args))
-                if [[ -n "$TICC_PORT" ]]; then
-                    bootstrap_phc_args+=(--ticc-port "$TICC_PORT")
-                fi
-                if "$PYTHON_BIN" "$SCRIPT_DIR/phc_bootstrap.py" "${bootstrap_phc_args[@]}"; then
-                    echo "  PHC re-bootstrap complete"
-                    promote_clock_class_initialized
-                else
-                    echo "  PHC re-bootstrap failed" >&2
-                    exit 5
-                fi
-            fi
-            servo_backoff=5
-            continue
+            # PHC divergence is now handled internally by the engine's
+            # re-bootstrap loop. If the engine still returns 5, all
+            # internal attempts failed — treat as fatal.
+            echo "peppar-fix: PHC diverged — engine re-bootstrap exhausted" >&2
+            exit 5
             ;;
         *)
             echo "peppar-fix: fatal error (exit code $rc)" >&2
