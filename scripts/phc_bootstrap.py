@@ -594,7 +594,7 @@ def main():
     _is_kernel_gnss = _base.startswith("gnss") and _base[4:].isdigit()
     _sfrbx = 0 if _is_kernel_gnss else getattr(args, 'sfrbx_rate', 1)
     _rate_ms = 2000 if _is_kernel_gnss else getattr(args, 'measurement_rate_ms', 1000)
-    driver = ensure_receiver_ready(
+    driver, _identity = ensure_receiver_ready(
         args.serial, args.baud, port_type=args.port_type, systems=systems,
         sfrbx_rate=_sfrbx, measurement_rate_ms=_rate_ms)
     if driver is None:

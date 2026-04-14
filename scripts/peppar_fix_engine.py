@@ -67,11 +67,11 @@ from peppar_fix import (
     estimate_correlation_confidence,
     match_pps_event_from_history,
     load_position,
-    save_position,
 )
 from peppar_fix.event_time import PpsEvent
 from peppar_fix.fault_injection import get_delay_injector, get_source_mute_controller
 from peppar_fix.receiver import get_driver
+from peppar_fix.receiver_state import save_position_to_receiver
 
 log = logging.getLogger("peppar-fix")
 
@@ -2402,15 +2402,12 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     if n_epochs >= 300 and dt_rx_sigma < 100.0:
         sigma_m = dt_rx_sigma * 1e-9 * C
 
-        if args.position_file and not ctx['position_saved'] and sigma_m < 0.1:
-            save_position(
-                args.position_file, known_ecef,
-                sigma_m=sigma_m, source="peppar_fix",
-                note=f"saved after {n_epochs} epochs, dt_rx_sigma={dt_rx_sigma:.2f}ns",
-            )
+        if not ctx['position_saved'] and sigma_m < 0.1:
+            uid = getattr(args, 'receiver_unique_id', None)
+            if uid is not None:
+                save_position_to_receiver(uid, known_ecef, sigma_m, "peppar_fix")
+                log.info("Position saved to receiver state (sigma=%.4fm)", sigma_m)
             ctx['position_saved'] = True
-            log.info(f"Position saved to {args.position_file} "
-                     f"(sigma={sigma_m:.4f}m)")
 
         if not ctx['tmode_set'] and sigma_m < 0.1:
             try:
@@ -3247,14 +3244,18 @@ def run(args):
     from peppar_fix.receiver import ensure_receiver_ready
     port_type = getattr(args, 'port_type', 'USB') or 'USB'
     systems_for_check = set(args.systems.split(',')) if args.systems else {'gps', 'gal'}
-    driver = ensure_receiver_ready(args.serial, args.baud, port_type=port_type,
-                                   systems=systems_for_check,
-                                   sfrbx_rate=args.sfrbx_rate,
-                                   measurement_rate_ms=args.measurement_rate_ms)
+    driver, receiver_identity = ensure_receiver_ready(
+        args.serial, args.baud, port_type=port_type,
+        systems=systems_for_check,
+        sfrbx_rate=args.sfrbx_rate,
+        measurement_rate_ms=args.measurement_rate_ms)
     if driver is None:
         driver = get_driver(args.receiver)
         log.warning("Receiver check failed — falling back to %s (may lack dual-freq)",
                     driver.name)
+    # Stash receiver identity for position persistence
+    args.receiver_unique_id = (receiver_identity.get("unique_id")
+                               if receiver_identity else None)
     mute_controller = get_source_mute_controller()
     mute_controller.install_signal_handlers()
 
@@ -3381,10 +3382,25 @@ def run(args):
         known_ecef = lla_to_ecef(lat, lon, alt)
         log.info(f"Position (CLI): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
     elif args.position_file:
-        known_ecef = load_position(args.position_file)
+        # Try receiver state first, then fall back to legacy position file.
+        pos_source = None
+        uid = getattr(args, 'receiver_unique_id', None)
+        if uid is not None:
+            from peppar_fix.receiver_state import load_position_from_receiver
+            known_ecef = load_position_from_receiver(uid)
+            if known_ecef is not None:
+                pos_source = "receiver state"
+        if known_ecef is None and args.position_file:
+            # Migration fallback: read legacy data/position.json once,
+            # then migrate it into receiver state so future runs skip this.
+            known_ecef = load_position(args.position_file)
+            if known_ecef is not None:
+                pos_source = "file (migrating to receiver state)"
+                if uid is not None:
+                    save_position_to_receiver(uid, known_ecef, 1.0, "migrated_from_legacy")
         if known_ecef is not None:
             lat, lon, alt = ecef_to_lla(known_ecef[0], known_ecef[1], known_ecef[2])
-            log.info(f"Position (file): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
+            log.info(f"Position ({pos_source}): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
 
     try:
         if known_ecef is None:
@@ -3399,11 +3415,10 @@ def run(args):
             known_ecef = pos_ecef
 
             # Save position
-            if args.position_file:
-                save_position(args.position_file, pos_ecef, sigma_m,
-                              "ppp_bootstrap",
-                              note="converged during unified run")
-                log.info(f"Position saved to {args.position_file}")
+            uid = getattr(args, 'receiver_unique_id', None)
+            if uid is not None:
+                save_position_to_receiver(uid, pos_ecef, sigma_m, "ppp_bootstrap")
+                log.info("Position saved to receiver state")
 
         if stop_event.is_set():
             return 0
@@ -3411,7 +3426,8 @@ def run(args):
         # Validate loaded position against live pseudorange fix.
         # A tampered or stale position file would send the FixedPosFilter
         # into 100+ km residuals without any warning.
-        if args.position_file or args.known_pos:
+        uid = getattr(args, 'receiver_unique_id', None)
+        if uid is not None or args.known_pos:
             log.info('Validating loaded position against live LS fix...')
             for _attempt in range(30):
                 if stop_event.is_set():
@@ -3454,9 +3470,10 @@ def run(args):
                         return 1
                     pos_ecef, sigma_m = result
                     known_ecef = pos_ecef
-                    if args.position_file:
-                        save_position(args.position_file, pos_ecef, sigma_m,
-                                      'ppp_bootstrap', note='re-bootstrapped after position validation failure')
+                    uid = getattr(args, 'receiver_unique_id', None)
+                    if uid is not None:
+                        save_position_to_receiver(uid, pos_ecef, sigma_m, "ppp_bootstrap")
+                        log.info("Position saved to receiver state (re-bootstrapped)")
                 else:
                     log.info(f'  Position validated (within {separation_m:.0f}m of LS fix)')
                 break

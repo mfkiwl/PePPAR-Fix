@@ -14,20 +14,22 @@ log = logging.getLogger(__name__)
 _UBXMessage = None
 _UBXReader = None
 _SET = None
+_POLL = None
 _Serial = None
 
 
 def _ensure_imports():
     """Import pyubx2 and pyserial on first use."""
-    global _UBXMessage, _UBXReader, _SET, _Serial
+    global _UBXMessage, _UBXReader, _SET, _POLL, _Serial
     if _UBXMessage is not None:
         return
     try:
-        from pyubx2 import UBXMessage, UBXReader, SET
+        from pyubx2 import UBXMessage, UBXReader, SET, POLL
         from serial import Serial
         _UBXMessage = UBXMessage
         _UBXReader = UBXReader
         _SET = SET
+        _POLL = POLL
         _Serial = Serial
     except ImportError:
         raise ImportError("requires pyubx2 and pyserial: pip install pyubx2 pyserial")
@@ -287,6 +289,140 @@ def open_receiver(port, baud=9600):
     ser, _device_type = open_gnss(port, baud)
     ubr = _UBXReader(ser, protfilter=2)  # UBX protocol only
     return ser, ubr
+
+
+def _poll_ubx(ser, ubr, cls, msg_id, target_identity, timeout=3.0):
+    """Send a UBX POLL message and wait for the response.
+
+    Args:
+        ser: serial port
+        ubr: UBXReader
+        cls: UBX message class (e.g. "MON")
+        msg_id: UBX message ID (e.g. "VER")
+        target_identity: expected response identity (e.g. "MON-VER")
+        timeout: seconds to wait
+
+    Returns:
+        parsed message on success, None on timeout
+    """
+    _ensure_imports()
+    poll_msg = _UBXMessage(cls, msg_id, _POLL)
+    ser.write(poll_msg.serialize())
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            raw, parsed = ubr.read()
+        except Exception:
+            continue
+        if parsed is None:
+            continue
+        if parsed.identity == target_identity:
+            return parsed
+    return None
+
+
+def query_receiver_identity(port, baud=9600, ser=None, ubr=None):
+    """Query receiver unique ID and firmware version.
+
+    Sends UBX-MON-VER and UBX-SEC-UNIQID POLL messages to identify the
+    physical receiver.  SEC-UNIQID is the primary key for state
+    persistence — it's a hardware-fused ID unique to each u-blox chip.
+
+    Args:
+        port: serial port path
+        baud: baud rate
+        ser, ubr: if provided, reuse an already-open connection
+
+    Returns:
+        dict with keys:
+            unique_id: int (SEC-UNIQID, 5 bytes as integer) or None
+            unique_id_hex: str (hex representation) or None
+            module: str (e.g. "ZED-F9T") or "unknown"
+            firmware: str (e.g. "TIM 2.20") or "unknown"
+            protver: str (e.g. "29.20") or None
+        Returns None if the receiver doesn't respond at all.
+    """
+    _ensure_imports()
+    opened_here = False
+    if ser is None or ubr is None:
+        ser, ubr = open_receiver(port, baud)
+        opened_here = True
+
+    result = {
+        "unique_id": None,
+        "unique_id_hex": None,
+        "module": "unknown",
+        "firmware": "unknown",
+        "protver": None,
+    }
+
+    try:
+        # Query MON-VER for module name and firmware version
+        ver = _poll_ubx(ser, ubr, "MON", "MON-VER", "MON-VER", timeout=3.0)
+        if ver is not None:
+            sw_version = getattr(ver, "swVersion", b"")
+            hw_version = getattr(ver, "hwVersion", b"")
+            if isinstance(sw_version, bytes):
+                sw_version = sw_version.decode("ascii", errors="replace").rstrip("\x00")
+            if isinstance(hw_version, bytes):
+                hw_version = hw_version.decode("ascii", errors="replace").rstrip("\x00")
+            result["firmware"] = sw_version.strip() if sw_version else "unknown"
+
+            # Module name and protver are in the extension fields
+            # pyubx2 exposes them as extension_01, extension_02, etc.
+            for i in range(1, 10):
+                ext = getattr(ver, f"extension_{i:02d}", None)
+                if ext is None:
+                    break
+                if isinstance(ext, bytes):
+                    ext = ext.decode("ascii", errors="replace").rstrip("\x00")
+                ext = ext.strip()
+                if ext.startswith("MOD="):
+                    result["module"] = ext[4:]
+                elif ext.startswith("PROTVER="):
+                    result["protver"] = ext[8:]
+                elif ext.startswith("FWVER="):
+                    # Some firmware puts the version here instead
+                    if result["firmware"] == "unknown":
+                        result["firmware"] = ext[6:]
+        else:
+            log.warning("MON-VER poll timed out — receiver may not be responding")
+
+        # Query SEC-UNIQID for hardware unique ID
+        uniq = _poll_ubx(ser, ubr, "SEC", "SEC-UNIQID", "SEC-UNIQID", timeout=3.0)
+        if uniq is not None:
+            # SEC-UNIQID returns a 5-byte unique ID.  pyubx2 exposes it
+            # as uniqueId (bytes) or as individual uniqueId_1..5 fields.
+            uid_bytes = getattr(uniq, "uniqueId", None)
+            if uid_bytes is not None and isinstance(uid_bytes, bytes):
+                result["unique_id"] = int.from_bytes(uid_bytes, "little")
+                result["unique_id_hex"] = uid_bytes.hex()
+            else:
+                # Fallback: assemble from individual byte fields
+                parts = []
+                for i in range(1, 6):
+                    b = getattr(uniq, f"uniqueId_{i}", None)
+                    if b is None:
+                        break
+                    parts.append(b & 0xFF)
+                if len(parts) == 5:
+                    uid_bytes = bytes(parts)
+                    result["unique_id"] = int.from_bytes(uid_bytes, "little")
+                    result["unique_id_hex"] = uid_bytes.hex()
+        else:
+            log.warning("SEC-UNIQID poll timed out — receiver may not support it")
+
+    finally:
+        if opened_here:
+            ser.close()
+
+    if result["unique_id"] is None and result["module"] == "unknown":
+        return None
+
+    log.info("Receiver identity: %s fw=%s id=%s",
+             result["module"], result["firmware"],
+             result["unique_id_hex"] or "unknown")
+    return result
 
 
 def wait_ack(ubr, cls_name="CFG", msg_name="VALSET", timeout=3.0):
@@ -804,30 +940,75 @@ def _detect_second_freq(sig_ids_seen):
 
 def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
                           timeout_s=10, sfrbx_rate=1,
-                          measurement_rate_ms=1000):
+                          measurement_rate_ms=1000,
+                          state_dir=None):
     """Check that dual-frequency observations are arriving; reconfigure if not.
 
     This is the single entry point for receiver readiness. It:
-    1. Listens for RAWX and checks for dual-freq GPS+GAL observations
-    2. Auto-detects whether L5 or L2 is the active second frequency
-    3. If single-frequency only, reconfigures for L1+L5 and retries
-    4. Returns the appropriate driver for the detected signal plan
+    1. Queries receiver identity (SEC-UNIQID + MON-VER)
+    2. Checks/updates stored receiver state (receiver change detection)
+    3. Listens for RAWX and checks for dual-freq GPS+GAL observations
+    4. Auto-detects whether L5 or L2 is the active second frequency
+    5. If single-frequency only, reconfigures for L1+L5 and retries
+    6. Returns the appropriate driver and receiver identity
 
     Args:
-        minimal_messages: If True, configure only RAWX+TIM-TP on the GNSS
-            port.  Used for E810 I2C where the 15-byte AQ command limit
-            caps throughput at ~1.5 kB/s.
+        state_dir: directory for receiver state files (default: state/receivers)
 
     Returns:
-        driver: ReceiverDriver instance matching the active signals
-        None if receiver cannot be brought to dual-frequency state
+        (driver, identity) tuple where:
+            driver: ReceiverDriver instance matching the active signals,
+                or None if receiver cannot be brought to dual-frequency state
+            identity: dict from query_receiver_identity(), or None if
+                the receiver didn't respond to identity queries
 
     Note on UBX command sequencing: each CFG-VALSET is sent and its
     ACK/NAK awaited synchronously before the next command. This avoids
     misattributing a NAK to the wrong command (see docs/receiver-signals.md).
     """
+    from peppar_fix.receiver_state import (
+        check_receiver_change, new_receiver_state,
+        update_receiver_state, save_receiver_state,
+    )
+
     if systems is None:
         systems = {'gps', 'gal'}
+
+    # Step 0: Query receiver identity before anything else.
+    # This is a quick UBX poll (two messages, ~1s) that identifies the
+    # physical chip.  We need this before signal checks because a
+    # receiver change may invalidate cached state (position, capabilities).
+    identity = query_receiver_identity(port, baud)
+
+    if identity is not None and identity.get("unique_id") is not None:
+        stored, change_type = check_receiver_change(identity, port, state_dir)
+        if change_type == "new":
+            log.info("New receiver: %s (id=%s) — creating state",
+                     identity["module"], identity.get("unique_id_hex", "?"))
+            state = new_receiver_state(identity, port)
+            save_receiver_state(state, state_dir)
+        elif change_type == "receiver_changed":
+            old_mod = stored.get("module", "?") if stored else "?"
+            old_id = stored.get("unique_id_hex", "?") if stored else "?"
+            log.warning("RECEIVER CHANGED on %s: was %s (id=%s), now %s (id=%s)",
+                        port, old_mod, old_id,
+                        identity["module"], identity.get("unique_id_hex", "?"))
+            log.warning("Last-known position from previous receiver is NOT inherited")
+            state = new_receiver_state(identity, port)
+            save_receiver_state(state, state_dir)
+        elif change_type == "firmware_changed":
+            log.warning("Firmware changed on %s (%s): %s -> %s — re-probing capabilities",
+                        port, identity["module"],
+                        stored.get("firmware", "?"), identity.get("firmware", "?"))
+            state, _ = update_receiver_state(stored, identity, port)
+            save_receiver_state(state, state_dir)
+        else:
+            # Same receiver, same firmware — just update last_seen/port
+            state, _ = update_receiver_state(stored, identity, port)
+            save_receiver_state(state, state_dir)
+    else:
+        log.warning("Could not identify receiver on %s — state persistence disabled",
+                    port)
 
     # First check: are dual-freq observations already arriving?
     log.info("Checking receiver signal status...")
@@ -844,7 +1025,7 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
             driver = F9TL5Driver()
         log.info("Receiver OK: %d/%d SVs dual-freq (%s), using %s",
                  dual, total, freq_type or "?", driver.name)
-        return driver
+        return driver, identity
 
     log.warning("Only %d/%d SVs have dual-freq observations — reconfiguring",
                 dual, total)
@@ -887,7 +1068,7 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
         if not ok:
             log.error("Signal configuration failed even after factory reset")
             ser.close()
-            return None
+            return None, identity
 
     # GPS L5 health override — only needed for L5 drivers
     if isinstance(driver, F9TL5Driver):
@@ -914,8 +1095,8 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
                                          timeout_s=timeout_s)
     if dual >= 4:
         log.info("Receiver reconfigured OK: %d/%d SVs dual-freq", dual, total)
-        return driver
+        return driver, identity
 
     log.error("Receiver still not producing dual-freq observations "
               "after reconfiguration (%d/%d SVs)", dual, total)
-    return None
+    return None, identity

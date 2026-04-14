@@ -18,6 +18,7 @@ from peppar_fix.event_time import (
 )
 from peppar_fix.timebase_estimator import TimebaseRelationEstimator
 from peppar_fix import receiver
+from peppar_fix import receiver_state
 
 __all__ = [
     'PtpDevice',
@@ -35,4 +36,5 @@ __all__ = [
     'TimebaseRelationEstimator',
     'save_position', 'load_position',
     'receiver',
+    'receiver_state',
 ]

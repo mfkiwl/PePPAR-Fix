@@ -206,6 +206,9 @@ ntrip_args() {
     echo "${args[@]}"
 }
 
+# Ensure state directories exist for receiver state persistence
+mkdir -p state/receivers data
+
 # ── Step 1: Verify/configure receiver ───────────────────────────────────── #
 #
 # Single entry point: checks dual-freq observations, reconfigures signals
@@ -229,7 +232,14 @@ for ((rx_try=1; rx_try<=rx_max_retries; rx_try++)); do
     if [[ -n "$BAUD" ]]; then
         rx_args+=(--baud "$BAUD")
     fi
-    if DETECTED_DRIVER=$("$PYTHON_BIN" "$SCRIPT_DIR/peppar_ensure_receiver.py" "${rx_args[@]}"); then
+    if DETECTED_OUTPUT=$("$PYTHON_BIN" "$SCRIPT_DIR/peppar_ensure_receiver.py" "${rx_args[@]}"); then
+        # Output: line 1 = driver name, line 2 = unique_id, line 3 = position status
+        DETECTED_DRIVER=$(echo "$DETECTED_OUTPUT" | sed -n '1p')
+        RECEIVER_UNIQUE_ID=$(echo "$DETECTED_OUTPUT" | sed -n '2p')
+        RECEIVER_HAS_POSITION=$(echo "$DETECTED_OUTPUT" | sed -n '3p')
+        if [[ "$RECEIVER_UNIQUE_ID" != "none" ]]; then
+            echo "  Receiver unique_id: $RECEIVER_UNIQUE_ID"
+        fi
         # Map driver name to --receiver arg for downstream scripts
         case "$DETECTED_DRIVER" in
             *L1/L5*|*l5*)  RECEIVER="f9t-l5" ;;
@@ -270,27 +280,34 @@ bootstrap_position() {
 
 if [[ -n "$KNOWN_POS" ]]; then
     echo "  Known position provided: $KNOWN_POS (skipping bootstrap)"
-    # Create position file from known position if it doesn't exist.
-    # PHC bootstrap and the engine both need this file.
-    if [[ ! -f "$POSITION_FILE" ]]; then
-        IFS=',' read -r kp_lat kp_lon kp_alt <<< "$KNOWN_POS"
-        "$PYTHON_BIN" -c "
-import json, sys
+    # Save known position to receiver state if we have a receiver identity.
+    # Also create legacy position file for PHC bootstrap (which still reads it).
+    IFS=',' read -r kp_lat kp_lon kp_alt <<< "$KNOWN_POS"
+    "$PYTHON_BIN" -c "
+import json, sys, os
 sys.path.insert(0, '$SCRIPT_DIR')
 from solve_pseudorange import lla_to_ecef
 lat, lon, alt = $kp_lat, $kp_lon, $kp_alt
 ecef = lla_to_ecef(lat, lon, alt)
-import os; os.makedirs(os.path.dirname('$POSITION_FILE') or '.', exist_ok=True)
+# Save to receiver state
+uid = '$RECEIVER_UNIQUE_ID'
+if uid and uid != 'none':
+    uid = int(uid)
+    from peppar_fix.receiver_state import save_position_to_receiver
+    save_position_to_receiver(uid, ecef, 0.0, 'known_pos')
+    print(f'  Position saved to receiver state for {uid}')
+# Legacy file for PHC bootstrap compatibility
+os.makedirs(os.path.dirname('$POSITION_FILE') or '.', exist_ok=True)
 json.dump({'lat': lat, 'lon': lon, 'alt_m': alt,
            'ecef_m': [round(x,3) for x in ecef],
            'sigma_m': 0.0, 'source': 'known_pos'}, open('$POSITION_FILE','w'), indent=2)
-print(f'  Created {\"$POSITION_FILE\"} from known position')
 "
-    fi
-elif [[ ! -f "$POSITION_FILE" ]]; then
-    bootstrap_position || exit 2
+elif [[ "$RECEIVER_HAS_POSITION" == "has_position" ]]; then
+    echo "  Position found in receiver state (id=$RECEIVER_UNIQUE_ID)"
+elif [[ -f "$POSITION_FILE" ]]; then
+    echo "  Legacy position file exists: $POSITION_FILE (will migrate to receiver state)"
 else
-    echo "  Position file exists: $POSITION_FILE"
+    bootstrap_position || exit 2
 fi
 
 # ── pmc helpers for clockClass management ──────────────────────────── #

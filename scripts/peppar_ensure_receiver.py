@@ -56,7 +56,7 @@ def main():
 
     from peppar_fix.receiver import ensure_receiver_ready
 
-    driver = ensure_receiver_ready(
+    driver, identity = ensure_receiver_ready(
         args.serial,
         args.baud,
         port_type=args.port_type,
@@ -69,8 +69,18 @@ def main():
         log.error("Receiver initialization failed")
         sys.exit(1)
 
-    # Print driver name so the wrapper can capture it
+    # Output for wrapper (one item per line):
+    #   line 1: driver name
+    #   line 2: receiver unique_id (or "none")
+    #   line 3: "has_position" or "no_position"
+    uid = identity.get("unique_id") if identity else None
     print(driver.name)
+    print(uid if uid is not None else "none")
+    if uid is not None:
+        from peppar_fix.receiver_state import receiver_has_position
+        print("has_position" if receiver_has_position(uid) else "no_position")
+    else:
+        print("no_position")
     sys.exit(0)
 
 

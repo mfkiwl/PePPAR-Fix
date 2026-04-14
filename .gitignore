@@ -1,6 +1,9 @@
 # Observation data and correction products (large, downloadable)
 data/
 
+# Host-local state (receiver identity, position, DO characterization)
+state/
+
 # Credentials
 ntrip.conf
 *.secrets
