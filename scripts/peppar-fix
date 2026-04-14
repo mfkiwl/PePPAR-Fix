@@ -418,6 +418,9 @@ build_servo_args() {
     if [[ -n "${HOSTCFG_DO_LABEL:-}" ]]; then
         args+=(--do-label "$HOSTCFG_DO_LABEL")
     fi
+    if [[ -n "${HOSTCFG_DO_TYPE:-}" ]]; then
+        args+=(--do-type "$HOSTCFG_DO_TYPE")
+    fi
     if [[ -n "${HOSTCFG_DAC_BUS:-}" ]]; then
         args+=(--dac-bus "$HOSTCFG_DAC_BUS")
         [[ -n "${HOSTCFG_DAC_ADDR:-}" ]] && args+=(--dac-addr "$HOSTCFG_DAC_ADDR")
@@ -426,6 +429,10 @@ build_servo_args() {
         [[ -n "${HOSTCFG_DAC_PPB_PER_CODE:-}" ]] && args+=(--dac-ppb-per-code "$HOSTCFG_DAC_PPB_PER_CODE")
         [[ -n "${HOSTCFG_DAC_MAX_PPB:-}" ]] && args+=(--dac-max-ppb "$HOSTCFG_DAC_MAX_PPB")
         [[ -n "${HOSTCFG_DAC_TYPE:-}" ]] && args+=(--dac-type "$HOSTCFG_DAC_TYPE")
+    fi
+    if [[ -n "${HOSTCFG_TADD_GPIO:-}" ]]; then
+        args+=(--tadd-gpio "$HOSTCFG_TADD_GPIO")
+        [[ -n "${HOSTCFG_TADD_HOLD_S:-}" ]] && args+=(--tadd-hold-s "$HOSTCFG_TADD_HOLD_S")
     fi
     if [[ ${#ENGINE_EXTRA_ARGS[@]} -gt 0 ]]; then
         args+=("${ENGINE_EXTRA_ARGS[@]}")
