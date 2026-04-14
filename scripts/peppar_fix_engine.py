@@ -52,6 +52,7 @@ from solve_pseudorange import C, ecef_to_lla, lla_to_ecef
 from solve_ppp import PPPFilter, FixedPosFilter, ls_init
 from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections
+from ppp_ar import MelbourneWubbenaTracker, NarrowLaneResolver
 from ntrip_client import NtripStream
 from realtime_ppp import serial_reader, ntrip_reader, QErrStore, Nav2PositionStore
 from ticc import Ticc
@@ -848,6 +849,10 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
     correction_gate = CorrectionFreshnessGate()
     run_bootstrap.last_correction_gate_stats = correction_gate.stats.as_dict()
 
+    # PPP-AR: Melbourne-Wubbena wide-lane + narrow-lane resolver
+    mw_tracker = MelbourneWubbenaTracker()
+    nl_resolver = NarrowLaneResolver()
+
     prev_t = None
     prev_pos_ecef = None
     n_epochs = 0
@@ -933,6 +938,8 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
             slipped = filt.detect_cycle_slips(observations, filt.prev_obs)
             for sv in slipped:
                 filt.remove_ambiguity(sv)
+                mw_tracker.reset(sv)
+                nl_resolver.unfix(sv)
 
         for obs in observations:
             sv = obs['sv']
@@ -980,23 +987,39 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
                 f"n={n_used} amb={len(filt.sv_to_idx)} "
                 f"rms={rms:.3f}m [{elapsed:.0f}s]"
             )
-            # Log ambiguity integrality (PPP-AR diagnostic)
+            # PPP-AR: Melbourne-Wubbena wide-lane update
+            for obs in observations:
+                sv = obs['sv']
+                phi1 = obs.get('phi1_cyc')
+                phi2 = obs.get('phi2_cyc')
+                pr1 = obs.get('pr1_m')
+                pr2 = obs.get('pr2_m')
+                wl1 = obs.get('wl_f1')
+                wl2 = obs.get('wl_f2')
+                if all(v is not None for v in (phi1, phi2, pr1, pr2, wl1, wl2)):
+                    f1_hz = C / wl1
+                    f2_hz = C / wl2
+                    mw_tracker.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
+
+            # PPP-AR: narrow-lane resolution attempt
+            if n_epochs >= 30:
+                newly_fixed = nl_resolver.attempt(filt, mw_tracker)
+
+            # Log corrected integrality (WL/NL decomposition)
             if len(filt.sv_to_idx) > 0 and n_epochs % 10 == 0:
-                N_BASE = 6  # from solve_ppp.py
-                fracs = []
-                for sv, idx in filt.sv_to_idx.items():
-                    si = N_BASE + idx
-                    if si < len(filt.x):
-                        N_float = filt.x[si]
-                        frac = N_float - round(N_float)
-                        sigma = np.sqrt(filt.P[si, si]) if si < filt.P.shape[0] else 999
-                        fracs.append(abs(frac))
-                        if n_epochs % 30 == 0:
-                            log.debug(f"    {sv}: N={N_float:.3f} σ={sigma:.3f} frac={frac:+.3f}")
-                if fracs:
+                int_results = nl_resolver.integrality(filt, mw_tracker)
+                if int_results:
+                    fracs = [abs(r[1]) for r in int_results]
+                    n_fixable = sum(1 for r in int_results if abs(r[1]) < 0.15)
                     mean_frac = np.mean(fracs)
-                    log.info(f"    Ambiguity integrality: mean|frac|={mean_frac:.3f} "
-                             f"(n={len(fracs)}, <0.15 = ready for AR)")
+                    log.info(f"    AR: mean|N1_frac|={mean_frac:.3f} "
+                             f"(n={len(fracs)}, fixable={n_fixable}, "
+                             f"{mw_tracker.summary()}, {nl_resolver.summary()})")
+                    if n_epochs % 30 == 0:
+                        for sv, frac, sigma, fixed in int_results:
+                            tag = "FIXED" if fixed else ""
+                            log.debug(f"    {sv}: N1_frac={frac:+.3f} "
+                                      f"σ_N1={sigma:.3f} {tag}")
 
         # Convergence check
         pos_stable = True

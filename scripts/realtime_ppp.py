@@ -767,6 +767,13 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         'cno': min(f1['cno'], f2['cno']),
                         'lock_duration_ms': min(f1['lock_ms'], f2['lock_ms']),
                         'half_cyc_ok': True,
+                        # Per-frequency data for MW wide-lane (PPP-AR)
+                        'phi1_cyc': cp_f1,
+                        'phi2_cyc': cp_f2,
+                        'pr1_m': pr_f1,
+                        'pr2_m': pr_f2,
+                        'wl_f1': wl_f1,
+                        'wl_f2': wl_f2,
                     })
 
                 # Diagnostic dump (first 3 epochs, then every 60)
