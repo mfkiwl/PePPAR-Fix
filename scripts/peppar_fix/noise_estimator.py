@@ -11,13 +11,20 @@ Two channels:
   If corrections are truly noise-free (as measured), both channels
   should agree.  Divergence indicates DO stress or write latency.
 
-Computes running overlapping Allan deviation (ADEV) at tau = 1, 2, 4, ...
+Computes running TDEV (time deviation, in ns) at tau = 1, 2, 4, ...
 seconds from the residual phase samples.
+
+State is persisted to state/dos/<do_uid>_noise.json on clean shutdown
+and loaded on the next run, so TDEV at long taus can accumulate across
+runs.
 """
 
+import json
 import logging
 import math
+import os
 import time
+from datetime import datetime, timezone
 
 log = logging.getLogger("peppar_fix.noise_estimator")
 
@@ -147,6 +154,90 @@ class InBandNoiseEstimator:
                 parts.append(f"corr_TDEV(1s)={tau1:.2f}ns")
         return " ".join(parts)
 
+    # ── Persistence ───────────────────────────────────────────────── #
+
+    def to_dict(self):
+        """Serialize state for JSON persistence.
+
+        Saves the phase buffers (for warm-start TDEV at long taus),
+        the computed TDEV curves, and sample counts.  Detrending state
+        is NOT saved — it's reset on load since the adjfine context
+        changes between runs.
+        """
+        # Only save the tail of the phase buffers (max_history already caps)
+        return {
+            "gap_phases": self._gap_phases[-self._max_history:],
+            "corr_phases": self._corr_phases[-self._max_history:],
+            "gap_tdev": {str(k): v for k, v in self._gap_tdev.items()},
+            "corr_tdev": {str(k): v for k, v in self._corr_tdev.items()},
+            "gap_count": self._gap_count,
+            "corr_count": self._corr_count,
+            "updated": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        }
+
+    @classmethod
+    def from_dict(cls, data, max_history=7200):
+        """Restore from a previously saved dict.
+
+        Phase buffers are loaded so TDEV at long taus can build on
+        prior data.  Detrending state starts fresh (phase_acc=0,
+        prev_mono=None) since the servo context has changed.
+        """
+        est = cls(max_history=max_history)
+        est._gap_phases = data.get("gap_phases", [])[-max_history:]
+        est._corr_phases = data.get("corr_phases", [])[-max_history:]
+        est._gap_tdev = {int(k): v for k, v in data.get("gap_tdev", {}).items()}
+        est._corr_tdev = {int(k): v for k, v in data.get("corr_tdev", {}).items()}
+        est._gap_count = data.get("gap_count", len(est._gap_phases))
+        est._corr_count = data.get("corr_count", len(est._corr_phases))
+        # Timestamps not restored — detrending restarts fresh
+        est._gap_times = []
+        est._corr_times = []
+        return est
+
+
+def noise_state_path(do_uid, state_dir=None):
+    """Path for a DO's noise estimator state file."""
+    if state_dir is None:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        state_dir = os.path.join(repo_root, "state", "dos")
+    safe_id = str(do_uid).replace(":", "-").replace("/", "_")
+    return os.path.join(state_dir, f"{safe_id}_noise.json")
+
+
+def save_noise_state(do_uid, estimator, state_dir=None):
+    """Save noise estimator state to disk.  Atomic write."""
+    if estimator is None or estimator.total_samples < 10:
+        return  # nothing worth saving
+    path = noise_state_path(do_uid, state_dir)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = estimator.to_dict()
+    data["do_uid"] = str(do_uid)
+    tmp = path + ".tmp"
+    with open(tmp, 'w') as f:
+        json.dump(data, f, indent=2)
+        f.write('\n')
+    os.replace(tmp, path)
+    log.info("Saved noise state to %s (%d gap, %d corr samples)",
+             path, estimator.gap_samples, estimator.total_samples)
+
+
+def load_noise_state(do_uid, state_dir=None):
+    """Load a saved noise estimator.  Returns InBandNoiseEstimator or None."""
+    path = noise_state_path(do_uid, state_dir)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        est = InBandNoiseEstimator.from_dict(data)
+        log.info("Loaded noise state from %s (%d gap, %d corr samples)",
+                 path, est.gap_samples, est.total_samples)
+        return est
+    except (json.JSONDecodeError, OSError, KeyError) as e:
+        log.warning("Failed to load noise state from %s: %s", path, e)
+        return None
+
 
 def _compute_tdev(phases, taus=None):
     """Compute time deviation (TDEV) from phase samples.
@@ -195,7 +286,5 @@ def _compute_tdev(phases, taus=None):
         # τ₀ = 1s, so τ₀² = 1
         tdev_sq = total / (6.0 * n * n * outer_count)
         result[n] = math.sqrt(tdev_sq)
-
-    return result
 
     return result
