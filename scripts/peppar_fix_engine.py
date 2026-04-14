@@ -1101,20 +1101,30 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
     correction_gate = CorrectionFreshnessGate()
 
     # Optional servo setup (PTP imports only loaded when needed)
+    # Enter the servo path when:
+    #   1. --servo is set (PHC-based servo, original path), OR
+    #   2. --ticc-drive is set without --servo (TICC-only servo, no PHC —
+    #      e.g., clkPoC3 where TICC measures and DAC steers the OCXO,
+    #      with ts2phc disciplining the PHC independently).
     servo_ctx = None
     ptp = None
-    if args.servo:
-        # Open PTP device for bootstrap and servo
-        try:
-            from peppar_fix import PtpDevice
-        except ImportError:
-            log.error("peppar_fix library not available for servo")
-            return 1
-        try:
-            ptp = PtpDevice(args.servo)
-        except OSError as e:
-            log.error(f"Cannot open PTP device {args.servo}: {e}")
-            return 1
+    want_servo = args.servo or getattr(args, 'ticc_drive', False)
+    if want_servo:
+        if args.servo:
+            # Open PTP device for bootstrap and servo
+            try:
+                from peppar_fix import PtpDevice
+            except ImportError:
+                log.error("peppar_fix library not available for servo")
+                return 1
+            try:
+                ptp = PtpDevice(args.servo)
+            except OSError as e:
+                log.error(f"Cannot open PTP device {args.servo}: {e}")
+                return 1
+        else:
+            log.info("TICC-only servo mode: no PHC in loop (ticc_drive=%s, "
+                     "servo=%s)", args.ticc_drive, args.servo)
 
         # DO bootstrap: ensure phase ±10µs and frequency ±5ppb before
         # servo starts.  Skipped if --skip-bootstrap or --freerun.
@@ -1124,7 +1134,8 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             if not _do_bootstrap_init(args, ptp, known_ecef, obs_queue,
                                         beph, ssr, stop_event):
                 log.error("DO bootstrap failed — cannot start servo")
-                ptp.close()
+                if ptp is not None:
+                    ptp.close()
                 return 1
             log.info("DO bootstrap succeeded (%s)", getattr(args, 'do_type', 'phc'))
 
@@ -1151,7 +1162,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
         if not isinstance(servo_result, int) and servo_result.get('pmc'):
             _set_clock_class(servo_result, "initialized")
         if isinstance(servo_result, int):
-            log.error("Failed to set up PHC servo (exit code %d)", servo_result)
+            log.error("Failed to set up servo (exit code %d)", servo_result)
             return servo_result
         servo_ctx = servo_result
         servo_ctx["correlation_gate"] = StrictCorrelationGate()
@@ -1902,6 +1913,132 @@ def _bootstrap_compute_base_freq(args, pps_freq_ppb, pps_freq_unc,
     return base_freq, tcxo_freq_corr_ppb
 
 
+def _do_bootstrap_vcocxo_no_phc(args, known_ecef, obs_queue, beph, ssr,
+                                 stop_event):
+    """Bootstrap VCOCXO without a PHC: TADD ARM + drift-file frequency seed.
+
+    No EXTTS-based PPS frequency measurement — we can't measure DO frequency
+    without a PHC.  Instead, trust the drift file for initial frequency and
+    run a short FixedPosFilter for dt_rx estimation.
+
+    Returns True on success, False on fatal error.
+    """
+    from phc_bootstrap import load_drift, save_drift
+
+    do_label = getattr(args, 'do_label', None) or 'vcocxo'
+
+    # ── 1. ARM the TADD divider ───────────────────────────────────── #
+    tadd_gpio = getattr(args, 'tadd_gpio', None)
+    if tadd_gpio is not None:
+        from peppar_fix.tadd import TADDDivider
+        tadd_hold = getattr(args, 'tadd_hold_s', 1.1)
+        tadd = TADDDivider(arm_gpio=tadd_gpio, arm_hold_s=tadd_hold)
+        tadd.setup()
+        try:
+            arm_mono = tadd.arm()
+            log.info("TADD ARM complete (GPIO%d) — DO PPS synced to GNSS PPS "
+                     "(phase offset ≤%d ns)", tadd_gpio, tadd.max_phase_offset_ns)
+        finally:
+            tadd.teardown()
+    else:
+        log.info("No TADD GPIO configured — assuming DO PPS already synced")
+
+    # ── 2. Seed DAC frequency from drift file ────────────────────── #
+    dac_bus = getattr(args, 'dac_bus', None)
+    if dac_bus is None:
+        log.error("VCOCXO bootstrap requires --dac-bus")
+        return False
+
+    from peppar_fix.dac_actuator import DacActuator
+
+    dac_addr = int(getattr(args, 'dac_addr', '0x60'), 0)
+    ppb_per_code = getattr(args, 'dac_ppb_per_code', None)
+    if ppb_per_code is None:
+        log.error("VCOCXO bootstrap requires --dac-ppb-per-code")
+        return False
+
+    dac = DacActuator(
+        bus_num=dac_bus,
+        addr=dac_addr,
+        bits=getattr(args, 'dac_bits', 12),
+        center_code=getattr(args, 'dac_center_code', None),
+        ppb_per_code=ppb_per_code,
+        max_ppb=getattr(args, 'dac_max_ppb', None),
+        dac_type=getattr(args, 'dac_type', 'mcp4725'),
+    )
+    dac.setup()
+
+    # Without EXTTS we can't measure PPS frequency — use drift file.
+    drift = load_drift(getattr(args, 'drift_file', None) or 'data/drift.json')
+    if drift:
+        base_freq = drift["adjfine_ppb"]
+        log.info("TICC-only bootstrap: frequency from drift file: %.1f ppb",
+                 base_freq)
+    else:
+        base_freq = 0.0
+        log.warning("TICC-only bootstrap: no drift file — seeding DAC at 0 ppb "
+                    "(TICC servo will converge)")
+
+    actual = dac.adjust_frequency_ppb(base_freq)
+    log.info("DAC frequency set: requested=%.1f ppb, actual=%.1f ppb",
+             base_freq, actual)
+    dac.teardown()
+
+    # ── 3. Estimate dt_rx (doesn't need PHC) ─────────────────────── #
+    dt_rx_ns = None
+    if drift and 'dt_rx_ns' in drift:
+        dt_rx_ns = drift['dt_rx_ns']
+        log.info("dt_rx from drift file: %.1f ns", dt_rx_ns)
+    else:
+        log.info("Running short FixedPosFilter for dt_rx estimate...")
+        filt = FixedPosFilter(known_ecef)
+        filt.initialized = True
+        prev_t = None
+        n_epochs = 0
+        bootstrap_epochs = args.bootstrap_epochs
+
+        for _ in range(bootstrap_epochs * 3):
+            if stop_event.is_set():
+                break
+            try:
+                gps_time, observations = obs_queue.get(timeout=5)
+            except Exception:
+                continue
+            if len(observations) < 4:
+                continue
+
+            corrections = RealtimeCorrections(beph, ssr)
+            dt = (gps_time - prev_t).total_seconds() if prev_t else 1.0
+            if prev_t and 0 < dt <= 30:
+                filt.predict(dt)
+            prev_t = gps_time
+
+            n_used, resid, n_td = filt.update(
+                observations, corrections, gps_time, clk_file=corrections)
+            if n_used < 4:
+                continue
+
+            dt_rx_ns = filt.x[filt.IDX_CLK] / C * 1e9
+            n_epochs += 1
+            if n_epochs >= bootstrap_epochs:
+                break
+
+        if dt_rx_ns is not None:
+            log.info("dt_rx estimated: %.1f ns (%d epochs)", dt_rx_ns, n_epochs)
+        else:
+            log.warning("Could not estimate dt_rx — servo will start without it")
+
+    # Save drift file for next run
+    drift_file = getattr(args, 'drift_file', None) or 'data/drift.json'
+    save_drift(drift_file, base_freq, do_label, None, dt_rx_ns=dt_rx_ns)
+    log.info("Drift file updated: %s (base=%.1f ppb, dt_rx=%s)",
+             drift_file, base_freq,
+             f"{dt_rx_ns:.1f} ns" if dt_rx_ns is not None else "None")
+
+    log.info("VCOCXO bootstrap complete (no PHC) — TICC servo may start")
+    return True
+
+
 def _do_bootstrap_vcocxo(args, ptp, pps_freq_ppb, pps_freq_unc,
                           dt_rx_ns, dt_rx_series):
     """Bootstrap an external VCOCXO: ARM TADD divider, seed DAC frequency.
@@ -2158,11 +2295,24 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
     - vcocxo: TADD ARM + DAC frequency seed
     - clockmatrix: PHC phase step + ClockMatrix FCW (handled within PHC path)
 
-    All paths share PPS frequency measurement and a short FixedPosFilter
-    for dt_rx estimation.
+    When ptp is None (TICC-only mode), only the VCOCXO path is valid —
+    EXTTS-based PPS frequency measurement is skipped and the drift file
+    supplies the initial frequency.
 
     Returns True on success, False on fatal error.
     """
+    do_type = getattr(args, 'do_type', 'phc')
+
+    if ptp is None:
+        # TICC-only mode: no PHC available for EXTTS-based frequency
+        # measurement.  Only VCOCXO bootstrap is supported.
+        if do_type != 'vcocxo':
+            log.error("TICC-only servo requires do_type=vcocxo (got %s). "
+                      "PHC-based DOs need --servo.", do_type)
+            return False
+        return _do_bootstrap_vcocxo_no_phc(
+            args, known_ecef, obs_queue, beph, ssr, stop_event)
+
     from peppar_fix.ptp_device import DualEdgeFilter
 
     # phc_bootstrap helpers expect args.ptp_dev; engine uses args.servo
@@ -2174,8 +2324,6 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
     if result is None:
         return False
     pps_freq_ppb, pps_freq_unc, dt_rx_ns, dt_rx_series = result
-
-    do_type = getattr(args, 'do_type', 'phc')
 
     if do_type == 'vcocxo':
         return _do_bootstrap_vcocxo(
@@ -2190,17 +2338,20 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
 
 
 def _setup_servo(args, known_ecef, qerr_store, ptp=None):
-    """Set up PHC servo.
+    """Set up servo (PHC-based or TICC-only).
 
     Returns context dict on success, or an int exit code on failure:
     1 = fatal (device or library error), 3 = no PPS (retryable).
 
-    If ptp is provided, uses that PtpDevice instead of opening a new one
-    (e.g., when bootstrap already opened it).
+    If ptp is provided, uses that PtpDevice instead of opening a new one.
+    If ptp is None and args.servo is set, opens the PTP device.
+    If ptp is None and args.servo is not set (TICC-only mode), the servo
+    runs without any PHC — TICC provides measurements and a DAC or
+    ClockMatrix actuator steers the oscillator.
     """
     gate_stats = None
     try:
-        from peppar_fix import PtpDevice, PIServo, DisciplineScheduler
+        from peppar_fix import PIServo, DisciplineScheduler
         from peppar_fix import compute_error_sources, ticc_only_error_source
         from peppar_fix.timestamper_state import TimestamperParams
     except ImportError:
@@ -2211,28 +2362,35 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
     ts_params = TimestamperParams.resolve(args)
     log.info("Timestamper params: %s", ts_params)
 
-    if ptp is None:
+    # ── PHC setup (skipped in TICC-only mode) ─────────────────────── #
+    have_phc = ptp is not None or args.servo
+    if ptp is None and args.servo:
         try:
+            from peppar_fix import PtpDevice
             ptp = PtpDevice(args.servo)
         except OSError as e:
             log.error(f"Cannot open PTP device {args.servo}: {e}")
             return 1
 
-    caps = ptp.get_caps()
-    log.info(f"PHC: {args.servo}, max_adj={caps['max_adj']} ppb, "
-             f"n_extts={caps['n_ext_ts']}, n_pins={caps['n_pins']}")
+    if have_phc:
+        caps = ptp.get_caps()
+        log.info(f"PHC: {args.servo}, max_adj={caps['max_adj']} ppb, "
+                 f"n_extts={caps['n_ext_ts']}, n_pins={caps['n_pins']}")
+        bootstrap_adj = ptp.read_adjfine()
+        log.info("PHC adjfine from bootstrap: %.1f ppb", bootstrap_adj)
+    else:
+        # TICC-only: no PHC caps.  max_adj comes from the actuator later.
+        caps = None
+        bootstrap_adj = 0.0
+        log.info("TICC-only servo: no PHC — measurements from TICC, "
+                 "actuator must be DAC or ClockMatrix")
 
     _log_do_characterization(args)
 
-    # Preserve adjfine from bootstrap — read before switching actuator.
-    bootstrap_adj = ptp.read_adjfine()
-    log.info("PHC adjfine from bootstrap: %.1f ppb", bootstrap_adj)
-
-    # Construct frequency actuator based on profile.
-    # Priority: DAC > ClockMatrix > PHC adjfine (last resort).
-    from peppar_fix.phc_actuator import PhcAdjfineActuator
-    actuator = PhcAdjfineActuator(ptp)
-    actuator_type = "phc_adjfine"
+    # ── Construct frequency actuator ──────────────────────────────── #
+    # Priority: DAC > ClockMatrix > PHC adjfine (last resort, PHC only).
+    actuator = None
+    actuator_type = None
 
     if getattr(args, 'dac_bus', None) is not None:
         try:
@@ -2255,8 +2413,8 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
                 log.info("Using DAC actuator: bus=%d addr=0x%02x bits=%d ppb/code=%.4f",
                          args.dac_bus, dac_addr, args.dac_bits, ppb_per_code)
         except Exception as e:
-            log.error("DAC actuator init failed: %s — falling back to PHC adjfine", e)
-            actuator = PhcAdjfineActuator(ptp)
+            log.error("DAC actuator init failed: %s", e)
+            actuator = None
     elif getattr(args, 'clockmatrix_bus', None) is not None:
         try:
             from peppar_fix.clockmatrix import ClockMatrixI2C
@@ -2270,9 +2428,26 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
             log.info("Using ClockMatrix actuator: bus=%d dpll=%d",
                      args.clockmatrix_bus, cm_dpll)
         except Exception as e:
-            log.error("ClockMatrix actuator init failed: %s — falling back to PHC adjfine", e)
-            actuator = PhcAdjfineActuator(ptp)
+            log.error("ClockMatrix actuator init failed: %s", e)
+            actuator = None
+
+    # Fallback to PHC adjfine — only valid when we have a PHC.
+    if actuator is None:
+        if not have_phc:
+            log.error("TICC-only servo requires a DAC or ClockMatrix actuator "
+                      "(no PHC available for adjfine fallback)")
+            return 1
+        from peppar_fix.phc_actuator import PhcAdjfineActuator
+        actuator = PhcAdjfineActuator(ptp)
+        actuator_type = "phc_adjfine"
     actuator.setup()
+
+    # Synthesize caps for TICC-only mode from actuator limits.
+    if caps is None:
+        max_adj = getattr(actuator, 'max_adj_ppb', 500.0)
+        caps = {'max_adj': max_adj, 'n_ext_ts': 0, 'n_pins': 0}
+        log.info("TICC-only caps: max_adj=%.0f ppb (from %s)", max_adj,
+                 actuator_type)
 
     # For ClockMatrix: set up TDC phase source.
     # Bootstrap already set the FCW and zeroed adjfine — the actuator's
@@ -2299,7 +2474,7 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
     log.info("Actuator freq at start: %.1f ppb (%s)", current_adj,
              type(actuator).__name__)
     if args.freerun:
-        log.info("FREERUN MODE: PHC will not be steered. "
+        log.info("FREERUN MODE: DO will not be steered. "
                  "Auto-stop at |pps_error| > %.0f ns",
                  args.freerun_max_error_ns or float('inf'))
         if not args.ticc_port:
@@ -2310,68 +2485,70 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
                 "TDEV characterization, or pair with a separate TICC capture."
             )
 
-    # Import PTP constants for pin setup
-    from peppar_fix.ptp_device import PTP_PF_EXTTS, DualEdgeFilter
+    # ── EXTTS setup (skipped in TICC-only mode) ──────────────────── #
+    from peppar_fix.ptp_device import DualEdgeFilter
 
     extts_channel = args.extts_channel
     extts_ok = False
-    # Try ioctl pin programming first (i226), fall back to sysfs
-    # (E810 ice driver rejects PTP_PIN_SETFUNC ioctl but accepts
-    # sysfs writes). This makes EXTTS Just Work on both platforms.
-    pin_set = False
-    if args.program_pin and caps['n_pins'] > 0:
-        try:
-            ptp.set_pin_function(args.pps_pin, PTP_PF_EXTTS, extts_channel)
-            pin_set = True
-            log.info("Pin %d programmed for EXTTS channel %d via ioctl",
-                     args.pps_pin, extts_channel)
-        except OSError:
-            log.info("Pin config ioctl not supported; trying sysfs")
-    if not pin_set and caps['n_pins'] > 0 and args.pps_pin is not None:
-        from phc_bootstrap import _set_pin_function_sysfs, _E810_PIN_NAMES
-        pin_name = _E810_PIN_NAMES.get(args.pps_pin, str(args.pps_pin))
-        if _set_pin_function_sysfs(args.servo, pin_name,
-                                   PTP_PF_EXTTS, extts_channel):
-            pin_set = True
-            log.info("Pin %s programmed for EXTTS channel %d via sysfs",
-                     pin_name, extts_channel)
-    if not pin_set:
-        log.info("Skipping pin programming; using implicit EXTS mapping")
-    try:
-        ptp.enable_extts(extts_channel, rising_edge=True)
-        log.info(f"EXTTS enabled: pin={args.pps_pin}, channel={extts_channel}")
-        extts_ok = True
-    except OSError as e:
-        if args.ticc_drive:
-            log.warning("EXTTS unavailable (%s) — TICC-driven servo does not require it", e)
-        else:
-            log.error("EXTTS failed: %s", e)
-            ptp.close()
-            return 1
-
-    # Verify PPS is actually arriving before committing to the servo loop.
-    # Use a DualEdgeFilter so the i226 dual-edge quirk doesn't fool the
-    # one-shot test (it would otherwise sometimes return the falling edge,
-    # which still proves PPS is arriving but is misleading for diagnostics).
     extts_dedup = DualEdgeFilter()
-    if extts_ok:
-        test_pps = ptp.read_extts_dedup(extts_dedup, timeout_ms=3000)
-        if test_pps is None and not args.ticc_drive:
-            log.error("No PPS event within 3s after enabling EXTTS — "
-                      "check PPS wiring, pin config, and PTP device")
-            ptp.disable_extts(extts_channel)
-            ptp.close()
-            return 3  # no PPS — wrapper should retry
-        elif test_pps is None:
-            log.warning("No PPS on EXTTS — TICC will provide servo feedback")
+
+    if have_phc:
+        from peppar_fix.ptp_device import PTP_PF_EXTTS
+        # Try ioctl pin programming first (i226), fall back to sysfs
+        # (E810 ice driver rejects PTP_PIN_SETFUNC ioctl but accepts
+        # sysfs writes). This makes EXTTS Just Work on both platforms.
+        pin_set = False
+        if args.program_pin and caps['n_pins'] > 0:
+            try:
+                ptp.set_pin_function(args.pps_pin, PTP_PF_EXTTS, extts_channel)
+                pin_set = True
+                log.info("Pin %d programmed for EXTTS channel %d via ioctl",
+                         args.pps_pin, extts_channel)
+            except OSError:
+                log.info("Pin config ioctl not supported; trying sysfs")
+        if not pin_set and caps['n_pins'] > 0 and args.pps_pin is not None:
+            from phc_bootstrap import _set_pin_function_sysfs, _E810_PIN_NAMES
+            pin_name = _E810_PIN_NAMES.get(args.pps_pin, str(args.pps_pin))
+            if _set_pin_function_sysfs(args.servo, pin_name,
+                                       PTP_PF_EXTTS, extts_channel):
+                pin_set = True
+                log.info("Pin %s programmed for EXTTS channel %d via sysfs",
+                         pin_name, extts_channel)
+        if not pin_set:
+            log.info("Skipping pin programming; using implicit EXTTS mapping")
+        try:
+            ptp.enable_extts(extts_channel, rising_edge=True)
+            log.info(f"EXTTS enabled: pin={args.pps_pin}, channel={extts_channel}")
+            extts_ok = True
+        except OSError as e:
+            if args.ticc_drive:
+                log.warning("EXTTS unavailable (%s) — TICC-driven servo does not require it", e)
+            else:
+                log.error("EXTTS failed: %s", e)
+                ptp.close()
+                return 1
+
+        # Verify PPS is actually arriving before committing to the servo loop.
+        if extts_ok:
+            test_pps = ptp.read_extts_dedup(extts_dedup, timeout_ms=3000)
+            if test_pps is None and not args.ticc_drive:
+                log.error("No PPS event within 3s after enabling EXTTS — "
+                          "check PPS wiring, pin config, and PTP device")
+                ptp.disable_extts(extts_channel)
+                ptp.close()
+                return 3  # no PPS — wrapper should retry
+            elif test_pps is None:
+                log.warning("No PPS on EXTTS — TICC will provide servo feedback")
+        else:
+            test_pps = None
+        if test_pps is not None:
+            phc_sec, phc_nsec = test_pps[0], test_pps[1]
+            pps_err = phc_nsec if phc_nsec < 500_000_000 else phc_nsec - 1_000_000_000
+            log.info("PPS verified: phc_sec=%d error=%+d ns", phc_sec, pps_err)
+        else:
+            log.info("PPS verification skipped — TICC provides servo feedback")
     else:
-        test_pps = None
-    if test_pps is not None:
-        phc_sec, phc_nsec = test_pps[0], test_pps[1]
-        pps_err = phc_nsec if phc_nsec < 500_000_000 else phc_nsec - 1_000_000_000
-        log.info("PPS verified: phc_sec=%d error=%+d ns", phc_sec, pps_err)
-    else:
-        log.info("PPS verification skipped — TICC provides servo feedback")
+        log.info("TICC-only: skipping EXTTS setup (no PHC)")
 
     if getattr(args, 'do_freq_est', False):
         from peppar_fix.do_freq_est import DOFreqEst
@@ -3023,7 +3200,7 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     if cm_phase is not None:
         return _cm_servo_epoch(ctx, args, n_epochs, dt_rx_ns, dt_rx_sigma)
 
-    ptp = ctx['ptp']
+    ptp = ctx.get('ptp')  # None in TICC-only mode
     servo = ctx['servo']
     scheduler = ctx['scheduler']
     qerr_store = ctx['qerr_store']
@@ -3719,7 +3896,6 @@ def _cleanup_servo(ctx):
     ctx['stop_pps'].set()
     if 'stop_ticc' in ctx:
         ctx['stop_ticc'].set()
-    ptp = ctx['ptp']
     if not ctx.get('freerun'):
         try:
             ctx['actuator'].adjust_frequency_ppb(0.0)
@@ -3735,11 +3911,13 @@ def _cleanup_servo(ctx):
             cm_phase.teardown()
         except Exception:
             pass
-    try:
-        ptp.disable_extts(ctx['extts_channel'])
-    except OSError:
-        pass  # EXTTS may not have been enabled (TICC-only mode)
-    ptp.close()
+    ptp = ctx.get('ptp')
+    if ptp is not None:
+        try:
+            ptp.disable_extts(ctx['extts_channel'])
+        except OSError:
+            pass  # EXTTS may not have been enabled (TICC-only mode)
+        ptp.close()
     if ctx['log_f']:
         ctx['log_f'].close()
     if ctx.get('ticc_log_f'):
@@ -4647,9 +4825,10 @@ Two-phase operation:
 
     args = ap.parse_args()
     _apply_host_config(args)
-    # --no-do overrides --servo from CLI or host config
+    # --no-do overrides --servo and --ticc-drive from CLI or host config
     if args.no_do:
         args.servo = None
+        args.ticc_drive = False
     # Apply defaults for args that are None after CLI + host config.
     # These were made nullable so host config can override them.
     if args.baud is None:
