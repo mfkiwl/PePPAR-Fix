@@ -495,7 +495,37 @@ The repo should treat these as platform configuration, not as incidental quirks.
 - [ ] Confirm which timescale the PHC should represent for the intended consumer
 - [ ] Record whether host-side monotonic timestamps are sufficient for correlation or whether a deeper kernel timestamp is needed
 
-## clkPoC3 / CM4 BCM54210PE (2026-04-13)
+## clkPoC3 / CM4 + OCXO + DAC (updated 2026-04-14)
+
+### Architecture: TICC-only servo with external DO
+
+clkPoC3 disciplines an external VCOCXO (CTI OSC5A2B02) via a DAC
+(AD5693R).  The servo loop does **not** use the CM4's PHC at all:
+
+```
+F9T PPS ────────────────────→ TICC chB (reference)
+OCXO 10 MHz → TADD → DO PPS → TICC chA (disciplined)
+                                  ↓
+                          engine reads TICC
+                          phase error (DO vs GNSS)
+                                  ↓
+                          engine writes DAC
+                          (adjusts OCXO frequency)
+
+DO PPS ────→ CM4 SYNC_IN → ts2phc disciplines bcm_phy_ptp
+                               ↓
+                          ptp4l GM (one-step sync)
+```
+
+The TICC provides the phase measurement.  The DAC steers the OCXO
+frequency.  The CM4's PHC is a **downstream consumer** of the
+disciplined DO PPS — it's disciplined by ts2phc from the DO PPS on
+SYNC_IN, then serves as the ptp4l grandmaster clock.  The PHC is
+not part of the servo loop.
+
+This means the engine runs with `--ticc-drive` and `--no-do` style
+servo: the TICC provides measurements, the DAC is the actuator, and
+EXTTS is not used by the engine (it's used by ts2phc instead).
 
 ### One-step sync required for PTP GM
 
@@ -522,6 +552,33 @@ reboots.
 
 - Raspberry Pi Compute Module 4 Rev 1.0
 - NIC: BCM54210PE PHY, bcmgenet MAC, 1 Gbps
-- PPS: F9T PPS wired to SYNC_IN pin
+- DO: CTI OSC5A2B02 OCXO, 10 MHz, via AD5693R DAC on I2C-1 (0x4C)
+- Divider: TADD-2 Mini (÷10M), ARM on GPIO 16
+- TICC: TICC #3 on `/dev/ticc3` — chA = DO PPS, chB = GNSS PPS
+- GNSS: F9T-3RD (ZED-F9T-20B) on `/dev/ttyACM1` at 9600 baud
+- PPS input: DO PPS wired to SYNC_IN pin (EXTTS for ts2phc)
 - PHC: `/dev/ptp0` (`bcm_phy_ptp`), 1 EXTTS, 1 PEROUT, 1 pin
 - IP: 10.168.13.9/24 (static, PTP LAN)
+
+### Engine invocation
+
+The engine runs the TICC-based servo loop without EXTTS.  Host config
+(`config/clkpoc3.toml`) provides `do_type = "vcocxo"` which triggers
+the TADD ARM + DAC bootstrap path.  ts2phc runs independently to
+discipline the PHC from the DO PPS on SYNC_IN.
+
+```sh
+# Engine: TICC servo + DAC actuator (no EXTTS, no PHC in loop)
+peppar-fix --ticc-drive --engine-arg --ticc-port --engine-arg /dev/ticc3
+
+# ts2phc: disciplines PHC from DO PPS on SYNC_IN (separate process)
+ts2phc -s generic -c /dev/ptp0
+```
+
+### TODO
+
+- Engine needs a TICC-only servo path that skips EXTTS enable
+  (currently always enables EXTTS even in TICC-drive mode, which
+  conflicts with ts2phc on the single-pin bcm_phy_ptp)
+- ts2phc systemd unit for clkPoC3
+- Validate end-to-end: TICC servo → DO disciplined → ts2phc → ptp4l GM

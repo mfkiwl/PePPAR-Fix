@@ -4279,6 +4279,7 @@ def _apply_host_config(args):
         "dac_type":         ("dac_type",         str),
         "tadd_gpio":        ("tadd_gpio",        int),
         "tadd_hold_s":      ("tadd_hold_s",      float),
+        "ticc_port":        ("ticc_port",        str),
         "phase_step_bias_ns": ("phase_step_bias_ns", float),
         "pmc_uds":          ("pmc",              str),
         "pmc_domain":       ("pmc_domain",       int),
@@ -4296,6 +4297,10 @@ def _apply_host_config(args):
             setattr(args, dest, conv(cfg[toml_key]))
         except (ValueError, TypeError) as e:
             log.warning("Host config: bad value for %s: %s", toml_key, e)
+
+    # Boolean flags: host config can enable but not override CLI
+    if cfg.get("ticc_drive") and not getattr(args, "ticc_drive", False):
+        args.ticc_drive = True
 
 
 # ── CLI ──────────────────────────────────────────────────────────────── #

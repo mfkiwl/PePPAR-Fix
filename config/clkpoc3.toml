@@ -3,7 +3,8 @@ serial = "/dev/ttyACM1"
 baud = 9600
 ubx_port = "USB"
 receiver = "f9t-l5"
-ptp_dev = "/dev/ptp0"
+# No ptp_dev — the engine does not use the CM4's PHC.
+# ts2phc disciplines bcm_phy_ptp from DO PPS on SYNC_IN independently.
 ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
 known_pos = "41.8430626,-88.1037190,201.671"
@@ -22,3 +23,8 @@ dac_type = "ad5693r"
 
 # TADD-2 Mini divider: ARM on GPIO 16, syncs 10 MHz → 1 PPS.
 tadd_gpio = 16
+
+# TICC #3: chA = DO PPS, chB = GNSS PPS.
+# Engine uses TICC differential measurement as servo input (--ticc-drive).
+ticc_port = "/dev/ticc3"
+ticc_drive = true
