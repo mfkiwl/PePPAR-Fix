@@ -207,7 +207,7 @@ ntrip_args() {
 }
 
 # Ensure state directories exist for state persistence
-mkdir -p state/receivers state/dos state/phcs data
+mkdir -p state/receivers state/dos state/phcs state/timestampers data
 
 # ── Step 1: Verify/configure receiver ───────────────────────────────────── #
 #

@@ -1680,9 +1680,14 @@ def _setup_servo(args, known_ecef, qerr_store):
     try:
         from peppar_fix import PtpDevice, PIServo, DisciplineScheduler
         from peppar_fix import compute_error_sources, ticc_only_error_source
+        from peppar_fix.timestamper_state import TimestamperParams
     except ImportError:
         log.error("peppar_fix library not available for servo")
         return 1
+
+    # Resolve timestamper noise parameters from state (or defaults)
+    ts_params = TimestamperParams.resolve(args)
+    log.info("Timestamper params: %s", ts_params)
 
     try:
         ptp = PtpDevice(args.servo)
@@ -1820,7 +1825,10 @@ def _setup_servo(args, known_ecef, qerr_store):
 
     if getattr(args, 'do_freq_est', False):
         from peppar_fix.do_freq_est import DOFreqEst
-        sigma_ticc = 0.178 if args.ticc_drive else 1.9
+        from peppar_fix.timestamper_state import TimestamperParams
+        ts_params = TimestamperParams.resolve(args)
+        log.info("Timestamper: %s", ts_params)
+        sigma_ticc = ts_params.measurement_noise_ns
         # Seed TCXO phase from bootstrap dt_rx so the filter starts in
         # full 4-state mode from epoch 1 (no mid-run transition).
         drift_path = getattr(args, 'drift_file', None) or 'data/drift.json'
@@ -1863,8 +1871,10 @@ def _setup_servo(args, known_ecef, qerr_store):
                  bootstrap_dt_rx_ns is not None)
     elif getattr(args, 'kalman_servo', False):
         from peppar_fix.kalman_servo import KalmanServo
-        # Measurement noise: TICC+qErr if TICC-drive, EXTTS+qErr otherwise
-        sigma_meas = 0.178 if args.ticc_drive else 1.9
+        from peppar_fix.timestamper_state import TimestamperParams
+        ts_params = TimestamperParams.resolve(args)
+        log.info("Timestamper: %s", ts_params)
+        sigma_meas = ts_params.measurement_noise_ns
         servo = KalmanServo(
             sigma_meas_ns=sigma_meas,
             sigma_phase_ns=0.92,   # DO floor from adjfine noise test
@@ -2151,6 +2161,7 @@ def _setup_servo(args, known_ecef, qerr_store):
         'phc_dev': args.servo,
         'drift_file': getattr(args, 'drift_file', None) or 'data/drift.json',
         'receiver_unique_id': getattr(args, 'receiver_unique_id', None),
+        'ts_params': ts_params,
         'actuator': actuator,
         'cm_phase_source': cm_phase_source,
         'servo': servo,
@@ -2784,15 +2795,17 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                      and qerr_for_extts_pps_ns is not None)
         if use_extts:
             pps_err_extts_qerr_ns = pps_err_extts_ns + qerr_for_extts_pps_ns
-            sources = ticc_only_error_source(pps_err_extts_qerr_ns,
-                                             args.ticc_confidence_ns)
+            _ticc_conf = (ctx.get('ts_params').qerr_confidence_ns
+                         if ctx.get('ts_params') else args.ticc_confidence_ns)
+            sources = ticc_only_error_source(pps_err_extts_qerr_ns, _ticc_conf)
             if ctx.get('ticc_drive_source') != 'extts':
                 log.info("  Servo drive: EXTTS (|ticc_err|=%.0f ns > %.0f threshold)",
                          abs(pps_err_ticc_ns), TICC_DRIVE_THRESHOLD_NS)
                 ctx['ticc_drive_source'] = 'extts'
         else:
-            sources = ticc_only_error_source(pps_err_ticc_qerr_ns,
-                                             args.ticc_confidence_ns)
+            _ticc_conf = (ctx.get('ts_params').qerr_confidence_ns
+                         if ctx.get('ts_params') else args.ticc_confidence_ns)
+            sources = ticc_only_error_source(pps_err_ticc_qerr_ns, _ticc_conf)
             if ctx.get('ticc_drive_source') != 'ticc':
                 log.info("  Servo drive: TICC (|ticc_err|=%.0f ns ≤ %.0f threshold)",
                          abs(pps_err_ticc_ns), TICC_DRIVE_THRESHOLD_NS)
@@ -2818,11 +2831,14 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                     if a is not None]
             if ages:
                 corr_age_for_inflation = max(ages)
+        _ts = ctx.get('ts_params')
         sources = compute_error_sources(
             pps_err_extts_ns,
             None if args.no_qerr else qerr_for_extts_pps_ns,
             dt_rx_ns,
             dt_rx_sigma,
+            pps_confidence=_ts.pps_confidence_ns if _ts else 20.0,
+            qerr_confidence=_ts.qerr_confidence_ns if _ts else 3.0,
             carrier_max_sigma=args.carrier_max_sigma_ns,
             ppp_cal=None if args.no_ppp else ppp_cal,
             carrier_tracker=(None if getattr(args, 'no_carrier', False)
