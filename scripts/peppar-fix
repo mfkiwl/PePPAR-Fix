@@ -322,8 +322,6 @@ fi
 
 echo "=== peppar-fix: Step 3 — Unified engine ==="
 
-servo_backoff=5
-
 build_servo_args() {
     local args=(
         --serial "$SERIAL"
@@ -387,54 +385,41 @@ build_servo_args() {
     echo "${args[@]}"
 }
 
-while true; do
-    set +e
-    # shellcheck disable=SC2046
-    "$PYTHON_BIN" "$SCRIPT_DIR/peppar_fix_engine.py" $(build_servo_args)
-    rc=$?
-    set -e
+# All retry logic (PPS retry, PHC re-bootstrap, position re-bootstrap) is
+# now handled internally by the engine.  The wrapper just invokes it once.
+# Systemd Restart=on-failure handles crash recovery.
+set +e
+# shellcheck disable=SC2046
+"$PYTHON_BIN" "$SCRIPT_DIR/peppar_fix_engine.py" $(build_servo_args)
+rc=$?
+set -e
 
-    # clockClass is now managed internally by the engine.
-    # The engine degrades to 248 (freerun) on exit and promotes to
-    # 52 (initialized) after bootstrap / 6 (locked) during tracking.
-
-    case $rc in
-        0)
-            echo "peppar-fix: clean shutdown"
-            # If this was an explicit --freerun, build the DO
-            # characterization file from the resulting servo log.
-            if [[ -n "$FREERUN" ]] && [[ -n "$LOG_FILE" ]] && [[ -f "$LOG_FILE" ]]; then
-                do_label="${PEPPAR_DO_LABEL:-${PTP_PROFILE:-unknown}}"
-                echo "=== Building DO characterization from $LOG_FILE ==="
-                "$PYTHON_BIN" "$SCRIPT_DIR/../tools/build_do_characterization.py" \
-                    --input "$LOG_FILE" \
-                    --output "$DO_CHAR_FILE" \
-                    --do-label "$do_label" \
-                    --phc "$PTP_DEV" || true
-            fi
+case $rc in
+    0)
+        echo "peppar-fix: clean shutdown"
+        # If this was an explicit --freerun, build the DO
+        # characterization file from the resulting servo log.
+        if [[ -n "$FREERUN" ]] && [[ -n "$LOG_FILE" ]] && [[ -f "$LOG_FILE" ]]; then
+            do_label="${PEPPAR_DO_LABEL:-${PTP_PROFILE:-unknown}}"
+            echo "=== Building DO characterization from $LOG_FILE ==="
+            "$PYTHON_BIN" "$SCRIPT_DIR/../tools/build_do_characterization.py" \
+                --input "$LOG_FILE" \
+                --output "$DO_CHAR_FILE" \
+                --do-label "$do_label" \
+                --phc "$PTP_DEV" || true
+        fi
+        exit 0
+        ;;
+    5)
+        if [[ -n "$FREERUN" ]]; then
+            echo "peppar-fix: freerun auto-stop (PPS error exceeded threshold)"
             exit 0
-            ;;
-        3)
-            echo "peppar-fix: no PPS — retry in ${servo_backoff}s"
-            sleep "$servo_backoff"
-            servo_backoff=$((servo_backoff * 2))
-            [[ $servo_backoff -gt 300 ]] && servo_backoff=300
-            continue
-            ;;
-        5)
-            if [[ -n "$FREERUN" ]]; then
-                echo "peppar-fix: freerun auto-stop (PPS error exceeded threshold)"
-                exit 0
-            fi
-            # PHC divergence is now handled internally by the engine's
-            # re-bootstrap loop. If the engine still returns 5, all
-            # internal attempts failed — treat as fatal.
-            echo "peppar-fix: PHC diverged — engine re-bootstrap exhausted" >&2
-            exit 5
-            ;;
-        *)
-            echo "peppar-fix: fatal error (exit code $rc)" >&2
-            exit "$rc"
-            ;;
-    esac
-done
+        fi
+        echo "peppar-fix: PHC diverged — engine re-bootstrap exhausted" >&2
+        exit 5
+        ;;
+    *)
+        echo "peppar-fix: fatal error (exit code $rc)" >&2
+        exit "$rc"
+        ;;
+esac

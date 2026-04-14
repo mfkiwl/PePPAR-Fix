@@ -1128,7 +1128,23 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 return 1
             log.info("DO bootstrap succeeded (%s)", getattr(args, 'do_type', 'phc'))
 
-        servo_result = _setup_servo(args, known_ecef, qerr_store, ptp=ptp)
+        # Set up servo with PPS retry (absorbs wrapper's exit-code-3 retry).
+        # No-PPS (return 3) is retryable — PPS may appear after a few seconds
+        # if the receiver just started or the cable was reconnected.
+        pps_max_retries = 3
+        pps_backoff = 5
+        servo_result = None
+        for pps_attempt in range(1, pps_max_retries + 1):
+            servo_result = _setup_servo(args, known_ecef, qerr_store, ptp=ptp)
+            if not isinstance(servo_result, int) or servo_result != 3:
+                break
+            if pps_attempt < pps_max_retries:
+                log.warning("No PPS — retry %d/%d in %ds",
+                            pps_attempt, pps_max_retries, pps_backoff)
+                time.sleep(pps_backoff)
+                pps_backoff = min(pps_backoff * 2, 60)
+            else:
+                log.error("No PPS after %d attempts — giving up", pps_max_retries)
         # Promote clockClass to 52 (initialized) after successful bootstrap
         # and servo setup — mirrors what the wrapper's
         # promote_clock_class_initialized did.
