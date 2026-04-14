@@ -22,6 +22,8 @@ state/
     <unique_id>.json        # one per physical disciplined oscillator
   phcs/
     <unique_id>.json        # one per PTP hardware clock
+  timestampers/
+    <unique_id>.json        # one per TICC or EXTTS channel
 ```
 
 `data/` remains for experimental results, captured logs, and runtime
@@ -175,7 +177,70 @@ ClockMatrix or external VCOCXO, this points to a separate DO file.
 hardware, independent of the oscillator.  EXTTS resolution determines
 the noise floor of PPS measurements.  PEROUT quantization affects
 PPS output alignment.  These are properties of the counter/comparator
-silicon, not the crystal.
+silicon, not the crystal.  See Timestamper section below.
+
+### Timestamper (`state/timestampers/<unique_id>.json`)
+
+A timestamper is anything that measures PPS edges: EXTTS channels
+on PHCs, or standalone instruments like a TICC.  Timestampers have
+characterized noise properties that the servo needs to know —
+currently these are hardcoded magic numbers scattered across the
+engine (`sigma_ticc = 0.178`, `pps_confidence = 20.0`, etc.).
+
+Keyed by a composite unique ID: TICC by Arduino serial number,
+EXTTS by PHC MAC + channel index.
+
+```json
+{
+  "unique_id": "ticc-95037323535351803130",
+  "type": "ticc",
+  "label": "TICC #1",
+  "resolution_ps": 60,
+  "single_shot_noise_ns": 0.060,
+  "measurement_noise_ns": 0.178,
+  "updated": "2026-04-13T12:00:00Z",
+  "method": "skeptical calibration 2026-03-19"
+}
+```
+
+```json
+{
+  "unique_id": "extts-54494d45006b-ch0",
+  "type": "extts",
+  "phc_unique_id": "54:49:4d:45:00:6b",
+  "channel": 0,
+  "resolution_ns": 8.0,
+  "measurement_noise_ns": 2.9,
+  "identical_adjacent_pct": 0.0,
+  "updated": "2026-04-01T12:00:00Z",
+  "method": "ticc-baseline analysis"
+}
+```
+
+**Where timestamper parameters replace hardcoded values:**
+
+1. **Kalman filter R matrix** (`_setup_servo`): `sigma_meas` is
+   currently `0.178 if ticc_drive else 1.9` — should come from
+   the active timestamper's `measurement_noise_ns`.
+
+2. **Error source competition** (`compute_error_sources`):
+   `pps_confidence=20.0` and `qerr_confidence=3.0` are hardcoded
+   defaults — should be derived from the EXTTS or TICC
+   characterization.  PPS confidence ≈ EXTTS noise RSS with F9T
+   sawtooth.  PPS+qErr confidence ≈ EXTTS noise alone (qErr
+   removes the sawtooth).
+
+3. **TDEV interpretation**: knowing the timestamper's noise floor
+   tells you when measured TDEV is hitting the instrument vs the
+   oscillator being measured.
+
+4. **qVIR validation**: expected improvement ratio depends on the
+   timestamper's quantization relative to qErr precision.
+
+The characterization values come from lab measurements (TICC
+calibration, EXTTS baseline analysis) and are stable properties
+of the hardware — they don't change between runs unless the
+instrument is recalibrated.
 
 ## Identity discovery
 
@@ -187,6 +252,7 @@ silicon, not the crystal.
 | PHC / NIC | MAC address | `ethtool -P <dev>` or sysfs |
 | DO (bundled) | Same as PHC | Inherited |
 | TICC | Arduino serial | USB descriptor (udev) |
+| EXTTS channel | PHC MAC + channel index | Derived from PHC discovery |
 | F10T on ArduSimple | FTDI serial + SEC-UNIQID | USB descriptor + UBX |
 
 ### What requires manual labeling
@@ -271,6 +337,19 @@ back to `data/` for backwards compatibility.
 4. Move DO frequency offset from `data/drift.json` into DO state
 5. Move TCXO frequency offset into receiver state
 6. `data/drift.json` becomes a backwards-compatibility shim that reads from both
+
+### Phase 2.5: Timestamper parameterization
+
+1. Add `state/timestampers/` load/save
+2. Replace hardcoded `sigma_ticc = 0.178`, `sigma_meas = 1.9`,
+   `pps_confidence = 20.0`, `qerr_confidence = 3.0` with values
+   loaded from timestamper state
+3. `compute_error_sources()` takes a timestamper object instead of
+   individual confidence parameters
+4. `_setup_servo()` reads timestamper noise from state, not from
+   conditional expressions
+5. Characterization tools (`ticc_calibration.py`, baseline analysis)
+   write results to `state/timestampers/`
 
 ### Phase 3: Multi-receiver support
 
