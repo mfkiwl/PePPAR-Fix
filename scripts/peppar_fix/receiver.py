@@ -431,6 +431,57 @@ def query_receiver_identity(port, baud=9600, ser=None, ubr=None):
     return result
 
 
+def discover_receivers(ports=None, baud_rates=None):
+    """Scan serial ports for u-blox receivers.
+
+    Tries each port at each baud rate, queries identity via
+    query_receiver_identity().  Skips ports that are busy or
+    don't respond.
+
+    Args:
+        ports: list of serial port paths to scan.  If None,
+            scans /dev/ttyACM*, /dev/ttyUSB*, /dev/gnss*.
+        baud_rates: list of baud rates to try.  Default: [9600, 115200, 460800].
+
+    Returns:
+        list of (port, baud, identity) tuples for each discovered receiver.
+    """
+    import glob as _glob
+
+    if ports is None:
+        ports = sorted(set(
+            _glob.glob("/dev/ttyACM*") +
+            _glob.glob("/dev/ttyUSB*") +
+            _glob.glob("/dev/gnss*") +
+            _glob.glob("/dev/gnss-*")
+        ))
+        # Resolve symlinks and deduplicate
+        seen_real = set()
+        unique_ports = []
+        for p in ports:
+            real = os.path.realpath(p)
+            if real not in seen_real:
+                seen_real.add(real)
+                unique_ports.append(p)
+        ports = unique_ports
+
+    if baud_rates is None:
+        baud_rates = [9600, 115200, 460800]
+
+    results = []
+    for port in ports:
+        for baud in baud_rates:
+            try:
+                identity = query_receiver_identity(port, baud)
+                if identity is not None:
+                    results.append((port, baud, identity))
+                    break  # Found receiver on this port, skip other bauds
+            except Exception as e:
+                log.debug("No receiver on %s@%d: %s", port, baud, e)
+                continue
+    return results
+
+
 def wait_ack(ubr, cls_name="CFG", msg_name="VALSET", timeout=3.0):
     """Wait for UBX-ACK-ACK or UBX-ACK-NAK.
 
