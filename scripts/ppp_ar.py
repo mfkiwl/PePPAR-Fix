@@ -24,7 +24,7 @@ import numpy as np
 
 from solve_pseudorange import C
 from solve_ppp import N_BASE
-from lambda_ar import lambda_resolve
+from lambda_ar import lambda_resolve, lambda_decorrelate, bootstrap_success_rate
 
 log = logging.getLogger(__name__)
 
@@ -128,6 +128,7 @@ class NarrowLaneResolver:
         self._fixed = {}  # sv -> {'n1': int, 'a_if_fixed': float}
         self.last_ratio = 0.0   # LAMBDA ratio test value (0 = not attempted)
         self.last_method = ""   # "lambda" or "rounding"
+        self.last_success_rate = 0.0  # bootstrap success rate (0 = not computed)
 
     def attempt(self, filt, mw_tracker):
         """Try to fix ambiguities in the PPPFilter.
@@ -255,11 +256,23 @@ class NarrowLaneResolver:
                 Qa_nl[i, j] = filt.P[si_arr[i], si_arr[j]] / (
                     params[i][1] * params[j][1])  # lambda_nl_i * lambda_nl_j
 
+        # Compute bootstrap success rate for diagnostics before resolving
+        eigvals = np.linalg.eigvalsh(Qa_nl)
+        Qa_reg = Qa_nl.copy()
+        if eigvals.min() <= 0:
+            Qa_reg += np.eye(n_amb) * max(1e-10, -eigvals.min() * 2)
+        _, _, D_diag = lambda_decorrelate(Qa_reg)
+        self.last_success_rate = bootstrap_success_rate(D_diag)
+
         fixed_vec, n_fixed, ratio, mask = lambda_resolve(
-            n1_vec, Qa_nl, ratio_threshold=2.0, min_fixed=4)
+            n1_vec, Qa_nl, ratio_threshold=2.0, min_fixed=4,
+            min_success_rate=0.999)
 
         if fixed_vec is None:
             self.last_ratio = ratio
+            if self.last_success_rate < 0.999:
+                log.debug("LAMBDA skipped: bootstrap P=%.4f (need 0.999), "
+                          "%d candidates", self.last_success_rate, n_amb)
             return {}
 
         self.last_ratio = ratio
@@ -277,10 +290,10 @@ class NarrowLaneResolver:
             self._apply_fix(filt, si, a_if_fixed)
             self._fixed[sv] = {'n1': n1_int, 'a_if_fixed': a_if_fixed}
             newly_fixed[sv] = n1_int
-            log.info("NL fixed (LAMBDA): %s N1=%d (ratio=%.1f, "
+            log.info("NL fixed (LAMBDA): %s N1=%d (ratio=%.1f, P=%.4f, "
                      "%d/%d fixed, A_IF: %.4f → %.4f m)",
-                     sv, n1_int, ratio, n_fixed, n_amb,
-                     filt.x[si], a_if_fixed)
+                     sv, n1_int, ratio, self.last_success_rate,
+                     n_fixed, n_amb, filt.x[si], a_if_fixed)
 
         return newly_fixed
 
@@ -355,4 +368,6 @@ class NarrowLaneResolver:
         s = f"NL: {self.n_fixed} fixed"
         if self.last_ratio > 0:
             s += f" R={self.last_ratio:.1f}"
+        if self.last_success_rate > 0:
+            s += f" P={self.last_success_rate:.3f}"
         return s

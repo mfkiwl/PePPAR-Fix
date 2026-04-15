@@ -6,7 +6,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from lambda_ar import lambda_decorrelate, lambda_search, lambda_resolve
+from lambda_ar import (lambda_decorrelate, lambda_search, lambda_resolve,
+                       bootstrap_success_rate)
 
 
 def test_decorrelation():
@@ -42,13 +43,11 @@ def test_known_answer():
     n = 6
     true_integers = np.array([10, -3, 7, 0, 5, -8])
 
-    # Covariance: correlated but well-conditioned
-    A = np.random.randn(n, n) * 0.05
-    Qa = A @ A.T + np.eye(n) * 0.02
+    # Tight diagonal covariance — bootstrap P > 0.999
+    Qa = np.eye(n) * 0.01
 
-    # Float = true + noise drawn from Qa
-    L_chol = np.linalg.cholesky(Qa)
-    noise = L_chol @ np.random.randn(n) * 0.3
+    # Float = true + small noise
+    noise = np.random.randn(n) * 0.05
     a_float = true_integers.astype(float) + noise
 
     fixed, n_fixed, ratio, mask = lambda_resolve(a_float, Qa, ratio_threshold=1.5)
@@ -121,10 +120,58 @@ def test_partial_ar():
           f"mask={mask})")
 
 
+def test_bootstrap_success_rate():
+    """Bootstrap success rate: high for tight covariance, low for loose."""
+    # Tight covariance — should have high success rate
+    D_tight = np.array([0.01, 0.01, 0.01, 0.01, 0.01])
+    p_tight = bootstrap_success_rate(D_tight)
+    assert p_tight > 0.999, f"Tight P={p_tight:.6f}, expected > 0.999"
+
+    # Loose covariance — should have low success rate
+    D_loose = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
+    p_loose = bootstrap_success_rate(D_loose)
+    assert p_loose < 0.1, f"Loose P={p_loose:.6f}, expected < 0.1"
+
+    # Mixed — one bad dimension kills it
+    D_mixed = np.array([0.01, 0.01, 0.01, 0.01, 2.0])
+    p_mixed = bootstrap_success_rate(D_mixed)
+    assert p_mixed < 0.5, f"Mixed P={p_mixed:.6f}, expected < 0.5"
+
+    print(f"  bootstrap success rate: PASS (tight={p_tight:.4f}, "
+          f"loose={p_loose:.4f}, mixed={p_mixed:.4f})")
+
+
+def test_success_rate_gate():
+    """LAMBDA should reject when bootstrap success rate is too low."""
+    np.random.seed(42)
+    n = 5
+    true_integers = np.array([1, 2, 3, 4, 5])
+
+    # Covariance where ratio test would pass but P(correct) is low
+    # Moderate noise — ratio might be ok but bootstrap says no
+    Qa = np.eye(n) * 0.3
+    a_float = true_integers + np.random.randn(n) * 0.1
+
+    # With strict success rate gate
+    fixed, nf, ratio, mask = lambda_resolve(
+        a_float, Qa, ratio_threshold=1.5, min_success_rate=0.999)
+
+    # Should be rejected by bootstrap gate
+    if fixed is not None:
+        # If it passed, the success rate must have been high enough
+        _, _, D = lambda_decorrelate(Qa)
+        p = bootstrap_success_rate(D)
+        assert p >= 0.999, f"Accepted with P={p:.4f} < 0.999"
+
+    print(f"  success rate gate: PASS (fixed={'yes' if fixed is not None else 'no'})")
+
+
 if __name__ == "__main__":
     print("LAMBDA AR tests:")
     test_decorrelation()
     test_known_answer()
     test_ratio_rejects_ambiguous()
     test_partial_ar()
+    test_bootstrap_success_rate()
+    test_success_rate_gate()
     print("All tests passed.")

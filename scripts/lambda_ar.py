@@ -15,6 +15,7 @@ Reference: RTKLIB src/lambda.c (Takasu), de Jonge & Tiberius 1996.
 """
 
 import numpy as np
+from scipy.stats import norm
 
 
 def _ldl(Q):
@@ -185,7 +186,35 @@ def _zigzag(s):
     return sign * ((s + 1) // 2)
 
 
-def lambda_resolve(a_float, Qa, ratio_threshold=2.0, min_fixed=4):
+def bootstrap_success_rate(D):
+    """Bootstrap success rate (Teunissen 1999).
+
+    Estimates P(LAMBDA returns the correct integer vector) from the
+    decorrelated LDL^T diagonal.  Each dimension contributes independently:
+      P_i = 2*Phi(1/(2*sqrt(D[i]))) - 1
+    where Phi is the standard normal CDF.
+
+    When D[i] is large (uncertain ambiguity), P_i ≈ 0 → product → 0.
+    When D[i] is small (tight ambiguity), P_i ≈ 1 → product preserved.
+
+    Args:
+        D: diagonal vector from decorrelated LDL^T
+
+    Returns:
+        float in [0, 1]: probability that the integer solution is correct
+    """
+    p = 1.0
+    for d in D:
+        if d <= 0:
+            return 0.0
+        p *= 2.0 * norm.cdf(0.5 / np.sqrt(d)) - 1.0
+        if p < 1e-10:
+            return 0.0  # early exit — already negligible
+    return p
+
+
+def lambda_resolve(a_float, Qa, ratio_threshold=2.0, min_fixed=4,
+                   min_success_rate=0.999):
     """Full LAMBDA AR with partial AR fallback.
 
     Args:
@@ -193,6 +222,9 @@ def lambda_resolve(a_float, Qa, ratio_threshold=2.0, min_fixed=4):
         Qa: (n, n) ambiguity covariance matrix
         ratio_threshold: accept if Omega(2nd)/Omega(1st) > this
         min_fixed: minimum ambiguities for partial AR
+        min_success_rate: minimum bootstrap success rate to accept
+            (Teunissen 1999).  Prevents premature fixing when the
+            float covariance is too large for reliable integers.
 
     Returns:
         (fixed_vector, n_fixed, ratio, fixed_mask)
@@ -218,6 +250,13 @@ def lambda_resolve(a_float, Qa, ratio_threshold=2.0, min_fixed=4):
             Qa_sub += np.eye(len(indices)) * max(1e-10, -eigvals.min() * 2)
 
         Z, L, D = lambda_decorrelate(Qa_sub)
+
+        # Bootstrap success rate gate: don't even search if the
+        # covariance says P(correct) is too low
+        p_success = bootstrap_success_rate(D)
+        if p_success < min_success_rate:
+            indices = _drop_worst(a_sub, Qa_sub, indices)
+            continue
 
         z_float = Z.T @ a_sub
         candidates = lambda_search(z_float, L, D, n_candidates=2)
