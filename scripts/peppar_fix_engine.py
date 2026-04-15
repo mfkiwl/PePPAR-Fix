@@ -1349,6 +1349,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
 
     prev_t = None
     n_epochs = 0
+    n_epochs_total = 0  # counts all observation epochs, even when gate stalls
     start_time = time.time()
     skip_stats = {
         "gate_wait_obs": 0,
@@ -1420,6 +1421,20 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 continue
             if added_obs:
                 last_obs_input_wall = time.monotonic()
+
+            # Forward observations to AntPosEst background thread.
+            # Feed from obs_history head *before* the PPS correlation gate,
+            # so AntPosEst runs even when the servo's gate is stalled (no
+            # PPS events, EXTTS wedge, etc.).  AntPosEst only needs raw
+            # GNSS observations for the PPPFilter — no PPS correlation.
+            if ape_thread is not None and added_obs:
+                # Peek at the newest observation in the history (rightmost).
+                # Don't pop — the servo still needs it for correlation.
+                newest = obs_history[-1]
+                gps_time_ape, observations_ape = newest
+                if n_epochs_total % ape_thread.decimation == 0:
+                    ape_thread.feed(gps_time_ape, observations_ape)
+                n_epochs_total += 1
 
             # ── Queue depth monitoring ──
             _check_queue_depths(
@@ -1538,12 +1553,6 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 log.info(f"  [{n_epochs}] Dropped {dropped_obs} expired observation epochs")
             skip_stats["obs_dropped_expired"] += dropped_obs
             gps_time, observations = obs_event
-
-            # Forward observations to AntPosEst background thread.
-            # Decimation is 1 (every epoch) until RESOLVED, then drops to
-            # resolved_decimation to save CPU while maintaining AR lock.
-            if ape_thread is not None and n_epochs % ape_thread.decimation == 0:
-                ape_thread.feed(gps_time, observations)
 
             # After a PHC step, the filter's clock state is stale.
             # Reset dt_rx to near-zero so the servo doesn't over-correct.
