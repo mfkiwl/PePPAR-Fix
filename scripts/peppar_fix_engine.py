@@ -3676,9 +3676,15 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             # proportionally to error magnitude: at 500 ns use full kp,
             # at 5 ns use kp/100.  This keeps corrections below 1 ppb
             # when settled while still pulling in from moderate errors.
-            error_ratio = max(abs(avg_error), 5.0) / 500.0
-            adaptive_scale = max(0.01, min(1.0, error_ratio))
-            gain_scale *= adaptive_scale
+            #
+            # Skip attenuation for the first 60 epochs: the bootstrap
+            # frequency measurement has ~1 ppb uncertainty, which creates
+            # a phase ramp the servo needs full gain to correct.  After
+            # 60 epochs (~1 min) the PI has had time to absorb the residual.
+            if n_epochs > 60:
+                error_ratio = max(abs(avg_error), 5.0) / 500.0
+                adaptive_scale = max(0.01, min(1.0, error_ratio))
+                gain_scale *= adaptive_scale
 
         is_ekf = getattr(args, 'do_freq_est', False)
 
