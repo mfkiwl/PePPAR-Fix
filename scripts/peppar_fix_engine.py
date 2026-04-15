@@ -3214,6 +3214,18 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             # Positive = DO is late (needs to advance).
             # ticc_measurement.diff_ns is chA-chB (do_pps-gnss_pps),
             # so we negate to get gnss_pps-do_pps.
+            #
+            # Auto-capture: on the first valid TICC measurement, set the
+            # target to the current differential.  This zeros the initial
+            # offset (cable delay, ARM alignment) so the servo starts at
+            # ~0 error and tracks drift from there.  For PHC+PEROUT the
+            # initial diff is ~0 anyway; for external DOs it can be µs.
+            if (ctx.get('ticc_target_auto') is None
+                    and args.ticc_target_ns == 0.0):
+                args.ticc_target_ns = ticc_measurement.diff_ns
+                ctx['ticc_target_auto'] = ticc_measurement.diff_ns
+                log.info("TICC target auto-captured: %.1f ns (initial chA-chB)",
+                         args.ticc_target_ns)
             pps_err_ticc_ns = -(ticc_measurement.diff_ns - args.ticc_target_ns)
             # Sanity: if the TICC diff is larger than 100 ms, PEROUT is
             # grossly misaligned (e.g., 500 ms offset).  Log loudly and
