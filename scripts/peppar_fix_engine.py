@@ -2211,10 +2211,27 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
             log.error("TICC-only servo requires do_type=vcocxo (got %s). "
                       "PHC-based DOs need --servo.", do_type)
             return False
-        # For VCOCXO without PHC: ARM TADD first (syncs DO PPS to GNSS PPS),
-        # then use TICC to measure the resulting frequency offset.
-        # Wait a few seconds after ARM for the divider to settle before
-        # measuring — the first PPS edges after ARM can be unstable.
+        # For VCOCXO without PHC: reset DAC to center, ARM TADD, then
+        # measure frequency.  The DAC must be at a known state before
+        # TICC measures — otherwise a stale DAC setting from a prior
+        # run corrupts the frequency estimate (the TICC measures
+        # crystal + old_dac, but _bootstrap_compute_base_freq assumes
+        # current_adj=0).
+        # TODO(cleanup): this duplicates DacActuator.setup() — the
+        # TICC-drive refactor should unify the DAC lifecycle.
+        dac_bus = getattr(args, 'dac_bus', None)
+        if dac_bus is not None:
+            from peppar_fix.dac_actuator import DacActuator
+            _dac_reset = DacActuator(
+                bus_num=dac_bus,
+                addr=int(getattr(args, 'dac_addr', '0x60'), 0),
+                bits=getattr(args, 'dac_bits', 12),
+                ppb_per_code=getattr(args, 'dac_ppb_per_code', 1.0),
+                dac_type=getattr(args, 'dac_type', 'mcp4725'),
+            )
+            _dac_reset.setup()  # writes center code
+            _dac_reset.teardown()
+            log.info("DAC reset to center before TICC measurement")
         _do_tadd_arm(args)
         settle_s = 3
         log.info("Waiting %ds for post-ARM settling before TICC measurement...",
