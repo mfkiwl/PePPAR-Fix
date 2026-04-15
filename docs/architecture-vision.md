@@ -20,10 +20,26 @@ need Position only as a means to an end.  **The end is Time.**
 We need an approximate position fix to even begin tracking time
 differences between GPS and the DO.  But we also need a precise
 position fix to reduce time phase errors — every centimeter of
-position error is ~33 ps of clock error.  PePPAR-Fix clocks must all
-agree on (1) the length of a second and (2) when the second starts.
-That's why we want AR: it pushes the position to cm level, which
-pushes the time-of-second-boundary error below 100 ps.
+position error is ~33 ps of clock error.  This isn't a nice-to-have:
+
+**Hard requirement: position agreement < 10 cm (< 1 ns time phase).**
+
+Two clocks on the same ARP, or two sequential runs on the same ARP,
+must converge to the same position within 10 cm.  At 3 ns/m, a 10 cm
+position disagreement is 300 ps of GPS time phase uncertainty — already
+a significant fraction of the error budget.  At 1 m disagreement
+(typical float PPP after 10 minutes), the GPS time phase is uncertain
+by 3 ns, which dominates every other error source in the system.
+
+This is why AR is not optional for the production path.  Float PPP
+converges to ~8 cm σ in 10 minutes but the *actual* position drifts
+by meters over hours (tropospheric, ionospheric, solid earth tides).
+Only integer-fixed ambiguities pin the position to the cm level and
+hold it there across time.
+
+PePPAR-Fix clocks must all agree on (1) the length of a second and
+(2) when the second starts.  AR pushes the position to cm level,
+which pushes the time-of-second-boundary error below 100 ps.
 
 This motivates the two-estimator architecture: one that answers
 "where is the antenna?" (position, long timescale, AR) and one that
