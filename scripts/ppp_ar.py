@@ -120,7 +120,7 @@ class NarrowLaneResolver:
     Fixes the PPPFilter ambiguity state when N1 is close to integer.
     """
 
-    def __init__(self, frac_threshold=0.15, sigma_threshold=0.12):
+    def __init__(self, frac_threshold=0.10, sigma_threshold=0.08):
         self.frac_threshold = frac_threshold    # |N1_frac| < this to fix
         self.sigma_threshold = sigma_threshold  # sigma_N1 < this to fix
         self._fixed = {}  # sv -> {'n1': int, 'a_if_fixed': float}

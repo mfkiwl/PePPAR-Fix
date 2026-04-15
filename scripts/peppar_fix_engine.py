@@ -1105,12 +1105,31 @@ class AntPosEstThread(threading.Thread):
         nl = self._nl
         corrections = self._corrections
         gate = CorrectionFreshnessGate()
+        last_epoch_mono = time.monotonic()
+        n_timeouts = 0
+        n_corr_skip = 0
 
         while not self._stop.is_set():
             try:
                 gps_time, observations = self.obs_queue.get(timeout=30)
             except queue.Empty:
+                n_timeouts += 1
+                idle_s = time.monotonic() - last_epoch_mono
+                log.warning(
+                    "AntPosEstThread heartbeat: no observations for %.0fs "
+                    "(timeouts=%d, epochs=%d, corr_skips=%d, qsize=%d, "
+                    "state=%s, prev_t=%s, amb=%d, stop=%s)",
+                    idle_s, n_timeouts, self._n_epochs, n_corr_skip,
+                    self.obs_queue.qsize(),
+                    self._ape_sm.state.value,
+                    self._prev_t,
+                    len(filt.sv_to_idx) if filt.x is not None else -1,
+                    self._stop.is_set(),
+                )
                 continue
+
+            n_timeouts = 0
+            last_epoch_mono = time.monotonic()
 
             # Correction freshness check (use relaxed thresholds — we're
             # background, not real-time)
@@ -1121,6 +1140,7 @@ class AntPosEstThread(threading.Thread):
                 max_ssr_age_s=600,
             )
             if not ok:
+                n_corr_skip += 1
                 continue
 
             # EKF predict
