@@ -73,6 +73,30 @@ suggested `tmreg_lock` (incorporated in v3).  Discussion ongoing.  See
 `drivers/igc-adjfine-fix/upstream-submission.txt` and
 `upstream-reply-v3.txt`.
 
+**Patch 2 limitations (discovered 2026-04-15)**: The v3 patch reduces
+but does not eliminate TX timestamp failures.  The TSYNCTXCTL disable
+window (~1 µs per adjfine call) can strand an in-flight TX timestamp
+capture.  A single stranded slot sits occupied for 15 seconds
+(IGC_PTP_TX_TIMEOUT).  During those 15 seconds, ptp4l continues
+attempting TX timestamps which may also strand, cascading into a
+permanent wedge where all 4 TX timestamp slots are occupied and every
+subsequent attempt times out.  Observed MTBF on TimeHat: ~44 minutes
+at 1 Hz adjfine + 1 Hz ptp4l sync.  Once wedged, the subsystem does
+not self-recover — it stays broken until driver reload or reboot.
+
+The timeout handler (`igc_ptp_tx_hang()`) clears stranded slots after
+15 seconds, but the cascade happens faster than the recovery.  A more
+robust fix would need to either: (a) make `igc_ptp_tx_hang()` clear
+ALL pending slots atomically when any timeout fires, preventing the
+cascade, or (b) add a brief delay after TSYNCTXCTL re-enable to let
+any in-flight capture complete before the next TX attempt.
+
+Additionally, EXTTS stops delivering events after the TX timestamp
+subsystem wedges, even though EXTTS uses a different hardware path.
+This kills PPS delivery and prevents the servo from running.  The
+mechanism linking TX timestamp wedge to EXTTS failure is not yet
+understood — it may be shared interrupt or register state.
+
 ## How patches are composed
 
 Both patches target `igc_ptp.c` in the same kernel generation (6.12).
@@ -133,6 +157,7 @@ sudo journalctl -u ptp4l --since "1 hour ago" | grep -c FAULTY
 | 2026-04-01 | TimeHat | Tx timestamp timeout every ~30 min | adjfine race (Patch 2 missing) | Discovered bug, wrote patches |
 | 2026-04-07 | MadHat | Dual-edge EXTTS, servo demands 3 Mppb | Missing ppsfix (Patch 1) | Installed ppsfix DKMS |
 | 2026-04-14 | TimeHat | 1,266 Tx timestamp timeouts over 18h; ptp4l MASTER→FAULTY loop every 24s; AntPosEstThread correlation gate stall | adjfine race — ppsfix installed but adjfine patch never applied to ppsfix source tree | Applied adjfine patch to ppsfix tree (this fix) |
+| 2026-04-15 | TimeHat | TX timestamp timeouts resume 44 min after boot despite v3 patch; EXTTS wedges; ptp4l MASTER→FAULTY every 24s; no adjfine running at time of first timeout cascade | **Not the adjfine race.** v3 patch protects adjfine but the TSYNCTXCTL stranding failure cascades: one stranded slot during adjfine sits for 15s, during which ptp4l TX attempts also strand, wedging the subsystem permanently. Once wedged, every subsequent TX timestamp fails even without adjfine. See "Patch 2 limitations" below. | Investigation ongoing |
 
 ## Old / stale DKMS trees
 
