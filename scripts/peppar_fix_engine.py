@@ -3684,7 +3684,11 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 dt_rx_ns=dt_rx_ns, dt_rx_sigma_ns=dt_rx_sigma)
         else:
             servo.kp = BASE_KP * gain_scale
-            servo.ki = BASE_KI * gain_scale
+            # Do NOT scale ki — the integrator carries the steady-state
+            # frequency (initial_freq from bootstrap).  Scaling it down
+            # destroys the frequency seed and makes the servo start at
+            # ~0 ppb instead of the bootstrap value.
+            servo.ki = BASE_KI
             adjfine_ppb = -servo.update(avg_error, dt=float(n_samples))
         max_track_ppb = min(
             ctx['caps']['max_adj'],
