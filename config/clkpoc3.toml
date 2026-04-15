@@ -18,7 +18,10 @@ do_type = "vcocxo"
 dac_bus = 1
 dac_addr = "0x4C"
 dac_bits = 16
-dac_ppb_per_code = "-0.0361"
+# Sign verified 2026-04-14: freerun at center shows -149 ppb (slow),
+# not +149 as previously characterized.  Positive ppb_per_code means
+# higher code → higher frequency → corrects the slow crystal.
+dac_ppb_per_code = "0.0361"
 dac_type = "ad5693r"
 
 # TADD-2 Mini divider: ARM on GPIO 16, syncs 10 MHz → 1 PPS.
