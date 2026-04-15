@@ -1440,7 +1440,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 )
             # Periodic [STATUS] line every 60 epochs
             if n_epochs % 60 == 0 and ape_sm is not None and dfe_sm is not None:
-                ticc_ok = (servo_ctx.get('ticc') is not None) if servo_ctx else None
+                ticc_ok = (servo_ctx.get('ticc_tracker') is not None) if servo_ctx else None
                 qvir = servo_ctx.get('qvir') if servo_ctx else None
                 log.info("[STATUS] %s", format_status(ape_sm, dfe_sm,
                          ticc_ok=ticc_ok, qvir=qvir))
