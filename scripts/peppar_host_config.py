@@ -43,7 +43,6 @@ KEYS = (
     "tadd_gpio",
     "tadd_hold_s",
     "ticc_port",
-    "ticc_drive",
 )
 
 

@@ -168,7 +168,7 @@ class TimestamperParams:
         This is the single entry point that replaces all the
         `0.178 if args.ticc_drive else 1.9` conditionals.
         """
-        if getattr(args, 'ticc_drive', False):
+        if getattr(args, 'ticc_port', None) is not None:
             # TICC serial could come from udev (not yet wired up)
             ticc_serial = getattr(args, 'ticc_serial', None)
             return cls.for_ticc(ticc_serial, state_dir)

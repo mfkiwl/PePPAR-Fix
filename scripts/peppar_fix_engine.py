@@ -646,103 +646,6 @@ def apply_ptp_profile(args):
             "pps_out_channel", getattr(args, 'pps_out_channel', 0))
 
 
-def apply_ticc_drive_defaults(args):
-    """Bias experimental TICC drive toward light-touch control when untouched."""
-    if not args.ticc_drive:
-        return
-    if args.discipline_interval == 1:
-        args.discipline_interval = 2
-    if not args.adaptive_interval:
-        args.adaptive_interval = True
-    if args.max_interval == 120:
-        args.max_interval = 10
-    if args.gain_ref_sigma == 2.0:
-        args.gain_ref_sigma = 4.0
-    if args.gain_min_scale == 0.1:
-        args.gain_min_scale = 0.05
-    if args.gain_max_scale == 1.0:
-        args.gain_max_scale = 0.5
-    if args.converge_error_ns == 500.0:
-        args.converge_error_ns = 5_000.0
-    if args.converge_min_scale == 2.0:
-        args.converge_min_scale = 1.0
-    if args.scheduler_converge_threshold_ns == 100.0:
-        args.scheduler_converge_threshold_ns = 1_000.0
-    if args.scheduler_settle_window == 10:
-        args.scheduler_settle_window = 20
-    if args.scheduler_unconverge_factor == 5.0:
-        args.scheduler_unconverge_factor = 10.0
-    if args.track_outlier_ns is None:
-        args.track_outlier_ns = 10_000.0
-    if args.ticc_pullin_interval == 5:
-        args.ticc_pullin_interval = 5
-    if args.ticc_pullin_window_s == 8.0:
-        args.ticc_pullin_window_s = 8.0
-    if args.ticc_landing_threshold_ns == 1_500.0:
-        args.ticc_landing_threshold_ns = 1_500.0
-    if args.ticc_settled_threshold_ns == 100.0:
-        args.ticc_settled_threshold_ns = 100.0
-    if args.ticc_settled_deadband_ns == 75.0:
-        args.ticc_settled_deadband_ns = 75.0
-    if args.ticc_settled_interval == 3:
-        args.ticc_settled_interval = 2
-    if args.ticc_settled_count == 10:
-        args.ticc_settled_count = 10
-
-
-def _update_ticc_tracking_mode(ctx, args, best, now_mono):
-    """Choose pull-in/landing/settled behavior for TICC-driven tracking."""
-    if not args.ticc_drive or best.name != 'TICC':
-        return None, None
-
-    err = best.error_ns
-    prev_err = ctx.get('ticc_prev_error_ns')
-    prev_mono = ctx.get('ticc_prev_error_mono')
-    mode = ctx.get('tracking_mode', 'pull_in')
-    time_to_zero_s = None
-
-    if prev_err is not None and prev_mono is not None:
-        dt = max(1e-6, now_mono - prev_mono)
-        slope = (err - prev_err) / dt
-        if slope != 0.0 and ((err > 0.0 and slope < 0.0) or (err < 0.0 and slope > 0.0)):
-            time_to_zero_s = abs(err / slope)
-
-    crossed_zero = prev_err is not None and ((prev_err <= 0.0 <= err) or (prev_err >= 0.0 >= err))
-
-    settled_limit = args.ticc_settled_threshold_ns
-    deadband_limit = args.ticc_settled_deadband_ns
-
-    if mode == 'pull_in':
-        if crossed_zero or abs(err) <= args.ticc_landing_threshold_ns:
-            mode = 'landing'
-            ctx['ticc_settled_count'] = 0
-        elif time_to_zero_s is not None and time_to_zero_s <= args.ticc_pullin_window_s:
-            mode = 'landing'
-            ctx['ticc_settled_count'] = 0
-    elif mode == 'landing':
-        if abs(err) <= deadband_limit:
-            ctx['ticc_settled_count'] = args.ticc_settled_count
-            mode = 'settled'
-        elif abs(err) <= settled_limit:
-            ctx['ticc_settled_count'] = ctx.get('ticc_settled_count', 0) + 1
-            if ctx['ticc_settled_count'] >= args.ticc_settled_count:
-                mode = 'settled'
-        else:
-            ctx['ticc_settled_count'] = 0
-            if abs(err) > args.ticc_landing_threshold_ns * 2:
-                mode = 'pull_in'
-    else:  # settled
-        if crossed_zero:
-            ctx['ticc_settled_count'] = 0
-            mode = 'landing'
-        elif abs(err) > max(args.ticc_settled_threshold_ns * 4, 500.0):
-            ctx['ticc_settled_count'] = 0
-            mode = 'landing'
-
-    ctx['ticc_prev_error_ns'] = err
-    ctx['ticc_prev_error_mono'] = now_mono
-    ctx['tracking_mode'] = mode
-    return mode, time_to_zero_s
 
 
 # ── Convergence detection (from peppar_find_position) ─────────────────── #
@@ -1108,7 +1011,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
     #      with ts2phc disciplining the PHC independently).
     servo_ctx = None
     ptp = None
-    want_servo = args.servo or getattr(args, 'ticc_drive', False)
+    want_servo = args.servo or getattr(args, 'ticc_port', None) is not None
     if want_servo:
         if args.servo:
             # Open PTP device for bootstrap and servo
@@ -1123,8 +1026,8 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 log.error(f"Cannot open PTP device {args.servo}: {e}")
                 return 1
         else:
-            log.info("TICC-only servo mode: no PHC in loop (ticc_drive=%s, "
-                     "servo=%s)", args.ticc_drive, args.servo)
+            log.info("TICC-only servo mode: no PHC in loop (ticc_port=%s, "
+                     "servo=%s)", args.ticc_port, args.servo)
 
         # DO bootstrap: ensure phase ±10µs and frequency ±5ppb before
         # servo starts.  Skipped if --skip-bootstrap or --freerun.
@@ -2296,7 +2199,7 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
     gate_stats = None
     try:
         from peppar_fix import DisciplineScheduler
-        from peppar_fix import compute_error_sources, ticc_only_error_source
+        from peppar_fix import compute_error_sources
         from peppar_fix.timestamper_state import TimestamperParams
     except ImportError:
         log.error("peppar_fix library not available for servo")
@@ -2475,8 +2378,8 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
             log.info(f"EXTTS enabled: pin={args.pps_pin}, channel={extts_channel}")
             extts_ok = True
         except OSError as e:
-            if args.ticc_drive:
-                log.warning("EXTTS unavailable (%s) — TICC-driven servo does not require it", e)
+            if getattr(args, 'ticc_port', None) is not None:
+                log.warning("EXTTS unavailable (%s) — TICC provides servo feedback instead", e)
             else:
                 log.error("EXTTS failed: %s", e)
                 ptp.close()
@@ -2485,7 +2388,7 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
         # Verify PPS is actually arriving before committing to the servo loop.
         if extts_ok:
             test_pps = ptp.read_extts_dedup(extts_dedup, timeout_ms=3000)
-            if test_pps is None and not args.ticc_drive:
+            if test_pps is None and getattr(args, 'ticc_port', None) is None:
                 log.error("No PPS event within 3s after enabling EXTTS — "
                           "check PPS wiring, pin config, and PTP device")
                 ptp.disable_extts(extts_channel)
@@ -2636,14 +2539,17 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
             if dropped:
                 log.debug("Dropped one stale PPS notification due to full queue")
 
-    if not args.ticc_drive:
+    if have_phc and extts_ok:
         # EXTTS-driven: PPS events come from EXTTS hardware timestamps
         t_extts = threading.Thread(target=extts_reader, daemon=True)
         t_extts.start()
         log.info("EXTTS reader started (PPS source for correlation)")
     else:
         t_extts = None
-        log.info("TICC-driven mode: TICC chB replaces EXTTS for PPS correlation")
+        if not have_phc:
+            log.info("TICC-only mode: TICC chB provides PPS correlation (no PHC)")
+        else:
+            log.info("EXTTS not available: TICC chB provides PPS correlation")
 
     if args.ticc_port:
         ticc_tracker = TiccPairTracker(args.ticc_phc_channel, args.ticc_ref_channel)
@@ -2737,9 +2643,10 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
                                                      "(raw=%.2f corr=%.2f ns²)",
                                                      qvir, rv, cv)
 
-                            # In TICC-drive mode, chB (reference PPS) events
-                            # replace EXTTS as the PPS source for correlation.
-                            if args.ticc_drive and event.channel == args.ticc_ref_channel:
+                            # When EXTTS is not running, chB (reference PPS)
+                            # events replace EXTTS as the PPS source for
+                            # correlation.
+                            if t_extts is None and event.channel == args.ticc_ref_channel:
                                 # Derive approximate PHC second from realtime
                                 # (PPS fires at the GPS second boundary; recv_mono
                                 # is within ~100ms of true PPS time)
@@ -2841,19 +2748,15 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
         'tmode_set': False,
         'position_saved': False,
         'compute_error_sources': compute_error_sources,
-        'ticc_only_error_source': ticc_only_error_source,
         'ppp_cal': PPPCalibration(tick_ns=8.0, min_samples=10),
         'rx_tcxo': RxTcxoTracker(freq_window=30),
         'dt_rx_buffer': deque(maxlen=30),
         'carrier_tracker': _init_carrier_tracker(args),
         'tracking_large_error_count': 0,
-        'tracking_mode': 'pull_in',
+        'tracking_mode': 'ekf',
         'pmc': _open_pmc(args),
         'pmc_announced': None,
-        'ticc_prev_error_ns': None,
-        'ticc_prev_error_mono': None,
         'consecutive_outliers': 0,
-        'ticc_settled_count': 0,
         'noise_estimator': _init_noise_estimator(args),
         'holdover': {
             'active': False,
@@ -2865,10 +2768,10 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
     }
 
     # ── TICC sanity check ─────────────────────────────────────────── #
-    # When TICC-driven, wait for the first differential measurement
+    # When TICC is present, wait for the first differential measurement
     # and verify it's within a sane range.  A large offset (e.g., ±500 ms)
     # indicates PEROUT misalignment or PHC not bootstrapped properly.
-    if args.ticc_drive and ticc_tracker is not None:
+    if ticc_tracker is not None:
         TICC_SANITY_TIMEOUT = 10  # seconds
         TICC_SANITY_MAX_NS = 100_000_000  # 100 ms — beyond this, exit for re-bootstrap
         log.info("Waiting for TICC sanity check (first differential measurement)...")
@@ -2941,10 +2844,7 @@ def _enter_obs_holdover(ctx, args, reason_code, detail):
     )
     ctx['phase'] = 'tracking'
     ctx['tracking_large_error_count'] = 0
-    ctx['tracking_mode'] = 'pull_in'
-    ctx['ticc_prev_error_ns'] = None
-    ctx['ticc_prev_error_mono'] = None
-    ctx['ticc_settled_count'] = 0
+    ctx['tracking_mode'] = 'ekf'
 
 
 def _exit_holdover(ctx, detail):
@@ -3133,7 +3033,6 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     ticc_tracker = ctx.get('ticc_tracker')
     log_w = ctx['log_w']
     compute_error_sources = ctx['compute_error_sources']
-    ticc_only_error_source = ctx.get('ticc_only_error_source')
     skip_stats = ctx.get('skip_stats')
 
     BASE_KP = args.track_kp
@@ -3366,154 +3265,63 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             lvl("  [%s] EXTTS qVIR: Δvar(pps)/Δvar(pps+qErr) = %.2f (%s)",
                 n_epochs, qerr_plus_ratio, label)
 
-    # Litmus 2: TICC + qErr (separate epoch matching)
-    if args.ticc_drive:
-        if pps_err_ticc_ns is None:
-            if skip_stats is not None:
-                skip_stats["ticc_missing_pair"] += 1
-            if n_epochs % 10 == 0:
-                health = ticc_tracker.health() if ticc_tracker is not None else {}
-                last_seen = health.get("last_seen", {})
-                counts = health.get("counts", {})
-                armed = health.get("armed", False)
-                buffered_drops = health.get("buffered_drops", 0)
-                now = time.monotonic()
-                phc_last = last_seen.get(args.ticc_phc_channel)
-                ref_last = last_seen.get(args.ticc_ref_channel)
-                log.info(
-                    "  [%s] Awaiting fresh paired TICC measurement: "
-                    "armed=%s buffered_drops=%s "
-                    "%s_count=%s last=%.3fs %s_count=%s last=%.3fs",
-                    n_epochs,
-                    armed,
-                    buffered_drops,
-                    args.ticc_phc_channel,
-                    counts.get(args.ticc_phc_channel, 0),
-                    (now - phc_last) if phc_last is not None else -1.0,
-                    args.ticc_ref_channel,
-                    counts.get(args.ticc_ref_channel, 0),
-                    (now - ref_last) if ref_last is not None else -1.0,
-                )
-            return "no_ticc"
-        # Apply qErr correction to the TICC measurement before using it
-        # as the servo error.  The raw TICC chA-chB diff includes the
-        # F9T PPS quantization noise (~2.3 ns) on the chB (reference)
-        # side.  Without correction, the servo faithfully tracks that
-        # noise and injects it into the DO — making the output WORSE
-        # than the DO's free-running 1.17 ns.  With correction, the
-        # effective reference noise drops to ~178 ps (the TICC+qErr
-        # floor), well below the DO, so the servo can actually improve it.
-        # Apply qErr to produce pps_err_ticc_qerr_ns.
-        # pps_err_ticc_ns = raw PPS error on the TICC timescale (never mutated).
-        # pps_err_ticc_qerr_ns = same with PPS quantization removed.
-        # These are different values with different noise properties;
-        # never conflate them in a single variable.
-        pps_err_ticc_qerr_ns = pps_err_ticc_ns  # start with raw
-        pps_corr_applied = False
-        if getattr(args, 'pps_corr', None) == 'ppp':
-            ppp_cal = ctx['ppp_cal']
-            dt_rx_buf = ctx['dt_rx_buffer']
-            # Calibrate against TIM-TP during first ~10 converged epochs.
-            # Use qerr_for_ticc_pps_ns (matched to TICC epoch) when available.
-            cal_qerr = qerr_for_ticc_pps_ns if qerr_for_ticc_pps_ns is not None else qerr_for_extts_pps_ns
-            if (not ppp_cal.calibrated and cal_qerr is not None
-                    and dt_rx_sigma is not None and dt_rx_sigma < 1.0):
-                done = ppp_cal.add_sample(dt_rx_ns, cal_qerr)
-                if done:
-                    log.info("  PPP qErr calibration done: offset=%.3f ns "
-                             "(%d samples)", ppp_cal.offset_ns, ppp_cal._n)
-            # Feed dt_rx into the sliding window
-            if dt_rx_ns is not None and dt_rx_sigma is not None and dt_rx_sigma < 1.0:
-                dt_rx_buf.append(dt_rx_ns)
-            # Once calibrated and buffer has enough samples, use smoothed qerr
-            if ppp_cal.calibrated and len(dt_rx_buf) >= 5:
-                from peppar_fix.error_sources import ppp_qerr as _ppp_qerr
-                smoothed = _dt_rx_trend_predict(dt_rx_buf)
-                if smoothed is not None:
-                    pps_corr_ppp_ns = _ppp_qerr(smoothed, cal_offset_ns=ppp_cal.offset_ns)
-                    pps_err_ticc_qerr_ns = pps_err_ticc_ns + pps_corr_ppp_ns
-                    pps_corr_applied = True
-                    if n_epochs % 10 == 0 and qerr_for_extts_pps_ns is not None:
-                        raw_ppp = _ppp_qerr(dt_rx_ns, cal_offset_ns=ppp_cal.offset_ns)
-                        log.info("  [%d] smooth qErr=%.3f raw=%.3f TIM-TP=%.3f "
-                                 "(smooth-TIM=%.3f, raw-TIM=%.3f, buf=%d)",
-                                 n_epochs, pps_corr_ppp_ns, raw_ppp, qerr_for_extts_pps_ns,
-                                 pps_corr_ppp_ns - qerr_for_extts_pps_ns,
-                                 raw_ppp - qerr_for_extts_pps_ns,
-                                 len(dt_rx_buf))
-        if not pps_corr_applied:
-            if qerr_for_ticc_pps_ns is not None:
-                pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_ticc_pps_ns
-            elif qerr_for_extts_pps_ns is not None:
-                pps_err_ticc_qerr_ns = pps_err_ticc_ns + qerr_for_extts_pps_ns
-        # ── EXTTS → TICC servo drive transition ──
-        # During pull-in (large TICC error), drive from gnss_pps_extts
-        # (on the PHC timescale we discipline).  EXTTS has 8 ns
-        # resolution but that's fine when the error is hundreds of ns.
-        # Once the TICC error converges below the threshold, switch to
-        # gnss_pps_ticc (60 ps, timescale-independent diff).
-        # The threshold is based on the raw TICC error (pps_err_ticc_ns)
-        # — NOT pps_err_extts_ns, which reads near 0 after bootstrap
-        # step even when PEROUT hasn't converged.
-        TICC_DRIVE_THRESHOLD_NS = getattr(args, 'ticc_drive_threshold_ns', 100.0)
-        have_phc = ctx.get('ptp') is not None
-        use_extts = (have_phc
-                     and abs(pps_err_ticc_ns) > TICC_DRIVE_THRESHOLD_NS
-                     and qerr_for_extts_pps_ns is not None)
-        if use_extts:
-            pps_err_extts_qerr_ns = pps_err_extts_ns + qerr_for_extts_pps_ns
-            _ticc_conf = (ctx.get('ts_params').qerr_confidence_ns
-                         if ctx.get('ts_params') else args.ticc_confidence_ns)
-            sources = ticc_only_error_source(pps_err_extts_qerr_ns, _ticc_conf)
-            if ctx.get('ticc_drive_source') != 'extts':
-                log.info("  Servo drive: EXTTS (|ticc_err|=%.0f ns > %.0f threshold)",
-                         abs(pps_err_ticc_ns), TICC_DRIVE_THRESHOLD_NS)
-                ctx['ticc_drive_source'] = 'extts'
-        else:
-            _ticc_conf = (ctx.get('ts_params').qerr_confidence_ns
-                         if ctx.get('ts_params') else args.ticc_confidence_ns)
-            sources = ticc_only_error_source(pps_err_ticc_qerr_ns, _ticc_conf)
-            if ctx.get('ticc_drive_source') != 'ticc':
-                log.info("  Servo drive: TICC (|ticc_err|=%.0f ns ≤ %.0f threshold)",
-                         abs(pps_err_ticc_ns), TICC_DRIVE_THRESHOLD_NS)
-                ctx['ticc_drive_source'] = 'ticc'
-        corr_age_for_inflation = None  # not applicable in TICC-drive mode
-    else:
-        # Feed PPP calibration: compare PPP-derived qerr against TIM-TP
-        # qErr for the first ~10 epochs to determine the constant offset.
-        ppp_cal = ctx['ppp_cal']
-        if (not ppp_cal.calibrated and qerr_for_extts_pps_ns is not None
-                and dt_rx_sigma is not None and dt_rx_sigma < args.carrier_max_sigma_ns):
-            done = ppp_cal.add_sample(dt_rx_ns, qerr_for_extts_pps_ns)
-            if done:
-                log.info(f"  PPP calibration done: offset={ppp_cal.offset_ns:+.3f}ns "
-                         f"({ppp_cal._n} samples)")
-        # Correction age drives sigma inflation on Carrier and PPS+PPP.
-        # When NTRIP goes stale, those sources lose competition gracefully
-        # to PPS+qErr / PPS instead of dying.
-        corr_age_for_inflation = None
-        if corr_snapshot is not None:
-            ages = [a for a in (corr_snapshot.get("broadcast_age_s"),
-                                corr_snapshot.get("ssr_age_s"))
-                    if a is not None]
-            if ages:
-                corr_age_for_inflation = max(ages)
-        _ts = ctx.get('ts_params')
-        sources = compute_error_sources(
-            pps_err_extts_ns,
-            None if args.no_qerr else qerr_for_extts_pps_ns,
-            dt_rx_ns,
-            dt_rx_sigma,
-            pps_confidence=_ts.pps_confidence_ns if _ts else 20.0,
-            qerr_confidence=_ts.qerr_confidence_ns if _ts else 3.0,
-            carrier_max_sigma=args.carrier_max_sigma_ns,
-            ppp_cal=None if args.no_ppp else ppp_cal,
-            carrier_tracker=(None if getattr(args, 'no_carrier', False)
-                             else ctx.get('carrier_tracker')),
-            corr_age_s=corr_age_for_inflation,
-            corr_staleness_ns_per_s=getattr(
-                args, 'corr_staleness_ns_per_s', 0.1),
-        )
+    # ── Unified error source selection ──
+    # All available sources (PPS, PPS+qErr, Carrier, TICC) compete on
+    # equal terms via compute_error_sources().  TICC data is passed when
+    # available — no separate ticc_drive path.
+
+    # Feed PPP calibration: compare PPP-derived qerr against TIM-TP
+    # qErr for the first ~10 epochs to determine the constant offset.
+    ppp_cal = ctx['ppp_cal']
+    if (not ppp_cal.calibrated and qerr_for_extts_pps_ns is not None
+            and dt_rx_sigma is not None and dt_rx_sigma < args.carrier_max_sigma_ns):
+        done = ppp_cal.add_sample(dt_rx_ns, qerr_for_extts_pps_ns)
+        if done:
+            log.info(f"  PPP calibration done: offset={ppp_cal.offset_ns:+.3f}ns "
+                     f"({ppp_cal._n} samples)")
+    # Correction age drives sigma inflation on Carrier and PPS+PPP.
+    # When NTRIP goes stale, those sources lose competition gracefully
+    # to PPS+qErr / PPS instead of dying.
+    corr_age_for_inflation = None
+    if corr_snapshot is not None:
+        ages = [a for a in (corr_snapshot.get("broadcast_age_s"),
+                            corr_snapshot.get("ssr_age_s"))
+                if a is not None]
+        if ages:
+            corr_age_for_inflation = max(ages)
+
+    # Build TICC+qErr corrected error for the TICC source competition.
+    # pps_err_ticc_ns is the raw TICC diff; apply qErr to get the
+    # qErr-corrected value that compute_error_sources() will use.
+    _ts = ctx.get('ts_params')
+    _ticc_for_sources = pps_err_ticc_ns
+    _ticc_conf_for_sources = ticc_confidence
+    if pps_err_ticc_ns is not None:
+        _ticc_conf_for_sources = (_ts.qerr_confidence_ns
+                                  if _ts else args.ticc_confidence_ns)
+        # Apply qErr correction to TICC measurement
+        if qerr_for_ticc_pps_ns is not None:
+            _ticc_for_sources = pps_err_ticc_ns + qerr_for_ticc_pps_ns
+        elif qerr_for_extts_pps_ns is not None:
+            _ticc_for_sources = pps_err_ticc_ns + qerr_for_extts_pps_ns
+
+    sources = compute_error_sources(
+        pps_err_extts_ns,
+        None if args.no_qerr else qerr_for_extts_pps_ns,
+        dt_rx_ns,
+        dt_rx_sigma,
+        pps_confidence=_ts.pps_confidence_ns if _ts else 20.0,
+        qerr_confidence=_ts.qerr_confidence_ns if _ts else 3.0,
+        carrier_max_sigma=args.carrier_max_sigma_ns,
+        ppp_cal=None if args.no_ppp else ppp_cal,
+        carrier_tracker=(None if getattr(args, 'no_carrier', False)
+                         else ctx.get('carrier_tracker')),
+        corr_age_s=corr_age_for_inflation,
+        corr_staleness_ns_per_s=getattr(
+            args, 'corr_staleness_ns_per_s', 0.1),
+        ticc_error_ns=_ticc_for_sources,
+        ticc_confidence=_ticc_conf_for_sources,
+    )
     best = sources[0]
 
     # Source-change logging: when the winner of the source competition
@@ -3533,21 +3341,13 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     # No warmup or step phases — PHC bootstrap handles phase and frequency.
     # PI tracking from epoch 1.
 
-    # Tracking phase
+    # DOFreqEst needs dt=1.0 every epoch.  Force interval=1 unconditionally
+    # — the old mode-specific intervals (pull_in/landing/settled) were for
+    # the removed PI servo and cause observation stall when interval>1
+    # lets drift accumulate in the correlation gate.
     mode_time_to_zero_s = None
     mode_gain_floor = None
-    if args.ticc_drive and best.name == 'TICC':
-        mode_name, mode_time_to_zero_s = _update_ticc_tracking_mode(
-            ctx, args, best, time.monotonic()
-        )
-        # DOFreqEst handles convergence internally via its EKF + LQR.
-        # Force interval=1 so it always gets dt=1.0 — the mode-specific
-        # intervals (5 for pull_in, variable for settled) were designed
-        # for the old PI servo and cause DOFreqEst to diverge with large
-        # dt prediction steps.  Mode tracking is kept for logging only.
-        scheduler.interval = 1
-        if mode_name == 'landing':
-            mode_gain_floor = args.ticc_landing_gain_floor
+    scheduler.interval = 1
 
     if (
         TRACK_OUTLIER_NS is not None and
@@ -3643,29 +3443,6 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         if mode_gain_floor is not None:
             gain_scale = max(gain_scale, mode_gain_floor)
 
-        # In TICC+qErr-drive mode, adapt gain based on error magnitude.
-        # The TICC+qErr reference noise (178 ps) is far below the DO floor
-        # (0.92 ns), so TINY corrections (< 1 ppb) are invisible.  But the
-        # bootstrap leaves a ~5 µs phase offset that needs aggressive pull-in.
-        # Solution: interpolate kp between pull-in gain and settled gain
-        # based on error magnitude.  Settled gain keeps corrections < 1 ppb
-        # when the error is < 5 ns (the adjfine noise test showed < 1 ppb
-        # corrections add unmeasurable noise to the DO).
-        if args.ticc_drive and abs(avg_error) < 500:
-            # Error is small enough for gentle gains.  Scale kp down
-            # proportionally to error magnitude: at 500 ns use full kp,
-            # at 5 ns use kp/100.  This keeps corrections below 1 ppb
-            # when settled while still pulling in from moderate errors.
-            #
-            # Skip attenuation for the first 60 epochs: the bootstrap
-            # frequency measurement has ~1 ppb uncertainty, which creates
-            # a phase ramp the servo needs full gain to correct.  After
-            # 60 epochs (~1 min) the PI has had time to absorb the residual.
-            if n_epochs > 60:
-                error_ratio = max(abs(avg_error), 5.0) / 500.0
-                adaptive_scale = max(0.01, min(1.0, error_ratio))
-                gain_scale *= adaptive_scale
-
         # DOFreqEst EKF: pass raw TICC (no qErr) + PPP dt_rx.
         # The EKF has its own LQR gain — no PI gain adaptation,
         # landing mode, or anti-windup needed.
@@ -3692,9 +3469,6 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
 
         if n_epochs % 10 == 0:
             mode_suffix = ''
-            if args.ticc_drive and best.name == 'TICC':
-                ttz = f"{mode_time_to_zero_s:.1f}s" if mode_time_to_zero_s is not None else 'na'
-                mode_suffix = f" mode={ctx.get('tracking_mode')} t0={ttz}"
             ct = ctx.get('carrier_tracker')
             if (ct is not None and ct.initialized
                     and best.name == 'Carrier' and n_epochs % 60 == 0):
@@ -3706,14 +3480,10 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                      f"interval={scheduler.interval}{mode_suffix}")
     else:
         if n_epochs % 10 == 0:
-            mode_suffix = ''
-            if args.ticc_drive and best.name == 'TICC':
-                ttz = f"{mode_time_to_zero_s:.1f}s" if mode_time_to_zero_s is not None else 'na'
-                mode_suffix = f" mode={ctx.get('tracking_mode')} t0={ttz}"
             log.info(f"  [{n_epochs}] {best.name}: "
                      f"err={best.error_ns:+.1f}ns "
                      f"coast ({scheduler.n_accumulated}/{scheduler.interval}) "
-                     f"adj={ctx['adjfine_ppb']:+.1f}ppb{mode_suffix}")
+                     f"adj={ctx['adjfine_ppb']:+.1f}ppb")
 
     # Log noise estimator summary periodically
     if noise_est is not None and n_epochs % 120 == 0 and noise_est.gap_samples >= 10:
@@ -4062,7 +3832,7 @@ def run(args):
     # post-hoc index-matching against TICC chB events.
     qerr_store = None
     qerr_log_f = None
-    want_servo = args.servo or getattr(args, 'ticc_drive', False)
+    want_servo = args.servo or getattr(args, 'ticc_port', None) is not None
     if want_servo:
         qerr_log_writer = None
         if getattr(args, 'qerr_log', None):
@@ -4416,9 +4186,8 @@ def _apply_host_config(args):
         except (ValueError, TypeError) as e:
             log.warning("Host config: bad value for %s: %s", toml_key, e)
 
-    # Boolean flags: host config can enable but not override CLI
-    if cfg.get("ticc_drive") and not getattr(args, "ticc_drive", False):
-        args.ticc_drive = True
+    # ticc_drive removed — TICC competes as a source whenever --ticc-port
+    # is configured.  Legacy host configs with ticc_drive=true are ignored.
 
 
 # ── CLI ──────────────────────────────────────────────────────────────── #
@@ -4604,24 +4373,6 @@ Two-phase operation:
                        help="Re-enter step if |tracking error| exceeds this for 3 epochs")
     servo.add_argument("--phase-step-bias-ns", type=float, default=None,
                        help="Per-host bias compensation applied to PHC phase steps")
-    servo.add_argument("--ticc-pullin-interval", type=int, default=5,
-                       help="TICC pull-in correction interval when zero crossing is far away")
-    servo.add_argument("--ticc-pullin-window-s", type=float, default=8.0,
-                       help="Switch from pull-in to landing when predicted intercept is within this window")
-    servo.add_argument("--ticc-landing-threshold-ns", type=float, default=1500.0,
-                       help="Enter landing mode when |TICC error| falls below this")
-    servo.add_argument("--ticc-settled-threshold-ns", type=float, default=100.0,
-                       help="Declare settled when |TICC error| stays below this")
-    servo.add_argument("--ticc-settled-deadband-ns", type=float, default=75.0,
-                       help="Stop aggressive landing corrections once errors fall inside this band")
-    servo.add_argument("--ticc-settled-interval", type=int, default=2,
-                       help="TICC settled-mode correction interval")
-    servo.add_argument("--ticc-settled-count", type=int, default=10,
-                       help="Consecutive low-error TICC corrections required before settled mode")
-    servo.add_argument("--ticc-landing-gain-floor", type=float, default=2.0,
-                       help="Minimum gain scale while TICC tracking mode is landing")
-    servo.add_argument("--ticc-landing-horizon-s", type=float, default=10.0,
-                       help="In landing mode, enforce enough frequency to clear the current TICC error over this horizon")
     servo.add_argument("--obs-idle-timeout-s", type=float, default=None,
                        help="Log and enter safe holdover if no observation epochs arrive for this long")
     servo.add_argument("--queue-depth-threshold", type=int, default=5,
@@ -4747,8 +4498,8 @@ Two-phase operation:
                       help="Target chPHC-chREF offset in ns for TICC-driven servo mode")
     ticc.add_argument("--ticc-confidence-ns", type=float, default=3.0,
                       help="Assumed confidence of TICC differential error when driving servo")
-    ticc.add_argument("--ticc-drive", action="store_true",
-                      help="Use paired TICC differential measurement as a servo source")
+    # --ticc-drive removed: TICC competes as a source whenever --ticc-port
+    # is configured.  No separate flag needed.
 
     # NTRIP caster output (optional, future)
     caster = ap.add_argument_group("NTRIP caster output (optional)")
@@ -4765,10 +4516,9 @@ Two-phase operation:
 
     args = ap.parse_args()
     _apply_host_config(args)
-    # --no-do overrides --servo and --ticc-drive from CLI or host config
+    # --no-do overrides --servo from CLI or host config
     if args.no_do:
         args.servo = None
-        args.ticc_drive = False
     # Apply defaults for args that are None after CLI + host config.
     # These were made nullable so host config can override them.
     if args.baud is None:
@@ -4786,11 +4536,8 @@ Two-phase operation:
     if args.dac_type is None:
         args.dac_type = "mcp4725"
     apply_ptp_profile(args)
-    # --ticc-port enables passive TICC measurement/logging.  --ticc-drive
-    # additionally promotes TICC to the servo input.  Keep them separate
-    # so a TICC can monitor a servo driven by other sources (PPS, PPP
-    # Carrier Phase, etc.) for independent stability analysis.
-    apply_ticc_drive_defaults(args)
+    # TICC competes as a source whenever --ticc-port is configured.
+    # No separate promotion flag needed.
     if args.pps_pin is None:
         args.pps_pin = 1
     if args.extts_channel is None:

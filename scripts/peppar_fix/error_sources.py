@@ -369,6 +369,3 @@ def compute_error_sources(pps_error_ns, qerr_ns, dt_rx_ns, dt_rx_sigma_ns,
     return sources
 
 
-def ticc_only_error_source(ticc_error_ns, ticc_confidence):
-    """Return a single-source list for experimental TICC-driven servo mode."""
-    return [ErrorSource('TICC', ticc_error_ns, ticc_confidence)]

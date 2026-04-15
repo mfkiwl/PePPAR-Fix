@@ -28,6 +28,5 @@ dac_type = "ad5693r"
 tadd_gpio = 16
 
 # TICC #3: chA = DO PPS, chB = GNSS PPS.
-# Engine uses TICC differential measurement as servo input (--ticc-drive).
+# TICC competes as a servo source whenever ticc_port is configured.
 ticc_port = "/dev/ticc3"
-ticc_drive = true
