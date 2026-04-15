@@ -465,6 +465,7 @@ here before changing anything in the areas they cover.
 | [ppp-ar-filter-redesign.md](docs/ppp-ar-filter-redesign.md) | **Read after ppp-ar-design.md.** Why IF ambiguities are not integer, WL/NL decomposition, Melbourne-Wubbena tracker + narrow-lane resolver design, ~210 lines total. Supersedes Phase B/C integrality approach. |
 | [ztd-state-for-ppp-ar.md](docs/ztd-state-for-ppp-ar.md) | **Next step for AR.** PPPFilter needs a ZTD state to separate atmospheric drift from position. Without it, NL fixes lock in tropospheric bias — cross-host agreement stuck at ~5m horizontal despite correct integers. |
 | [clockmatrix-bootstrap-plan.md](docs/clockmatrix-bootstrap-plan.md) | ClockMatrix supplements PHC: bootstrap sequence, FCW handoff, hybrid architecture for Timebeat OTC. |
+| [igc-kernel-patches.md](docs/igc-kernel-patches.md) | **Read before driver work on i226 hosts.** Inventory of igc patches (ppsfix + adjfine), per-host deployment status, verification checklist, incident history. |
 | [lab-operations.md](docs/lab-operations.md) | **Read before running on any lab host.** Deployment procedure, pre-flight checklist, stumble analysis, standard host layout, future automation work. |
 
 ## Lab Documentation Pointers

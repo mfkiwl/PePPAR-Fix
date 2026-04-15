@@ -48,6 +48,8 @@ static int igc_ptp_adjfine_i225(struct ptp_clock_info *ptp, long scaled_ppm)
 	struct igc_adapter *igc = container_of(ptp, struct igc_adapter,
 					       ptp_caps);
 	struct igc_hw *hw = &igc->hw;
+	unsigned long flags;
+	u32 txctl;
 	int neg_adj = 0;
 	u64 rate;
 	u32 inca;
@@ -64,7 +66,17 @@ static int igc_ptp_adjfine_i225(struct ptp_clock_info *ptp, long scaled_ppm)
 	if (neg_adj)
 		inca |= ISGN;
 
+	/* Changing TIMINCA while the hardware is capturing a TX timestamp
+	 * corrupts the timestamp, causing "Tx timestamp timeout."
+	 * Temporarily disable TX timestamping so no new capture can start
+	 * during the rate change.
+	 */
+	spin_lock_irqsave(&igc->tmreg_lock, flags);
+	txctl = rd32(IGC_TSYNCTXCTL);
+	wr32(IGC_TSYNCTXCTL, txctl & ~IGC_TSYNCTXCTL_ENABLED);
 	wr32(IGC_TIMINCA, inca);
+	wr32(IGC_TSYNCTXCTL, txctl);
+	spin_unlock_irqrestore(&igc->tmreg_lock, flags);
 
 	return 0;
 }
