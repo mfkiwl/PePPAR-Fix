@@ -324,7 +324,10 @@ def measure_differential_frequency(ticc_port, ticc_baud=115200,
     if n_intervals <= 0:
         n_intervals = len(pairs) - 1
 
-    freq_ppb = slope
+    # Negate: diff_ns = DO - GNSS, positive slope = DO PPS getting later
+    # = DO is slow.  Negate so positive freq_ppb = DO is fast, matching
+    # the EXTTS convention (positive = too fast = reduce adjfine).
+    freq_ppb = -slope
 
     log.info("TICC differential freq (%s-%s): %+.1f ppb (±%.1f ppb, "
              "%d pairs, %ds baseline)",
