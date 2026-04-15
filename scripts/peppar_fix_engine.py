@@ -3434,7 +3434,9 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         # — NOT pps_err_extts_ns, which reads near 0 after bootstrap
         # step even when PEROUT hasn't converged.
         TICC_DRIVE_THRESHOLD_NS = getattr(args, 'ticc_drive_threshold_ns', 100.0)
-        use_extts = (abs(pps_err_ticc_ns) > TICC_DRIVE_THRESHOLD_NS
+        have_phc = ctx.get('ptp') is not None
+        use_extts = (have_phc
+                     and abs(pps_err_ticc_ns) > TICC_DRIVE_THRESHOLD_NS
                      and qerr_for_extts_pps_ns is not None)
         if use_extts:
             pps_err_extts_qerr_ns = pps_err_extts_ns + qerr_for_extts_pps_ns
