@@ -1472,7 +1472,7 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                             f"fixable={n_fixable} "
                             f"{mw_tracker.summary()} {nl_resolver.summary()}"
                         )
-                elif mw_tracker.n_tracked > 0 and n_epochs % 10 == 0:
+                elif len(mw_tracker._state) > 0 and n_epochs % 10 == 0:
                     # FixedPosFilter: no per-SV ambiguities for NL resolution.
                     # Log MW status only — WL fixing still works, NL needs
                     # PPPFilter (TODO: use PPPFilter in fixed-position mode).
