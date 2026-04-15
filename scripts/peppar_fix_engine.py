@@ -2757,6 +2757,7 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
         'pmc': _open_pmc(args),
         'pmc_announced': None,
         'consecutive_outliers': 0,
+        'last_correction_mono': time.monotonic(),
         'noise_estimator': _init_noise_estimator(args),
         'holdover': {
             'active': False,
@@ -3341,13 +3342,13 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     # No warmup or step phases — PHC bootstrap handles phase and frequency.
     # PI tracking from epoch 1.
 
-    # DOFreqEst needs dt=1.0 every epoch.  Force interval=1 unconditionally
-    # — the old mode-specific intervals (pull_in/landing/settled) were for
-    # the removed PI servo and cause observation stall when interval>1
-    # lets drift accumulate in the correlation gate.
+    # Let the scheduler adapt its interval naturally.  DOFreqEst receives
+    # the actual elapsed wall-clock time (not n_samples) as dt, so it
+    # handles any correction interval correctly.  Longer intervals reduce
+    # actuation noise — the OCXO's superior short-term stability should
+    # shine through unmolested between corrections.
     mode_time_to_zero_s = None
     mode_gain_floor = None
-    scheduler.interval = 1
 
     if (
         TRACK_OUTLIER_NS is not None and
@@ -3444,11 +3445,16 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             gain_scale = max(gain_scale, mode_gain_floor)
 
         # DOFreqEst EKF: pass raw TICC (no qErr) + PPP dt_rx.
-        # The EKF has its own LQR gain — no PI gain adaptation,
-        # landing mode, or anti-windup needed.
+        # Use actual wall-clock elapsed time, not n_samples — the EKF's
+        # process model must match real elapsed time for correct prediction.
+        # This lets the scheduler interval float above 1 without breaking
+        # the EKF, reducing actuation noise at short tau.
+        now_mono = time.monotonic()
+        dt_actual = now_mono - ctx['last_correction_mono']
+        ctx['last_correction_mono'] = now_mono
         if pps_err_ticc_ns is not None:
             adjfine_ppb = -servo.update(
-                pps_err_ticc_ns, dt=float(n_samples),
+                pps_err_ticc_ns, dt=dt_actual,
                 dt_rx_ns=dt_rx_ns, dt_rx_sigma_ns=dt_rx_sigma)
         else:
             # No TICC measurement this epoch — hold previous frequency.
@@ -4351,8 +4357,8 @@ Two-phase operation:
                        help="Minimum gain scale while converging (default: 2.0)")
     servo.add_argument("--discipline-interval", type=int, default=1,
                        help="Fixed discipline interval (default: 1)")
-    servo.add_argument("--adaptive-interval", action="store_true",
-                       help="Enable adaptive discipline interval")
+    servo.add_argument("--adaptive-interval", action="store_true", default=True,
+                       help="Enable adaptive discipline interval (default: on)")
     servo.add_argument("--max-interval", type=int, default=120,
                        help="Maximum discipline interval (default: 120)")
     servo.add_argument("--min-interval", type=int, default=1,
