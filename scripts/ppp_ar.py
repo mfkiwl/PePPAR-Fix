@@ -23,6 +23,7 @@ import math
 import numpy as np
 
 from solve_pseudorange import C
+from solve_ppp import N_BASE
 
 log = logging.getLogger(__name__)
 
@@ -138,7 +139,6 @@ class NarrowLaneResolver:
         Returns:
             dict of newly fixed satellites: {sv: n1_int}
         """
-        N_BASE = 6  # from solve_ppp.py: 3 pos + clk + 2 ISB
         newly_fixed = {}
 
         # Re-constrain already-fixed ambiguities every epoch
@@ -230,7 +230,6 @@ class NarrowLaneResolver:
 
         Returns list of (sv, n1_frac, sigma_n1, fixed) for diagnostics.
         """
-        N_BASE = 6
         results = []
         for sv, amb_idx in filt.sv_to_idx.items():
             n_wl = mw_tracker.get_wl(sv)

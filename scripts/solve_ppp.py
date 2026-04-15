@@ -83,7 +83,8 @@ IDX_X, IDX_Y, IDX_Z = 0, 1, 2
 IDX_CLK = 3
 IDX_ISB_GAL = 4
 IDX_ISB_BDS = 5
-N_BASE = 6
+IDX_ZTD = 6
+N_BASE = 7
 
 
 # ── Determine system from SV prefix ──────────────────────────────────────── #
@@ -232,11 +233,13 @@ class PPPFilter:
         self.x[IDX_CLK] = clock_m
         self.x[IDX_ISB_GAL] = isb_gal
         self.x[IDX_ISB_BDS] = isb_bds
+        self.x[IDX_ZTD] = 0.0  # residual ZTD (a priori model handles bulk)
         self.P = np.diag([
             100.0**2, 100.0**2, 100.0**2,
             1e8,
             1e6,
             1e6,
+            0.5**2,  # ZTD residual: 0.5m initial sigma
         ])
         self.sv_to_idx = {}
         self.prev_obs = {}
@@ -263,6 +266,7 @@ class PPPFilter:
         Q[IDX_CLK, IDX_CLK] = 1e6 * dt
         Q[IDX_ISB_GAL, IDX_ISB_GAL] = 1.0 * dt
         Q[IDX_ISB_BDS, IDX_ISB_BDS] = 1.0 * dt
+        Q[IDX_ZTD, IDX_ZTD] = (5e-5)**2 * dt  # ~5 cm/hour RMS (IGS standard)
         self.P = self.P + Q
 
     def add_ambiguity(self, sv, N_init_m):
@@ -311,6 +315,12 @@ class PPPFilter:
             elevation_deg = 5.0
         return 2.3 / math.sin(math.radians(elevation_deg))
 
+    @staticmethod
+    def wet_mapping(elevation_deg):
+        """Wet tropospheric mapping function: 1/sin(e)."""
+        e = max(elevation_deg, 5.0)
+        return 1.0 / math.sin(math.radians(e))
+
     def isb_index(self, sys_name):
         if sys_name == 'gal': return IDX_ISB_GAL
         if sys_name == 'bds': return IDX_ISB_BDS
@@ -358,6 +368,7 @@ class PPPFilter:
                 continue
 
             tropo = self.tropo_delay(elev)
+            m_wet = self.wet_mapping(elev)
             e_los = dx / rho
 
             # Clock + ISB
@@ -366,7 +377,7 @@ class PPPFilter:
             if isb_idx is not None:
                 clk_val += self.x[isb_idx]
 
-            rho_pred = rho + clk_val - sat_clk * C + tropo
+            rho_pred = rho + clk_val - sat_clk * C + tropo + self.x[IDX_ZTD] * m_wet
 
             cno_factor = 10 ** ((obs['cno'] - 35) / 20)
             elev_factor = math.sin(math.radians(elev))
@@ -381,6 +392,7 @@ class PPPFilter:
             h_pr[IDX_CLK] = 1.0
             if isb_idx is not None:
                 h_pr[isb_idx] = 1.0
+            h_pr[IDX_ZTD] = m_wet
             H_rows.append(h_pr)
             z_rows.append(dz_pr)
             R_diag.append((SIGMA_P_IF / w) ** 2)
@@ -396,6 +408,7 @@ class PPPFilter:
                 h_phi[IDX_CLK] = 1.0
                 if isb_idx is not None:
                     h_phi[isb_idx] = 1.0
+                h_phi[IDX_ZTD] = m_wet
                 h_phi[amb_idx] = 1.0
                 H_rows.append(h_phi)
                 z_rows.append(dz_phi)
