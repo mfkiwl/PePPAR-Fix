@@ -324,10 +324,17 @@ def measure_differential_frequency(ticc_port, ticc_baud=115200,
     if n_intervals <= 0:
         n_intervals = len(pairs) - 1
 
-    log.info("TICC differential freq (%s-%s): %.1f ±%.1f ppb "
-             "(%d pairs, %ds baseline)",
-             do_channel, ref_channel, slope,
+    # Sign convention: match EXTTS (positive = source is fast).
+    # TICC differential slope is negative when DO is fast (DO PPS
+    # arrives earlier → diff = do - ref decreases).  EXTTS fractional
+    # second grows when the PHC is fast (positive slope).  Negate so
+    # _bootstrap_compute_base_freq works identically for both.
+    freq_ppb = -slope
+
+    log.info("TICC differential freq (%s-%s): %+.1f ppb (±%.1f ppb, "
+             "%d pairs, %ds baseline)",
+             do_channel, ref_channel, freq_ppb,
              sigma / math.sqrt(max(1, n_intervals)),
              len(pairs), n_intervals)
 
-    return slope, sigma, n_intervals
+    return freq_ppb, sigma, n_intervals
