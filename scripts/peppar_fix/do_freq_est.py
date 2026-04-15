@@ -17,7 +17,7 @@ State vector:
 Process model (linear):
     φ_rx += f_rx · dt
     f_rx += w_f_rx  (random walk)
-    φ_do += (f_do + adjfine) · dt
+    φ_do -= (f_do + adjfine) · dt     ← NEGATIVE: φ_do is "lateness"
     f_do += w_f_do  (random walk)
 
 Measurements:
@@ -75,16 +75,19 @@ class DOFreqEst:
         crystal_freq = base_freq if base_freq is not None else initial_freq
         self.x = np.array([phi_tcxo_init, 0.0, 0.0, -crystal_freq])
 
-        # F matrix
+        # F matrix — note F[2,3] is NEGATIVE: positive f_do (crystal
+        # running fast) makes φ_do decrease (less late), because φ_do is
+        # defined as "lateness" = GPS_phase − DO_phase.
         self.F = np.array([
-            [1.0, self.dt, 0.0, 0.0],
-            [0.0, 1.0,     0.0, 0.0],
-            [0.0, 0.0,     1.0, self.dt],
-            [0.0, 0.0,     0.0, 1.0],
+            [1.0, self.dt,  0.0, 0.0],
+            [0.0, 1.0,      0.0, 0.0],
+            [0.0, 0.0,      1.0, -self.dt],
+            [0.0, 0.0,      0.0, 1.0],
         ])
 
-        # B: adjfine only affects φ_phc
-        self.B = np.array([0.0, 0.0, self.dt, 0.0])
+        # B: adjfine only affects φ_do.  NEGATIVE because positive
+        # adjfine speeds up the DO, reducing lateness (φ_do).
+        self.B = np.array([0.0, 0.0, -self.dt, 0.0])
 
         # Measurement: PPP (linear)
         self.H_ppp = np.array([[1.0, 0.0, 0.0, 0.0]])
@@ -115,8 +118,10 @@ class DOFreqEst:
             self.P = np.diag([1e6, 100.0**2, 1000.0**2, 100.0**2])
 
         # LQR: only PHC states are controllable
-        # L[2] = phase gain, L[3] = freq cancellation
-        self.L = np.array([0.0, 0.0, 0.05, 1.0])
+        # L[2] = phase gain (negative: positive φ_do = late → more u
+        #         → more adjfine → speed up → reduce lateness)
+        # L[3] = freq cancellation
+        self.L = np.array([0.0, 0.0, -0.05, 1.0])
 
         self.freq = initial_freq
         # _last_u is the LQR u value.  Engine applies u as adjfine
@@ -179,8 +184,8 @@ class DOFreqEst:
         if dt != self.dt:
             self.dt = dt
             self.F[0, 1] = dt
-            self.F[2, 3] = dt
-            self.B[2] = dt
+            self.F[2, 3] = -dt
+            self.B[2] = -dt
 
         # ── Seed φ_phc from first TICC measurement ──
         # z_ticc = -φ_phc - qerr(φ_tcxo) → φ_phc = -z - qerr(φ_tcxo)

@@ -3203,10 +3203,10 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
     if ticc_tracker is not None:
         ticc_measurement = ticc_tracker.latest(time.monotonic(), args.ticc_max_age_s)
         if ticc_measurement is not None:
-            # PPS error = gnss_pps - do_pps, measured on TICC timescale.
-            # Positive = DO is late (needs to advance).
-            # ticc_measurement.diff_ns is chA-chB (do_pps-gnss_pps),
-            # so we negate to get gnss_pps-do_pps.
+            # PPS error from TICC, measured on TICC timescale.
+            # diff_ns = chA-chB = do_pps-gnss_pps (positive = DO PPS late).
+            # Negate so that pps_err_ticc_ns has the same sign as the
+            # DOFreqEst measurement model: negative when DO is late.
             #
             # Auto-capture: on the first valid TICC measurement, set the
             # target to the current differential.  This zeros the initial
