@@ -1094,6 +1094,12 @@ class AntPosEstThread(threading.Thread):
     def run(self):
         log.info("AntPosEstThread started (resolved_decimation=%d, resolve_threshold=%d)",
                  self._resolved_decimation, self._resolve_threshold)
+        try:
+            self._run_inner()
+        except Exception:
+            log.exception("AntPosEstThread crashed")
+
+    def _run_inner(self):
         filt = self._filt
         mw = self._mw
         nl = self._nl
