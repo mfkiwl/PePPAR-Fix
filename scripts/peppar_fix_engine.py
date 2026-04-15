@@ -2557,8 +2557,15 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
                  args.kalman_q_weight, args.kalman_r_weight,
                  args.kalman_dead_zone, carrier_fusion, current_adj)
     else:
+        # When bootstrap provides a frequency bias (_bootstrap_freq_ppb),
+        # the bias is added after the servo output.  Start the integrator
+        # at 0 so the servo provides corrections around the bias, not
+        # corrections around a gain-scaled version of the bias.
+        pi_initial = current_adj
+        if getattr(args, '_bootstrap_freq_ppb', None) is not None:
+            pi_initial = 0.0
         servo = PIServo(args.track_kp, args.track_ki, max_ppb=caps['max_adj'],
-                        initial_freq=current_adj)
+                        initial_freq=pi_initial)
     scheduler = DisciplineScheduler(
         base_interval=args.discipline_interval,
         adaptive=args.adaptive_interval,
@@ -3684,12 +3691,15 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 dt_rx_ns=dt_rx_ns, dt_rx_sigma_ns=dt_rx_sigma)
         else:
             servo.kp = BASE_KP * gain_scale
-            # Do NOT scale ki — the integrator carries the steady-state
-            # frequency (initial_freq from bootstrap).  Scaling it down
-            # destroys the frequency seed and makes the servo start at
-            # ~0 ppb instead of the bootstrap value.
-            servo.ki = BASE_KI
-            adjfine_ppb = -servo.update(avg_error, dt=float(n_samples))
+            servo.ki = BASE_KI * gain_scale
+            raw_adj = -servo.update(avg_error, dt=float(n_samples))
+            # Gain scaling attenuates the integrator, which carries the
+            # bootstrap frequency seed (initial_freq).  Add the bootstrap
+            # frequency as a fixed bias so the actuator stays near the
+            # measured OCXO offset regardless of gain scaling.  The servo
+            # provides corrections around this operating point.
+            freq_bias = getattr(args, '_bootstrap_freq_ppb', 0.0) or 0.0
+            adjfine_ppb = raw_adj + freq_bias
         max_track_ppb = min(
             ctx['caps']['max_adj'],
             args.track_max_ppb if args.track_max_ppb is not None else ctx['caps']['max_adj'],
