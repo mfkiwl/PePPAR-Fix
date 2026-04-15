@@ -7,7 +7,7 @@ receiver = "f9t-l5"
 # ts2phc disciplines bcm_phy_ptp from DO PPS on SYNC_IN independently.
 ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
-known_pos = "41.8430626,-88.1037190,201.671"
+ssr_mount = "SSRA01CAS1"
 systems = "gps,gal"
 
 # CTI OSC5A2B02 OCXO via AD5693R DAC on I2C bus 1.

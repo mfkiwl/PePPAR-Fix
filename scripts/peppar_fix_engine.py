@@ -4145,37 +4145,39 @@ def run(args):
     # Determine starting phase
     known_ecef = None
 
-    if args.known_pos:
+    # Position loading priority:
+    #   1. Receiver state (per-receiver, persisted across runs)
+    #   2. known_pos from config (operator-provided, first-run fallback)
+    #   3. Legacy position file (migration only)
+    #   4. Phase 1 bootstrap (no position at all)
+    pos_source = None
+    pos_sigma_m = None
+    uid = getattr(args, 'receiver_unique_id', None)
+    if uid is not None:
+        from peppar_fix.receiver_state import load_position_detail_from_receiver
+        known_ecef, pos_sigma_m, pos_source = load_position_detail_from_receiver(uid)
+        if known_ecef is not None:
+            pos_source = f"receiver state ({pos_source}, σ={pos_sigma_m}m)"
+    if known_ecef is None and args.known_pos:
         lat, lon, alt = [float(v) for v in args.known_pos.split(',')]
         known_ecef = lla_to_ecef(lat, lon, alt)
-        log.info(f"Position (CLI): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
-        # Persist known position to receiver state and legacy file
-        uid = getattr(args, 'receiver_unique_id', None)
+        pos_source = "known_pos (config)"
+        pos_sigma_m = 0.0
+        # Persist to receiver state so future runs use it directly
         if uid is not None:
             save_position_to_receiver(uid, known_ecef, 0.0, "known_pos")
-            log.info("Position saved to receiver state for %s", uid)
-        if args.position_file:
-            save_position(args.position_file, known_ecef, 0.0, "known_pos")
-    elif args.position_file:
-        # Try receiver state first, then fall back to legacy position file.
-        pos_source = None
-        uid = getattr(args, 'receiver_unique_id', None)
-        if uid is not None:
-            from peppar_fix.receiver_state import load_position_from_receiver
-            known_ecef = load_position_from_receiver(uid)
-            if known_ecef is not None:
-                pos_source = "receiver state"
-        if known_ecef is None and args.position_file:
-            # Migration fallback: read legacy data/position.json once,
-            # then migrate it into receiver state so future runs skip this.
-            known_ecef = load_position(args.position_file)
-            if known_ecef is not None:
-                pos_source = "file (migrating to receiver state)"
-                if uid is not None:
-                    save_position_to_receiver(uid, known_ecef, 1.0, "migrated_from_legacy")
+    if known_ecef is None and args.position_file:
+        # Migration fallback: read legacy data/position.json once,
+        # then migrate it into receiver state so future runs skip this.
+        known_ecef = load_position(args.position_file)
         if known_ecef is not None:
-            lat, lon, alt = ecef_to_lla(known_ecef[0], known_ecef[1], known_ecef[2])
-            log.info(f"Position ({pos_source}): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
+            pos_source = "file (migrating to receiver state)"
+            pos_sigma_m = 10.0  # unknown quality — will be validated
+            if uid is not None:
+                save_position_to_receiver(uid, known_ecef, 10.0, "migrated_from_legacy")
+    if known_ecef is not None:
+        lat, lon, alt = ecef_to_lla(known_ecef[0], known_ecef[1], known_ecef[2])
+        log.info(f"Position ({pos_source}): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
 
     try:
         if known_ecef is None:
@@ -4201,8 +4203,16 @@ def run(args):
         # Validate loaded position against live pseudorange fix.
         # A tampered or stale position file would send the FixedPosFilter
         # into 100+ km residuals without any warning.
+        #
+        # Skip validation for trusted positions: receiver state with
+        # sigma < 10m (PPP bootstrap or known_pos) and config known_pos.
+        # Only validate legacy file migrations and high-sigma positions.
+        skip_validation = (pos_sigma_m is not None and pos_sigma_m < 10.0)
         uid = getattr(args, 'receiver_unique_id', None)
-        if uid is not None or args.known_pos:
+        if skip_validation:
+            log.info('Position from trusted source (σ=%.1fm) — skipping LS validation',
+                     pos_sigma_m)
+        elif uid is not None or args.known_pos:
             log.info('Validating loaded position against live LS fix...')
             for _attempt in range(30):
                 if stop_event.is_set():

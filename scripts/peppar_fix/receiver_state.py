@@ -243,6 +243,31 @@ def load_position_from_receiver(unique_id, state_dir=None):
         return None
 
 
+def load_position_detail_from_receiver(unique_id, state_dir=None):
+    """Load position with quality metadata from a receiver's state file.
+
+    Returns:
+        (ecef, sigma_m, source) tuple, or (None, None, None) if no position.
+        ecef is a numpy array [x, y, z] in ECEF meters.
+    """
+    state = load_receiver_state(unique_id, state_dir)
+    if state is None:
+        return None, None, None
+    pos = state.get("last_known_position")
+    if pos is None:
+        return None, None, None
+    ecef = pos.get("ecef_m")
+    if ecef is None or len(ecef) != 3:
+        return None, None, None
+    try:
+        import numpy as np
+        return (np.array(ecef, dtype=float),
+                pos.get("sigma_m"),
+                pos.get("source"))
+    except (TypeError, ValueError):
+        return None, None, None
+
+
 def receiver_has_position(unique_id, state_dir=None):
     """Check whether a receiver has a stored position.
 

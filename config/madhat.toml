@@ -1,0 +1,14 @@
+[peppar]
+serial = "/dev/ttyACM1"
+baud = 38400
+ubx_port = "USB"
+receiver = "f9t-l5"
+ptp_profile = "i226"
+ptp_dev = "/dev/ptp0"
+ntrip_conf = "ntrip.conf"
+eph_mount = "BCEP00BKG0"
+ssr_mount = "SSRA01CAS1"
+systems = "gps,gal"
+
+# TICC #2: chA = PEROUT (i226 PPS OUT), chB = GNSS PPS.
+ticc_port = "/dev/ticc2"
