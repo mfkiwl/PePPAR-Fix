@@ -3523,16 +3523,14 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
         mode_name, mode_time_to_zero_s = _update_ticc_tracking_mode(
             ctx, args, best, time.monotonic()
         )
-        if mode_name == 'pull_in':
-            scheduler._converging = False
-            scheduler.interval = max(args.min_interval, min(args.max_interval, args.ticc_pullin_interval))
-        elif mode_name == 'landing':
-            scheduler._converging = True
-            scheduler.interval = 1
+        # DOFreqEst handles convergence internally via its EKF + LQR.
+        # Force interval=1 so it always gets dt=1.0 — the mode-specific
+        # intervals (5 for pull_in, variable for settled) were designed
+        # for the old PI servo and cause DOFreqEst to diverge with large
+        # dt prediction steps.  Mode tracking is kept for logging only.
+        scheduler.interval = 1
+        if mode_name == 'landing':
             mode_gain_floor = args.ticc_landing_gain_floor
-        else:
-            scheduler._converging = False
-            scheduler.interval = max(args.min_interval, min(args.max_interval, args.ticc_settled_interval))
 
     if (
         TRACK_OUTLIER_NS is not None and
