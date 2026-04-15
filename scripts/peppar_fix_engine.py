@@ -1113,6 +1113,10 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
         "ticc_missing_pair": 0,
         "consumption_alarm": False,
     }
+    # PPP-AR: Melbourne-Wubbena + narrow-lane in Phase 2 (same as Phase 1)
+    mw_tracker = MelbourneWubbenaTracker()
+    nl_resolver = NarrowLaneResolver()
+
     last_skip_log = start_time
     last_obs_wall = time.monotonic()
     last_obs_input_wall = last_obs_wall
@@ -1369,6 +1373,33 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             dt_rx_sigma = math.sqrt(max(0, p_clk)) / C * 1e9
             n_epochs += 1
 
+            # PPP-AR: cycle slip detection resets MW tracker
+            if hasattr(filt, 'prev_obs') and filt.prev_obs:
+                current_svs = {o['sv'] for o in observations}
+                slipped = filt.detect_cycle_slips(observations, filt.prev_obs)
+                for sv in slipped:
+                    mw_tracker.reset(sv)
+                    nl_resolver.unfix(sv)
+            filt.prev_obs = {o['sv']: o for o in observations}
+
+            # PPP-AR: Melbourne-Wubbena wide-lane update
+            for obs in observations:
+                sv = obs['sv']
+                phi1 = obs.get('phi1_cyc')
+                phi2 = obs.get('phi2_cyc')
+                pr1 = obs.get('pr1_m')
+                pr2 = obs.get('pr2_m')
+                wl1 = obs.get('wl_f1')
+                wl2 = obs.get('wl_f2')
+                if all(v is not None for v in (phi1, phi2, pr1, pr2, wl1, wl2)):
+                    f1_hz = C / wl1
+                    f2_hz = C / wl2
+                    mw_tracker.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
+
+            # PPP-AR: narrow-lane resolution attempt (after MW warmup)
+            if n_epochs >= 30:
+                nl_resolver.attempt(filt, mw_tracker)
+
             # Extract ISBs for logging
             isb_gal_ns = 0.0
             isb_bds_ns = 0.0
@@ -1420,6 +1451,21 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                     f"n={n_used} rms={resid_rms:.3f}m "
                     f"[{source}]"
                 )
+                # PPP-AR integrality report
+                if len(filt.sv_to_idx) > 0 and n_epochs % 10 == 0:
+                    int_results = nl_resolver.integrality(filt, mw_tracker)
+                    if int_results:
+                        n_fixable = sum(1 for r in int_results if abs(r[1]) < 0.15)
+                        gal = [(sv, f, s, fx) for sv, f, s, fx in int_results if sv.startswith('E')]
+                        gps = [(sv, f, s, fx) for sv, f, s, fx in int_results if sv.startswith('G')]
+                        gal_frac = np.mean([abs(f) for _, f, _, _ in gal]) if gal else float('nan')
+                        gps_frac = np.mean([abs(f) for _, f, _, _ in gps]) if gps else float('nan')
+                        log.info(
+                            f"    AR: GAL|frac|={gal_frac:.3f}({len(gal)}) "
+                            f"GPS|frac|={gps_frac:.3f}({len(gps)}) "
+                            f"fixable={n_fixable} "
+                            f"{mw_tracker.summary()} {nl_resolver.summary()}"
+                        )
             now = time.time()
             if now - last_skip_log >= 60.0:
                 log.info(f"  Skip stats: {skip_stats}")
