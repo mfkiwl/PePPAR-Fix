@@ -1,6 +1,9 @@
 [peppar]
-serial = "/dev/ttyACM1"
-baud = 38400
+# F9T has no USB serial number — port can change on re-enumeration.
+# TODO: engine should use discover_receivers() to find by unique_id
+# when the configured port fails.
+serial = "/dev/ttyACM2"
+baud = 115200
 ubx_port = "USB"
 receiver = "f9t-l5"
 ptp_profile = "i226"
