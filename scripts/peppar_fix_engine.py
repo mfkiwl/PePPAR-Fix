@@ -1400,8 +1400,9 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                     f2_hz = C / wl2
                     mw_tracker.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
 
-            # PPP-AR: narrow-lane resolution attempt (after MW warmup)
-            if n_epochs >= 30:
+            # PPP-AR: narrow-lane resolution attempt (after MW warmup).
+            # Requires PPPFilter with per-SV ambiguity states.
+            if n_epochs >= 30 and hasattr(filt, 'sv_to_idx'):
                 nl_resolver.attempt(filt, mw_tracker)
 
             # Extract ISBs for logging
@@ -1455,8 +1456,9 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                     f"n={n_used} rms={resid_rms:.3f}m "
                     f"[{source}]"
                 )
-                # PPP-AR integrality report
-                if len(filt.sv_to_idx) > 0 and n_epochs % 10 == 0:
+                # PPP-AR integrality report (requires PPPFilter with sv_to_idx)
+                if (hasattr(filt, 'sv_to_idx') and len(filt.sv_to_idx) > 0
+                        and n_epochs % 10 == 0):
                     int_results = nl_resolver.integrality(filt, mw_tracker)
                     if int_results:
                         n_fixable = sum(1 for r in int_results if abs(r[1]) < 0.15)
@@ -1470,6 +1472,11 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                             f"fixable={n_fixable} "
                             f"{mw_tracker.summary()} {nl_resolver.summary()}"
                         )
+                elif mw_tracker.n_tracked > 0 and n_epochs % 10 == 0:
+                    # FixedPosFilter: no per-SV ambiguities for NL resolution.
+                    # Log MW status only — WL fixing still works, NL needs
+                    # PPPFilter (TODO: use PPPFilter in fixed-position mode).
+                    log.info(f"    AR(WL only): {mw_tracker.summary()}")
             now = time.time()
             if now - last_skip_log >= 60.0:
                 log.info(f"  Skip stats: {skip_stats}")
