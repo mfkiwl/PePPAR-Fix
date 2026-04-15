@@ -3831,15 +3831,23 @@ def _cleanup_servo(ctx):
     pmc = ctx.get('pmc')
     if pmc is not None:
         pmc.close()
-    # Save noise estimator state for warm-start on next run
-    noise_est = ctx.get('noise_estimator')
-    if noise_est is not None:
-        do_uid = ctx.get('do_unique_id')
-        if do_uid is not None:
-            from peppar_fix.noise_estimator import save_noise_state
-            save_noise_state(do_uid, noise_est)
-    # Save refined oscillator corrections for next bootstrap
-    _save_osc_freq_corr(ctx)
+    # Only save state on clean exit with sane adjfine.  Failed runs
+    # (railed actuator, diverged EKF) should NOT poison the drift file
+    # or DO state — the next run's bootstrap would inherit the bad value.
+    adjfine = ctx.get('adjfine_ppb', 0.0)
+    max_adj = ctx.get('caps', {}).get('max_adj', 62_500_000)
+    adjfine_sane = abs(adjfine) < max_adj * 0.90
+    if adjfine_sane:
+        noise_est = ctx.get('noise_estimator')
+        if noise_est is not None:
+            do_uid = ctx.get('do_unique_id')
+            if do_uid is not None:
+                from peppar_fix.noise_estimator import save_noise_state
+                save_noise_state(do_uid, noise_est)
+        _save_osc_freq_corr(ctx)
+    else:
+        log.warning("Skipping state save: adjfine=%+.1f ppb is near rail "
+                    "(max=%+.0f) — likely diverged", adjfine, max_adj)
     log.info("PHC servo cleaned up")
 
 
