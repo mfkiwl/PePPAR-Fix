@@ -1113,9 +1113,12 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
         "ticc_missing_pair": 0,
         "consumption_alarm": False,
     }
-    # PPP-AR: Melbourne-Wubbena + narrow-lane in Phase 2 (same as Phase 1)
-    mw_tracker = MelbourneWubbenaTracker()
-    nl_resolver = NarrowLaneResolver()
+    # PPP-AR belongs in AntPosEst (the background PPPFilter that refines
+    # position), not in DOFreqEst's FixedPosFilter loop.  DOFreqEst uses
+    # time-differenced carrier phase — ambiguities cancel, no AR needed.
+    # See docs/architecture-vision.md for the clear separation.
+    # TODO: keep PPPFilter alive as AntPosEst background thread, feed it
+    # decimated observations, run MW+NL there.
 
     last_skip_log = start_time
     last_obs_wall = time.monotonic()
@@ -1373,38 +1376,6 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             dt_rx_sigma = math.sqrt(max(0, p_clk)) / C * 1e9
             n_epochs += 1
 
-            # PPP-AR: cycle slip detection resets MW tracker.
-            # FixedPosFilter doesn't have detect_cycle_slips — use the
-            # MW tracker's internal consistency check instead (a slip
-            # causes a jump in the MW combination that exceeds 0.5 WL).
-            # Reset SVs that disappeared (likely slip or obstruction).
-            if hasattr(filt, '_prev_obs_svs'):
-                current_svs = {o['sv'] for o in observations}
-                lost_svs = filt._prev_obs_svs - current_svs
-                for sv in lost_svs:
-                    mw_tracker.reset(sv)
-                    nl_resolver.unfix(sv)
-            filt._prev_obs_svs = {o['sv'] for o in observations}
-
-            # PPP-AR: Melbourne-Wubbena wide-lane update
-            for obs in observations:
-                sv = obs['sv']
-                phi1 = obs.get('phi1_cyc')
-                phi2 = obs.get('phi2_cyc')
-                pr1 = obs.get('pr1_m')
-                pr2 = obs.get('pr2_m')
-                wl1 = obs.get('wl_f1')
-                wl2 = obs.get('wl_f2')
-                if all(v is not None for v in (phi1, phi2, pr1, pr2, wl1, wl2)):
-                    f1_hz = C / wl1
-                    f2_hz = C / wl2
-                    mw_tracker.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
-
-            # PPP-AR: narrow-lane resolution attempt (after MW warmup).
-            # Requires PPPFilter with per-SV ambiguity states.
-            if n_epochs >= 30 and hasattr(filt, 'sv_to_idx'):
-                nl_resolver.attempt(filt, mw_tracker)
-
             # Extract ISBs for logging
             isb_gal_ns = 0.0
             isb_bds_ns = 0.0
@@ -1456,27 +1427,6 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                     f"n={n_used} rms={resid_rms:.3f}m "
                     f"[{source}]"
                 )
-                # PPP-AR integrality report (requires PPPFilter with sv_to_idx)
-                if (hasattr(filt, 'sv_to_idx') and len(filt.sv_to_idx) > 0
-                        and n_epochs % 10 == 0):
-                    int_results = nl_resolver.integrality(filt, mw_tracker)
-                    if int_results:
-                        n_fixable = sum(1 for r in int_results if abs(r[1]) < 0.15)
-                        gal = [(sv, f, s, fx) for sv, f, s, fx in int_results if sv.startswith('E')]
-                        gps = [(sv, f, s, fx) for sv, f, s, fx in int_results if sv.startswith('G')]
-                        gal_frac = np.mean([abs(f) for _, f, _, _ in gal]) if gal else float('nan')
-                        gps_frac = np.mean([abs(f) for _, f, _, _ in gps]) if gps else float('nan')
-                        log.info(
-                            f"    AR: GAL|frac|={gal_frac:.3f}({len(gal)}) "
-                            f"GPS|frac|={gps_frac:.3f}({len(gps)}) "
-                            f"fixable={n_fixable} "
-                            f"{mw_tracker.summary()} {nl_resolver.summary()}"
-                        )
-                elif len(mw_tracker._state) > 0 and n_epochs % 10 == 0:
-                    # FixedPosFilter: no per-SV ambiguities for NL resolution.
-                    # Log MW status only — WL fixing still works, NL needs
-                    # PPPFilter (TODO: use PPPFilter in fixed-position mode).
-                    log.info(f"    AR(WL only): {mw_tracker.summary()}")
             now = time.time()
             if now - last_skip_log >= 60.0:
                 log.info(f"  Skip stats: {skip_stats}")
