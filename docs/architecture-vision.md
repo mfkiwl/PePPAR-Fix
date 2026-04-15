@@ -1,8 +1,8 @@
 # Architecture Vision — AntPosEst + DOFreqEst
 
-*2026-04-09 design discussion.  This document describes where we're going,
-not where we are today.  Current implementation details live in the
-per-topic design docs; this doc provides the unifying frame.*
+*2026-04-09 design discussion, updated 2026-04-15 with implementation
+status and refined framing.  This document describes both where we are
+and where we're going.*
 
 ## Naming principle
 
@@ -10,6 +10,25 @@ Name things for their **value**, not their mechanism.  There are EKFs
 inside these components, but "filter" describes how they work, not what
 they deliver.  The right names describe what value each component adds
 to the system.
+
+## Why position matters for time
+
+GNSS receiver manufacturers solve general PVT problems.  PePPAR-Fix
+is not a general PVT customer.  We take Velocity = 0 as a given.  We
+need Position only as a means to an end.  **The end is Time.**
+
+We need an approximate position fix to even begin tracking time
+differences between GPS and the DO.  But we also need a precise
+position fix to reduce time phase errors — every centimeter of
+position error is ~33 ps of clock error.  PePPAR-Fix clocks must all
+agree on (1) the length of a second and (2) when the second starts.
+That's why we want AR: it pushes the position to cm level, which
+pushes the time-of-second-boundary error below 100 ps.
+
+This motivates the two-estimator architecture: one that answers
+"where is the antenna?" (position, long timescale, AR) and one that
+answers "how fast is the DO drifting?" (frequency, short timescale,
+no AR needed).
 
 ## The two estimators
 
@@ -374,8 +393,10 @@ HOLDOVER        → no usable measurements.  Coast on last adjfine.
 No estimator trusts its seed.  Seeds are initial conditions that
 accelerate convergence.  Verification is always the first step:
 
-- **Position seed** (position.json): verified by live LS fix within
-  threshold (~10 m).  If rejected, fall back to PPP from scratch.
+- **Position seed** (receiver state, keyed by F9T SEC-UNIQID):
+  trusted when sigma < 10 m (from prior PPP convergence or known_pos).
+  LS validation skipped for trusted seeds.  If no seed exists or
+  sigma is high, fall back to PPP from scratch (UNSURVEYED).
 - **Frequency seed** (drift.json): verified by PPS interval
   measurement within threshold (~50 ppb).  If rejected, use the
   measured value.
@@ -383,6 +404,75 @@ accelerate convergence.  Verification is always the first step:
   by the InBandNoiseEstimator as discipline gaps accumulate.  If the
   live noise profile diverges significantly (temperature change, aging),
   the live estimate supersedes the file.
+
+## Implementation status (2026-04-15)
+
+### What exists in the code today
+
+The engine (`peppar_fix_engine.py`) has two top-level functions:
+
+- `run_bootstrap()` — AntPosEst in UNSURVEYED/VERIFYING states.
+  Uses `PPPFilter` to converge position from scratch.  Runs MW+NL
+  for AR when phase biases are available.  Exits when position
+  sigma reaches threshold.  **Currently discarded after convergence.**
+
+- `run_steady_state()` — DOFreqEst in TRACKING state.  Uses
+  `FixedPosFilter` (time-differenced carrier phase, no ambiguity
+  states) to extract dt_rx each epoch.  Feeds DOFreqEst 4-state
+  EKF for servo control.
+
+The engine transitions from `run_bootstrap` → `run_steady_state`
+once position is established.  The code calls these "Phase 1" and
+"Phase 2" — these names should be replaced:
+
+| Old name | Maps to | AntPosEst state |
+|----------|---------|-----------------|
+| Phase 1 entry | Cold start | UNSURVEYED |
+| Phase 1 w/ seed | Warm start | VERIFYING |
+| Phase 1 → 2 boundary | Position gate | VERIFIED |
+| Phase 2 | Servo running | CONVERGING (AntPosEst should still refine) |
+
+### What's working (validated 2026-04-15)
+
+- **DOFreqEst 4-state EKF**: process model sign fix validated.
+  7.7-hour overnight on clkPoC3, TDEV(1s) = 0.294 ns.  The EKF
+  fuses raw TICC + PPP dt_rx, resolving the 125 MHz tick quantization
+  internally at PPP precision.
+
+- **TICC as a competing error source**: TICC-drive path removed
+  (-258 lines).  TICC competes in `compute_error_sources()` alongside
+  Carrier, PPS+qErr, PPS.  Wins when available (lowest confidence_ns).
+
+- **Adaptive discipline interval**: scheduler adapts based on drift
+  rate vs measurement noise.  DOFreqEst receives actual wall-clock dt.
+  Longer intervals reduce actuation noise, letting the OCXO's superior
+  short-term stability shine through.
+
+- **CNES SSR for AR**: `ssr_ntrip_conf` supports a separate SSR caster.
+  CNES provides phase biases matching our F9T L5 profile: GAL L1C+L5Q
+  (formal HIT), GPS L5I (shared carrier with L5Q — works).  WL fixing
+  confirmed in Phase 1 (6/14 GAL SVs in 78 epochs).
+
+### What's missing (the gap from vision to code)
+
+1. **AntPosEst as a persistent background thread.**  Currently the
+   PPPFilter runs only in `run_bootstrap()` and is discarded.  The
+   vision says it should keep running throughout steady state, fed
+   decimated observations from a background thread, continuously
+   refining position and running AR.  Position improvements flow
+   one-way into DOFreqEst's phase reference via exponential blending.
+
+2. **Named state machine in the engine.**  The code uses ad hoc
+   boolean flags and function boundaries instead of explicit
+   AntPosEst/DOFreqEst states.  The `run_bootstrap → run_steady_state`
+   transition should be replaced by a state machine that reflects
+   UNSURVEYED → VERIFYING → VERIFIED → CONVERGING → RESOLVED.
+
+3. **DOFreqEst doesn't need AR.**  It uses time-differenced carrier
+   phase (ambiguities cancel between epochs).  AR belongs exclusively
+   in AntPosEst, which tracks absolute carrier-phase ambiguities over
+   long timescales.  The benefit to DOFreqEst is indirect: AR-refined
+   position reduces the systematic clock bias from position error.
 
 ## In-band DO noise estimation
 
