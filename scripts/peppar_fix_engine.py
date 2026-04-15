@@ -2112,11 +2112,13 @@ def _do_bootstrap_phc(args, ptp, pps_freq_ppb, pps_freq_unc,
         log.info("Phase OK (%+.0f ns) — frequency-only correction",
                  phase_error_ns)
 
-    # Glide slope
+    # Glide slope — disabled.  DOFreqEst handles phase convergence
+    # internally via its LQR L[2] term.  The PI glide used args.track_ki
+    # to compute a frequency ramp; the EKF doesn't need it and the
+    # mismatch between initial_freq (with glide) and base_freq (without)
+    # caused the DOFreqEst to diverge on PHC hosts.
     glide_offset = 0.0
-    if args.no_glide:
-        log.info("Glide disabled (--no-glide): adjfine = base frequency only")
-    elif not phase_sane and args.track_ki > 0:
+    if False:
         omega_n = math.sqrt(args.track_ki)
         zeta = args.glide_zeta
         glide_offset = -zeta * omega_n * phi_0
