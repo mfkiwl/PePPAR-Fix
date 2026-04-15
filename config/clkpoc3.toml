@@ -7,7 +7,8 @@ receiver = "f9t-l5"
 # ts2phc disciplines bcm_phy_ptp from DO PPS on SYNC_IN independently.
 ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
-ssr_mount = "SSRA01CAS1"
+# CNES SSR for PPP-AR (credentials in ntrip-cnes.conf)
+ssr_ntrip_conf = "ntrip-cnes.conf"
 systems = "gps,gal"
 
 # CTI OSC5A2B02 OCXO via AD5693R DAC on I2C bus 1.

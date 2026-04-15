@@ -7,7 +7,8 @@ ptp_profile = "i226"
 ptp_dev = "/dev/ptp0"
 ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
-ssr_mount = "SSRA01CAS1"
+# CNES SSR for PPP-AR (credentials in ntrip-cnes.conf)
+ssr_ntrip_conf = "ntrip-cnes.conf"
 systems = "gps,gal"
 
 # TICC #2: chA = PEROUT (i226 PPS OUT), chB = GNSS PPS.

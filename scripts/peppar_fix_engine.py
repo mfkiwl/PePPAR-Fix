@@ -659,9 +659,14 @@ def position_sigma_3d(P):
 # ── NTRIP config loading ─────────────────────────────────────────────── #
 
 def load_ntrip_config(args):
-    """Load NTRIP configuration from config file, merging with CLI args."""
+    """Load NTRIP configuration from config file, merging with CLI args.
+
+    Supports a separate SSR credentials file (ssr_ntrip_conf) so the SSR
+    stream can come from a different caster than broadcast ephemeris.
+    E.g., ephemeris from Australian mirror, SSR from BKG/CNES.
+    """
+    import configparser
     if args.ntrip_conf:
-        import configparser
         conf = configparser.ConfigParser()
         conf.read(args.ntrip_conf)
         if 'ntrip' in conf:
@@ -678,6 +683,24 @@ def load_ntrip_config(args):
                 args.ntrip_tls = True
             if not args.ssr_mount and s.get('mount'):
                 args.ssr_mount = s.get('mount')
+
+    # Separate SSR caster credentials (e.g., CNES on products.igs-ip.net
+    # while ephemeris comes from the Australian mirror).
+    ssr_conf_path = getattr(args, 'ssr_ntrip_conf', None)
+    if ssr_conf_path:
+        conf = configparser.ConfigParser()
+        conf.read(ssr_conf_path)
+        if 'ntrip' in conf:
+            s = conf['ntrip']
+            args.ssr_caster = s.get('caster', getattr(args, 'ssr_caster', None))
+            args.ssr_port = int(s.get('port', 443))
+            args.ssr_user = s.get('user', getattr(args, 'ssr_user', None))
+            args.ssr_password = s.get('password', getattr(args, 'ssr_password', None))
+            args.ssr_tls = s.getboolean('tls', True)
+            if s.get('mount'):
+                args.ssr_mount = s.get('mount')
+            log.info("SSR credentials loaded from %s (caster=%s, mount=%s)",
+                     ssr_conf_path, args.ssr_caster, args.ssr_mount)
 
 
 # ── Shared infrastructure setup ──────────────────────────────────────── #
@@ -710,7 +733,9 @@ def start_ntrip_threads(args, beph, ssr, stop_event):
         ssr_p = getattr(args, 'ssr_port', None) or args.ntrip_port
         ssr_u = getattr(args, 'ssr_user', None) or args.ntrip_user
         ssr_pw = getattr(args, 'ssr_password', None) or args.ntrip_password
-        ssr_tls = use_tls if ssr_p == args.ntrip_port else (ssr_p == 443)
+        ssr_tls = getattr(args, 'ssr_tls', None)
+        if ssr_tls is None:
+            ssr_tls = use_tls if ssr_p == args.ntrip_port else (ssr_p == 443)
         ssr_stream = NtripStream(
             caster=ssr_host, port=ssr_p,
             mountpoint=args.ssr_mount,
@@ -4157,6 +4182,7 @@ def _apply_host_config(args):
         "ntrip_conf":       ("ntrip_conf",       str),
         "eph_mount":        ("eph_mount",        str),
         "ssr_mount":        ("ssr_mount",        str),
+        "ssr_ntrip_conf":   ("ssr_ntrip_conf",   str),
         "known_pos":        ("known_pos",        str),
         "position_file":    ("position_file",    str),
         "systems":          ("systems",          str),
