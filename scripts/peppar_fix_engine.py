@@ -73,6 +73,11 @@ from peppar_fix.event_time import PpsEvent
 from peppar_fix.fault_injection import get_delay_injector, get_source_mute_controller
 from peppar_fix.receiver import get_driver
 from peppar_fix.receiver_state import save_position_to_receiver
+from peppar_fix.states import (
+    AntPosEst, AntPosEstState,
+    DOFreqEst, DOFreqEstState,
+    format_status,
+)
 
 log = logging.getLogger("peppar-fix")
 
@@ -1005,7 +1010,8 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
 # ── Phase 2: Steady state ────────────────────────────────────────────── #
 
 def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
-                     stop_event, qerr_store=None, out_w=None, nav2_store=None):
+                     stop_event, qerr_store=None, out_w=None, nav2_store=None,
+                     ape_sm=None, dfe_sm=None):
     """Run FixedPosFilter for clock estimation with optional servo.
 
     This is the steady-state phase: position is known, we estimate clock
@@ -1060,12 +1066,15 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
         # For VCOCXO DOs: TADD ARM + DAC frequency seed.
         if not getattr(args, 'skip_bootstrap', False) and not args.freerun:
             if not _do_bootstrap_init(args, ptp, known_ecef, obs_queue,
-                                        beph, ssr, stop_event):
+                                        beph, ssr, stop_event,
+                                        dfe_sm=dfe_sm):
                 log.error("DO bootstrap failed — cannot start servo")
                 if ptp is not None:
                     ptp.close()
                 return 1
             log.info("DO bootstrap succeeded (%s)", getattr(args, 'do_type', 'phc'))
+            if dfe_sm is not None:
+                dfe_sm.transition(DOFreqEstState.TRACKING, "DO bootstrap succeeded")
 
         # Set up servo with PPS retry (absorbs wrapper's exit-code-3 retry).
         # No-PPS (return 3) is retryable — PPS may appear after a few seconds
@@ -1094,6 +1103,8 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             return servo_result
         servo_ctx = servo_result
         servo_ctx["correlation_gate"] = StrictCorrelationGate()
+        if dfe_sm is not None:
+            servo_ctx["dfe_sm"] = dfe_sm
 
     prev_t = None
     n_epochs = 0
@@ -1427,6 +1438,12 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                     f"n={n_used} rms={resid_rms:.3f}m "
                     f"[{source}]"
                 )
+            # Periodic [STATUS] line every 60 epochs
+            if n_epochs % 60 == 0 and ape_sm is not None and dfe_sm is not None:
+                ticc_ok = (servo_ctx.get('ticc') is not None) if servo_ctx else None
+                qvir = servo_ctx.get('qvir') if servo_ctx else None
+                log.info("[STATUS] %s", format_status(ape_sm, dfe_sm,
+                         ticc_ok=ticc_ok, qvir=qvir))
             now = time.time()
             if now - last_skip_log >= 60.0:
                 log.info(f"  Skip stats: {skip_stats}")
@@ -2123,7 +2140,7 @@ def _do_bootstrap_phc(args, ptp, pps_freq_ppb, pps_freq_unc,
 
 
 def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
-                        stop_event):
+                        stop_event, dfe_sm=None):
     """Bootstrap DO phase and frequency before servo starts.
 
     Dispatches to the appropriate bootstrap path based on --do-type:
@@ -2138,6 +2155,9 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
     Returns True on success, False on fatal error.
     """
     from peppar_fix.timestamper import ExttsTimestamper, TiccDifferentialTimestamper
+
+    if dfe_sm is not None:
+        dfe_sm.transition(DOFreqEstState.PHASE_SETTING, "DO bootstrap starting")
 
     do_type = getattr(args, 'do_type', 'phc')
 
@@ -2203,6 +2223,10 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
     if result is None:
         return False
     pps_freq_ppb, pps_freq_unc, dt_rx_ns, dt_rx_series = result
+
+    if dfe_sm is not None:
+        dfe_sm.transition(DOFreqEstState.FREQ_VERIFYING,
+                          f"freq measured ({pps_freq_ppb:+.1f} ppb)")
 
     if do_type == 'vcocxo':
         return _do_bootstrap_vcocxo(
@@ -3392,6 +3416,10 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             log.error("  %d consecutive outliers — servo has lost control. "
                       "Exiting for re-bootstrap (exit code 5).",
                       ctx['consecutive_outliers'])
+            _dfe = ctx.get('dfe_sm')
+            if _dfe is not None:
+                _dfe.transition(DOFreqEstState.HOLDOVER,
+                                "30 consecutive outliers")
             ctx['phc_diverged'] = True
             return "outlier"
         log.warning(f"  Outlier: {best}, skipping ({ctx['consecutive_outliers']}/30)")
@@ -3501,6 +3529,11 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
             ctx['actuator'].adjust_frequency_ppb(adjfine_ppb)
         ctx['adjfine_ppb'] = adjfine_ppb
         ctx['gain_scale'] = gain_scale
+        # Update DOFreqEst state machine metrics for [STATUS] line
+        _dfe = ctx.get('dfe_sm')
+        if _dfe is not None:
+            _dfe.update_metrics(adj_ppb=adjfine_ppb, err_ns=avg_error,
+                                interval=scheduler.interval)
 
         scheduler.update_drift_rate(time.monotonic(), adjfine_ppb)
         scheduler.compute_adaptive_interval(avg_confidence)
@@ -3849,6 +3882,10 @@ def run(args):
     mute_controller = get_source_mute_controller()
     mute_controller.install_signal_handlers()
 
+    # State machines for observability (log transitions, don't control flow)
+    ape_sm = AntPosEst()
+    dfe_sm = DOFreqEst()
+
     def on_signal(signum, frame):
         log.info("Signal received, shutting down")
         stop_event.set()
@@ -3981,10 +4018,12 @@ def run(args):
         known_ecef, pos_sigma_m, pos_source = load_position_detail_from_receiver(uid)
         if known_ecef is not None:
             pos_source = f"receiver state ({pos_source}, σ={pos_sigma_m}m)"
+            ape_sm.transition(AntPosEstState.VERIFYING, "loaded from receiver state")
     if known_ecef is None and args.known_pos:
         lat, lon, alt = [float(v) for v in args.known_pos.split(',')]
         known_ecef = lla_to_ecef(lat, lon, alt)
         pos_source = "known_pos (config)"
+        ape_sm.transition(AntPosEstState.VERIFYING, "known_pos from config")
         pos_sigma_m = 0.0
         # Persist to receiver state so future runs use it directly
         if uid is not None:
@@ -4013,6 +4052,7 @@ def run(args):
 
             pos_ecef, sigma_m = result
             known_ecef = pos_ecef
+            ape_sm.transition(AntPosEstState.VERIFIED, f"bootstrap converged (σ={sigma_m:.1f}m)")
 
             # Save position
             uid = getattr(args, 'receiver_unique_id', None)
@@ -4035,6 +4075,7 @@ def run(args):
         if skip_validation:
             log.info('Position from trusted source (σ=%.1fm) — skipping LS validation',
                      pos_sigma_m)
+            ape_sm.transition(AntPosEstState.VERIFIED, "trusted source, LS validation skipped")
         elif uid is not None or args.known_pos:
             log.info('Validating loaded position against live LS fix...')
             for _attempt in range(30):
@@ -4084,12 +4125,14 @@ def run(args):
                         log.info("Position saved to receiver state (re-bootstrapped)")
                 else:
                     log.info(f'  Position validated (within {separation_m:.0f}m of LS fix)')
+                    ape_sm.transition(AntPosEstState.VERIFIED, f"LS validation passed ({separation_m:.0f}m)")
                 break
 
         if stop_event.is_set():
             return 0
 
         # Phase 2: Steady state (with internal re-bootstrap on PHC divergence)
+        ape_sm.transition(AntPosEstState.CONVERGING, "entering steady state")
         max_rebootstrap = 3
         for _attempt in range(1, max_rebootstrap + 1):
             steady_result = run_steady_state(
@@ -4103,6 +4146,8 @@ def run(args):
                 qerr_store=qerr_store,
                 out_w=out_w,
                 nav2_store=nav2_store,
+                ape_sm=ape_sm,
+                dfe_sm=dfe_sm,
             )
             # run_steady_state returns an int exit code on error,
             # or a gate_stats dict on normal completion.
