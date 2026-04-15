@@ -1995,7 +1995,14 @@ def _do_bootstrap_vcocxo(args, ptp, pps_freq_ppb, pps_freq_unc,
     # after the DacActuator's setup() (which resets to center).
     args._bootstrap_freq_ppb = base_freq
 
-    dac.teardown()
+    # Close I2C bus but do NOT reset DAC to center.  The OCXO must
+    # stay at the seeded frequency continuously — any gap causes phase
+    # accumulation from the uncorrected free-running offset.
+    # _setup_servo will open a new DacActuator and re-apply the
+    # frequency, but the hardware DAC register retains the last code.
+    if hasattr(dac, '_bus') and dac._bus is not None:
+        dac._bus.close()
+        dac._bus = None
 
     save_drift(args.drift_file, base_freq, do_label,
                tcxo_freq_corr_ppb, dt_rx_ns=dt_rx_ns)
