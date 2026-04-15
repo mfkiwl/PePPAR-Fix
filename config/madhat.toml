@@ -1,8 +1,8 @@
 [peppar]
 # F9T has no USB serial number — port can change on re-enumeration.
-# TODO: engine should use discover_receivers() to find by unique_id
-# when the configured port fails.
-serial = "/dev/ttyACM2"
+# Use the stable /dev/serial/by-id/ symlink which matches by USB
+# device descriptor (vendor + product), not by enumeration order.
+serial = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"
 baud = 115200
 ubx_port = "USB"
 receiver = "f9t-l5"
