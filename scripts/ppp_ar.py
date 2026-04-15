@@ -103,10 +103,13 @@ class MelbourneWubbenaTracker:
         """Reset state for a satellite (e.g. after cycle slip)."""
         self._state.pop(sv, None)
 
+    @property
+    def n_fixed(self):
+        return sum(1 for s in self._state.values() if s['fixed'])
+
     def summary(self):
         n_total = len(self._state)
-        n_fixed = sum(1 for s in self._state.values() if s['fixed'])
-        return f"WL: {n_fixed}/{n_total} fixed"
+        return f"WL: {self.n_fixed}/{n_total} fixed"
 
 
 class NarrowLaneResolver:

@@ -455,18 +455,19 @@ once position is established.  The code calls these "Phase 1" and
 
 ### What's missing (the gap from vision to code)
 
-1. **AntPosEst as a persistent background thread.**  Currently the
-   PPPFilter runs only in `run_bootstrap()` and is discarded.  The
-   vision says it should keep running throughout steady state, fed
-   decimated observations from a background thread, continuously
-   refining position and running AR.  Position improvements flow
-   one-way into DOFreqEst's phase reference via exponential blending.
+1. ~~**AntPosEst as a persistent background thread.**~~  **Done.**
+   `AntPosEstThread` keeps the PPPFilter alive after bootstrap (or
+   creates a fresh one for warm starts).  Steady-state loop forwards
+   every Nth observation.  MW+NL run in the thread.  Position callback
+   fires on improvement (exponential blending into DOFreqEst is future
+   work).  Cold start reuses the converged PPPFilter; warm start
+   initializes from known position.
 
-2. **Named state machine in the engine.**  The code uses ad hoc
-   boolean flags and function boundaries instead of explicit
-   AntPosEst/DOFreqEst states.  The `run_bootstrap → run_steady_state`
-   transition should be replaced by a state machine that reflects
-   UNSURVEYED → VERIFYING → VERIFIED → CONVERGING → RESOLVED.
+2. ~~**Named state machine in the engine.**~~  **Done** (commit dca8398).
+   `AntPosEst` and `DOFreqEst` state machines in `states.py` with
+   structured `[STATE]` transition logging and periodic `[STATUS]`
+   summary.  AntPosEstThread drives CONVERGING → RESOLVED transitions
+   based on NL fix count.
 
 3. **DOFreqEst doesn't need AR.**  It uses time-differenced carrier
    phase (ambiguities cancel between epochs).  AR belongs exclusively

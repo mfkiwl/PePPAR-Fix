@@ -1,7 +1,7 @@
 # State Machine Refactor Plan
 
 **Date**: 2026-04-15
-**Status**: Planned
+**Status**: Phase 2 in progress
 
 ## Goal
 
@@ -216,12 +216,15 @@ breaks all three hosts.
 
 ### Phasing
 
-1. **States + logging** (low risk): add state enums, transition
-   logging, and the periodic status line.  No structural changes.
-   Validates that the state model maps correctly to existing code.
+1. **States + logging** (low risk): ✓ Done (commit dca8398).
+   State enums, transition logging, periodic [STATUS] line.
 
-2. **AntPosEstThread** (medium risk): keep PPPFilter alive after
-   bootstrap, run AR in background.  DOFreqEst unchanged.
+2. **AntPosEstThread** (medium risk): ✓ Done.  PPPFilter kept alive
+   after bootstrap as a background thread.  Steady-state loop forwards
+   decimated observations (every Nth epoch).  MW+NL run in thread.
+   Position callback on improvement.  State machine driven:
+   CONVERGING → RESOLVED on AR fix, back on loss.  Warm start creates
+   fresh PPPFilter at known position when bootstrap was skipped.
 
 3. **Engine restructure** (high risk): replace run_bootstrap +
    run_steady_state with unified run_engine.  Should come last,

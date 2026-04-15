@@ -82,6 +82,16 @@ from peppar_fix.states import (
 log = logging.getLogger("peppar-fix")
 
 
+@dataclass
+class BootstrapResult:
+    """Result from run_bootstrap — includes live objects for AntPosEstThread."""
+    ecef: np.ndarray
+    sigma_m: float
+    ppp_filter: object = None       # PPPFilter instance (converged)
+    mw_tracker: object = None       # MelbourneWubbenaTracker
+    nl_resolver: object = None      # NarrowLaneResolver
+
+
 class QErrTimescaleTracker:
     """Track CLOCK_MONOTONIC offset between TIM-TP and TICC chB streams.
 
@@ -999,7 +1009,13 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
                 log.info(f"CONVERGED at epoch {n_epochs} "
                          f"(σ={sigma_3d:.4f}m, rms={rms:.3f}m)")
                 run_bootstrap.last_correction_gate_stats = correction_gate.stats.as_dict()
-                return (pos_ecef, float(sigma_3d))
+                return BootstrapResult(
+                    ecef=pos_ecef,
+                    sigma_m=float(sigma_3d),
+                    ppp_filter=filt,
+                    mw_tracker=mw_tracker,
+                    nl_resolver=nl_resolver,
+                )
         else:
             converged_at = None
 
@@ -1007,11 +1023,198 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
     return None
 
 
+# ── AntPosEst background thread ─────────────────────────────────────── #
+
+
+class AntPosEstThread(threading.Thread):
+    """Background position refinement with AR.
+
+    Keeps PPPFilter alive after bootstrap (or creates one for warm starts),
+    fed decimated observations from the steady-state loop.  Runs MW+NL for
+    ambiguity resolution.  Calls position_callback(ecef, sigma_m) when the
+    position improves.
+
+    The steady-state loop forwards observations to our queue — we don't
+    touch obs_queue directly (single-consumer guarantee for ordering).
+    """
+
+    def __init__(self, known_ecef, corrections, stop_event, ape_sm,
+                 bootstrap_result=None, position_callback=None,
+                 decimation=10, resolve_threshold=4):
+        super().__init__(daemon=True, name="AntPosEst")
+        self.obs_queue = queue.Queue(maxsize=50)
+        self._corrections = corrections
+        self._stop = stop_event
+        self._ape_sm = ape_sm
+        self._position_callback = position_callback
+        self._decimation = decimation
+        self._resolve_threshold = resolve_threshold  # min NL-fixed SVs for RESOLVED
+
+        # Initialize from bootstrap result or create fresh filter
+        if bootstrap_result is not None and bootstrap_result.ppp_filter is not None:
+            self._filt = bootstrap_result.ppp_filter
+            self._mw = bootstrap_result.mw_tracker or MelbourneWubbenaTracker()
+            self._nl = bootstrap_result.nl_resolver or NarrowLaneResolver()
+            log.info("AntPosEstThread: continuing from bootstrap PPPFilter "
+                     "(amb=%d, %s)", len(self._filt.sv_to_idx), self._mw.summary())
+        else:
+            self._filt = PPPFilter()
+            self._filt.initialize(known_ecef, 0.0)
+            self._mw = MelbourneWubbenaTracker()
+            self._nl = NarrowLaneResolver()
+            log.info("AntPosEstThread: fresh PPPFilter at known position (warm start)")
+
+        self._n_epochs = 0
+        self._prev_t = None
+        self._best_sigma = position_sigma_3d(self._filt.P)
+
+    def feed(self, gps_time, observations):
+        """Called by steady-state loop to forward a decimated observation.
+
+        Non-blocking — drops if our queue is full (position refinement
+        is best-effort, never blocks the servo).
+        """
+        try:
+            self.obs_queue.put_nowait((gps_time, observations))
+        except queue.Full:
+            pass
+
+    def run(self):
+        log.info("AntPosEstThread started (decimation=%d, resolve_threshold=%d)",
+                 self._decimation, self._resolve_threshold)
+        filt = self._filt
+        mw = self._mw
+        nl = self._nl
+        corrections = self._corrections
+        gate = CorrectionFreshnessGate()
+
+        while not self._stop.is_set():
+            try:
+                gps_time, observations = self.obs_queue.get(timeout=30)
+            except queue.Empty:
+                continue
+
+            # Correction freshness check (use relaxed thresholds — we're
+            # background, not real-time)
+            ok, _, _ = gate.accept(
+                corrections,
+                max_broadcast_age_s=600,
+                require_ssr=False,
+                max_ssr_age_s=600,
+            )
+            if not ok:
+                continue
+
+            # EKF predict
+            if self._prev_t is not None:
+                dt = (gps_time - self._prev_t).total_seconds()
+                if dt <= 0 or dt > 120:
+                    self._prev_t = gps_time
+                    continue
+                filt.predict(dt)
+            self._prev_t = gps_time
+
+            # Manage ambiguities
+            current_svs = {o['sv'] for o in observations}
+            if filt.prev_obs:
+                slipped = filt.detect_cycle_slips(observations, filt.prev_obs)
+                for sv in slipped:
+                    filt.remove_ambiguity(sv)
+                    mw.reset(sv)
+                    nl.unfix(sv)
+
+            for obs in observations:
+                sv = obs['sv']
+                if sv not in filt.sv_to_idx and obs.get('phi_if_m') is not None:
+                    sat_pos, sat_clk = corrections.sat_position(sv, gps_time)
+                    if sat_pos is not None:
+                        N_init = obs['pr_if'] - obs['phi_if_m']
+                        filt.add_ambiguity(sv, N_init)
+
+            filt.prev_obs = {o['sv']: o for o in observations}
+            for sv in list(filt.sv_to_idx.keys()):
+                if sv not in current_svs:
+                    filt.remove_ambiguity(sv)
+
+            # EKF update
+            n_used, resid, sys_counts = filt.update(
+                observations, corrections, gps_time, clk_file=corrections)
+            if n_used < 4:
+                continue
+
+            self._n_epochs += 1
+
+            # MW wide-lane update
+            for obs in observations:
+                sv = obs['sv']
+                phi1 = obs.get('phi1_cyc')
+                phi2 = obs.get('phi2_cyc')
+                pr1 = obs.get('pr1_m')
+                pr2 = obs.get('pr2_m')
+                wl1 = obs.get('wl_f1')
+                wl2 = obs.get('wl_f2')
+                if all(v is not None for v in (phi1, phi2, pr1, pr2, wl1, wl2)):
+                    f1_hz = C / wl1
+                    f2_hz = C / wl2
+                    mw.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
+
+            # NL resolution attempt (after warmup)
+            if self._n_epochs >= 5:
+                nl.attempt(filt, mw)
+
+            # Position quality
+            sigma_3d = position_sigma_3d(filt.P)
+            pos_ecef = filt.x[:3].copy()
+            n_nl_fixed = sum(1 for sv in filt.sv_to_idx if nl.is_fixed(sv))
+
+            # Update state machine metrics
+            self._ape_sm.update_metrics(
+                sigma_m=sigma_3d,
+                n_wl=mw.n_fixed,
+                n_nl=n_nl_fixed,
+                n_sv=len(filt.sv_to_idx),
+            )
+
+            # State transitions
+            if (self._ape_sm.state == AntPosEstState.CONVERGING
+                    and n_nl_fixed >= self._resolve_threshold):
+                self._ape_sm.transition(
+                    AntPosEstState.RESOLVED,
+                    f"{n_nl_fixed} NL fixed, σ={sigma_3d:.3f}m",
+                )
+            elif (self._ape_sm.state == AntPosEstState.RESOLVED
+                    and n_nl_fixed < self._resolve_threshold):
+                self._ape_sm.transition(
+                    AntPosEstState.CONVERGING,
+                    f"NL fixes dropped to {n_nl_fixed}",
+                )
+
+            # Position callback when improved
+            if sigma_3d < self._best_sigma:
+                self._best_sigma = sigma_3d
+                if self._position_callback is not None:
+                    self._position_callback(pos_ecef, sigma_3d)
+
+            # Log every 10 epochs
+            if self._n_epochs % 10 == 0:
+                rms = np.sqrt(np.mean(resid ** 2)) if len(resid) > 0 else 0
+                lat, lon, alt = ecef_to_lla(pos_ecef[0], pos_ecef[1], pos_ecef[2])
+                log.info(
+                    "  [AntPosEst %d] σ=%.3fm pos=(%.6f, %.6f, %.1f) "
+                    "n=%d amb=%d %s %s",
+                    self._n_epochs, sigma_3d, lat, lon, alt,
+                    n_used, len(filt.sv_to_idx),
+                    mw.summary(), nl.summary(),
+                )
+
+        log.info("AntPosEstThread stopped after %d epochs", self._n_epochs)
+
+
 # ── Phase 2: Steady state ────────────────────────────────────────────── #
 
 def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                      stop_event, qerr_store=None, out_w=None, nav2_store=None,
-                     ape_sm=None, dfe_sm=None):
+                     ape_sm=None, dfe_sm=None, ape_thread=None):
     """Run FixedPosFilter for clock estimation with optional servo.
 
     This is the steady-state phase: position is known, we estimate clock
@@ -1297,6 +1500,10 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 log.info(f"  [{n_epochs}] Dropped {dropped_obs} expired observation epochs")
             skip_stats["obs_dropped_expired"] += dropped_obs
             gps_time, observations = obs_event
+
+            # Forward decimated observations to AntPosEst background thread
+            if ape_thread is not None and n_epochs % ape_thread._decimation == 0:
+                ape_thread.feed(gps_time, observations)
 
             # After a PHC step, the filter's clock state is stale.
             # Reset dt_rx to near-zero so the servo doesn't over-correct.
@@ -4041,6 +4248,7 @@ def run(args):
         lat, lon, alt = ecef_to_lla(known_ecef[0], known_ecef[1], known_ecef[2])
         log.info(f"Position ({pos_source}): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
 
+    bootstrap_result = None  # Set by run_bootstrap, None on warm start
     try:
         if known_ecef is None:
             # Phase 1: Bootstrap
@@ -4050,14 +4258,15 @@ def run(args):
                 log.error("Bootstrap failed — no converged position")
                 return 1
 
-            pos_ecef, sigma_m = result
-            known_ecef = pos_ecef
+            bootstrap_result = result
+            known_ecef = bootstrap_result.ecef
+            sigma_m = bootstrap_result.sigma_m
             ape_sm.transition(AntPosEstState.VERIFIED, f"bootstrap converged (σ={sigma_m:.1f}m)")
 
             # Save position
             uid = getattr(args, 'receiver_unique_id', None)
             if uid is not None:
-                save_position_to_receiver(uid, pos_ecef, sigma_m, "ppp_bootstrap")
+                save_position_to_receiver(uid, known_ecef, sigma_m, "ppp_bootstrap")
                 log.info("Position saved to receiver state")
 
         if stop_event.is_set():
@@ -4117,11 +4326,12 @@ def run(args):
                     if result is None:
                         log.error('Bootstrap failed')
                         return 1
-                    pos_ecef, sigma_m = result
-                    known_ecef = pos_ecef
+                    bootstrap_result = result
+                    known_ecef = bootstrap_result.ecef
+                    sigma_m = bootstrap_result.sigma_m
                     uid = getattr(args, 'receiver_unique_id', None)
                     if uid is not None:
-                        save_position_to_receiver(uid, pos_ecef, sigma_m, "ppp_bootstrap")
+                        save_position_to_receiver(uid, known_ecef, sigma_m, "ppp_bootstrap")
                         log.info("Position saved to receiver state (re-bootstrapped)")
                 else:
                     log.info(f'  Position validated (within {separation_m:.0f}m of LS fix)')
@@ -4130,6 +4340,27 @@ def run(args):
 
         if stop_event.is_set():
             return 0
+
+        # Start AntPosEst background thread — keeps PPPFilter alive for
+        # continuous position refinement and AR.  On cold start, reuses
+        # the converged PPPFilter from bootstrap.  On warm start (position
+        # loaded from receiver state), creates a fresh PPPFilter at the
+        # known position.
+        def _position_improved(ecef, sigma_m):
+            lat, lon, alt = ecef_to_lla(ecef[0], ecef[1], ecef[2])
+            log.info("AntPosEst position improved: σ=%.3fm (%.6f, %.6f, %.1f)",
+                     sigma_m, lat, lon, alt)
+            # Future: blend into DOFreqEst's phase reference
+
+        ape_thread = AntPosEstThread(
+            known_ecef=known_ecef,
+            corrections=corrections,
+            stop_event=stop_event,
+            ape_sm=ape_sm,
+            bootstrap_result=bootstrap_result,
+            position_callback=_position_improved,
+        )
+        ape_thread.start()
 
         # Phase 2: Steady state (with internal re-bootstrap on PHC divergence)
         ape_sm.transition(AntPosEstState.CONVERGING, "entering steady state")
@@ -4148,6 +4379,7 @@ def run(args):
                 nav2_store=nav2_store,
                 ape_sm=ape_sm,
                 dfe_sm=dfe_sm,
+                ape_thread=ape_thread,
             )
             # run_steady_state returns an int exit code on error,
             # or a gate_stats dict on normal completion.
