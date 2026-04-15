@@ -1991,6 +1991,10 @@ def _do_bootstrap_vcocxo(args, ptp, pps_freq_ppb, pps_freq_unc,
     log.info("DAC frequency set: requested=%.1f ppb, actual=%.1f ppb",
              base_freq, actual)
 
+    # Stash the bootstrap frequency so _setup_servo can re-apply it
+    # after the DacActuator's setup() (which resets to center).
+    args._bootstrap_freq_ppb = base_freq
+
     dac.teardown()
 
     save_drift(args.drift_file, base_freq, do_label,
@@ -2368,7 +2372,17 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
     # setup() inherits the FCW value. No transfer needed.
     cm_phase_source = None
     current_adj = actuator.read_frequency_ppb()
-    if current_adj == 0 and abs(bootstrap_adj) > 1.0:
+    # Re-apply bootstrap frequency if actuator.setup() reset it.
+    # DacActuator.setup() resets to center (0 ppb); the bootstrap had
+    # already seeded it.  PhcAdjfineActuator has the same issue —
+    # bootstrap's adjfine is lost when a new PtpDevice is opened.
+    bootstrap_freq = getattr(args, '_bootstrap_freq_ppb', None)
+    if bootstrap_freq is not None and abs(bootstrap_freq) > 0.1:
+        actual = actuator.adjust_frequency_ppb(bootstrap_freq)
+        current_adj = actual
+        log.info("Restored bootstrap frequency: %.1f ppb (actual=%.1f)",
+                 bootstrap_freq, actual)
+    elif current_adj == 0 and abs(bootstrap_adj) > 1.0:
         # Actuator doesn't have a frequency set — use bootstrap's value.
         # This happens with PhcAdjfineActuator (normal PHC path).
         current_adj = bootstrap_adj
