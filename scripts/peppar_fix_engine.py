@@ -1373,14 +1373,18 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             dt_rx_sigma = math.sqrt(max(0, p_clk)) / C * 1e9
             n_epochs += 1
 
-            # PPP-AR: cycle slip detection resets MW tracker
-            if hasattr(filt, 'prev_obs') and filt.prev_obs:
+            # PPP-AR: cycle slip detection resets MW tracker.
+            # FixedPosFilter doesn't have detect_cycle_slips — use the
+            # MW tracker's internal consistency check instead (a slip
+            # causes a jump in the MW combination that exceeds 0.5 WL).
+            # Reset SVs that disappeared (likely slip or obstruction).
+            if hasattr(filt, '_prev_obs_svs'):
                 current_svs = {o['sv'] for o in observations}
-                slipped = filt.detect_cycle_slips(observations, filt.prev_obs)
-                for sv in slipped:
+                lost_svs = filt._prev_obs_svs - current_svs
+                for sv in lost_svs:
                     mw_tracker.reset(sv)
                     nl_resolver.unfix(sv)
-            filt.prev_obs = {o['sv']: o for o in observations}
+            filt._prev_obs_svs = {o['sv'] for o in observations}
 
             # PPP-AR: Melbourne-Wubbena wide-lane update
             for obs in observations:
