@@ -1040,14 +1040,14 @@ class AntPosEstThread(threading.Thread):
 
     def __init__(self, known_ecef, corrections, stop_event, ape_sm,
                  bootstrap_result=None, position_callback=None,
-                 decimation=10, resolve_threshold=4):
+                 resolved_decimation=10, resolve_threshold=4):
         super().__init__(daemon=True, name="AntPosEst")
         self.obs_queue = queue.Queue(maxsize=50)
         self._corrections = corrections
         self._stop = stop_event
         self._ape_sm = ape_sm
         self._position_callback = position_callback
-        self._decimation = decimation
+        self._resolved_decimation = resolved_decimation
         self._resolve_threshold = resolve_threshold  # min NL-fixed SVs for RESOLVED
 
         # Initialize from bootstrap result or create fresh filter
@@ -1068,8 +1068,20 @@ class AntPosEstThread(threading.Thread):
         self._prev_t = None
         self._best_sigma = position_sigma_3d(self._filt.P)
 
+    @property
+    def decimation(self):
+        """Effective decimation rate: 1 until RESOLVED, then resolved_decimation.
+
+        Until AR fixes are established, every observation accelerates
+        convergence and WL/NL accumulation.  Once RESOLVED, we can
+        afford to decimate — the position is stable and AR is locked.
+        """
+        if self._ape_sm.state == AntPosEstState.RESOLVED:
+            return self._resolved_decimation
+        return 1
+
     def feed(self, gps_time, observations):
-        """Called by steady-state loop to forward a decimated observation.
+        """Called by steady-state loop to forward an observation.
 
         Non-blocking — drops if our queue is full (position refinement
         is best-effort, never blocks the servo).
@@ -1080,8 +1092,8 @@ class AntPosEstThread(threading.Thread):
             pass
 
     def run(self):
-        log.info("AntPosEstThread started (decimation=%d, resolve_threshold=%d)",
-                 self._decimation, self._resolve_threshold)
+        log.info("AntPosEstThread started (resolved_decimation=%d, resolve_threshold=%d)",
+                 self._resolved_decimation, self._resolve_threshold)
         filt = self._filt
         mw = self._mw
         nl = self._nl
@@ -1501,8 +1513,10 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             skip_stats["obs_dropped_expired"] += dropped_obs
             gps_time, observations = obs_event
 
-            # Forward decimated observations to AntPosEst background thread
-            if ape_thread is not None and n_epochs % ape_thread._decimation == 0:
+            # Forward observations to AntPosEst background thread.
+            # Decimation is 1 (every epoch) until RESOLVED, then drops to
+            # resolved_decimation to save CPU while maintaining AR lock.
+            if ape_thread is not None and n_epochs % ape_thread.decimation == 0:
                 ape_thread.feed(gps_time, observations)
 
             # After a PHC step, the filter's clock state is stale.
