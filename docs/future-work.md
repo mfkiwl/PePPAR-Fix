@@ -298,6 +298,38 @@ Tune window size and N for the platform's noise profile.
 window 5, stable count 3, offset limit 1000 ns.
 
 
+## Seed DOFreqEst x[2] with bootstrap phi_0
+
+**What**: Pass the measured initial phase error (`phi_0`) directly
+into DOFreqEst's initial state `x[2]` instead of letting the EKF
+discover it from the first TICC measurement at 5% per epoch.
+
+**Why**: After bootstrap, there's a known phase offset — ~2 µs of
+cable delay + TADD alignment on clkPoC3, or the post-step residual
+on PHC hosts.  The DOFreqEst's `_need_phc_seed` mechanism currently
+waits for the first servo-epoch TICC measurement to set `x[2]`,
+then the LQR's `L[2]=0.05` term converges the offset at 5%/epoch.
+This works but takes ~200 epochs (~3 min) to settle.  Seeding
+`x[2] = phi_0` from bootstrap gives the LQR full knowledge from
+epoch 1 — it can compute the optimal frequency trajectory
+immediately instead of rediscovering what the bootstrap already
+measured.
+
+**How**:
+- PHC hosts: `phi_0` is already measured by EXTTS after the phase
+  step (line ~2093 in `_do_bootstrap_phc`).  Pass it through to the
+  DOFreqEst constructor.
+- TICC-only hosts: `phi_0` = first TICC differential after TADD ARM
+  (the `ticc_target_auto` value).  Measure it in bootstrap, before
+  `_setup_servo`, and pass it through.
+- DOFreqEst constructor: add `initial_phase_ns` parameter, set
+  `x[2] = initial_phase_ns` and skip `_need_phc_seed`.
+
+**Expected improvement**: Convergence from ~200 epochs to ~10 epochs.
+The LQR already knows the optimal response — it just needs the
+initial condition.
+
+
 ## In-band DO noise estimation from discipline gaps
 
 **What**: Continuously estimate the DO's noise floor (ADEV, TDEV,
