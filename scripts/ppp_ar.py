@@ -24,6 +24,7 @@ import numpy as np
 
 from solve_pseudorange import C
 from solve_ppp import N_BASE
+from lambda_ar import lambda_resolve
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +126,8 @@ class NarrowLaneResolver:
         self.frac_threshold = frac_threshold    # |N1_frac| < this to fix
         self.sigma_threshold = sigma_threshold  # sigma_N1 < this to fix
         self._fixed = {}  # sv -> {'n1': int, 'a_if_fixed': float}
+        self.last_ratio = 0.0   # LAMBDA ratio test value (0 = not attempted)
+        self.last_method = ""   # "lambda" or "rounding"
 
     def attempt(self, filt, mw_tracker):
         """Try to fix ambiguities in the PPPFilter.
@@ -150,32 +153,51 @@ class NarrowLaneResolver:
             if si < len(filt.x):
                 self._apply_fix(filt, si, fix_info['a_if_fixed'])
 
+        # Collect WL-fixed, not-yet-NL-fixed candidates with their params
+        cands = []  # list of (sv, amb_idx, si, f1, f2, n_wl, lambda_wl, lambda_nl, alpha2)
         for sv, amb_idx in list(filt.sv_to_idx.items()):
             if sv in self._fixed:
                 continue
-
             n_wl = mw_tracker.get_wl(sv)
             if n_wl is None:
                 continue
-
             freqs = mw_tracker.get_freqs(sv)
             if freqs is None:
                 continue
             f1, f2 = freqs
-
             lambda_wl = C / (f1 - f2)
             lambda_nl = C / (f1 + f2)
-            # alpha2 for IF combination: f2^2 / (f1^2 - f2^2)
             alpha2 = f2**2 / (f1**2 - f2**2)
-
             si = N_BASE + amb_idx
             if si >= len(filt.x):
                 continue
+            cands.append((sv, amb_idx, si, f1, f2, n_wl,
+                          lambda_wl, lambda_nl, alpha2))
 
+        # Pre-screen: loose reject for obviously unconverged ambiguities
+        screened = []
+        for c in cands:
+            sv, amb_idx, si, f1, f2, n_wl, lambda_wl, lambda_nl, alpha2 = c
             a_if_float = filt.x[si]
             sigma_a = math.sqrt(filt.P[si, si]) if si < filt.P.shape[0] else 999.0
+            n1_float = (a_if_float - alpha2 * lambda_wl * n_wl) / lambda_nl
+            n1_frac = abs(n1_float - round(n1_float))
+            sigma_n1 = sigma_a / lambda_nl
+            if n1_frac < 0.25 and sigma_n1 < 1.0:
+                screened.append(c)
 
-            # Extract narrow-lane float from IF ambiguity
+        # Try LAMBDA when >= 4 candidates pass pre-screen
+        if len(screened) >= 4:
+            newly_fixed = self._attempt_lambda(filt, screened)
+            if newly_fixed:
+                return newly_fixed
+
+        # Fallback: per-satellite rounding for < 4 or if LAMBDA failed
+        self.last_method = "rounding"
+        for c in screened:
+            sv, amb_idx, si, f1, f2, n_wl, lambda_wl, lambda_nl, alpha2 = c
+            a_if_float = filt.x[si]
+            sigma_a = math.sqrt(filt.P[si, si]) if si < filt.P.shape[0] else 999.0
             n1_float = (a_if_float - alpha2 * lambda_wl * n_wl) / lambda_nl
             n1_frac = abs(n1_float - round(n1_float))
             sigma_n1 = sigma_a / lambda_nl
@@ -183,17 +205,82 @@ class NarrowLaneResolver:
             if n1_frac < self.frac_threshold and sigma_n1 < self.sigma_threshold:
                 n1_int = round(n1_float)
                 a_if_fixed = lambda_nl * n1_int + alpha2 * lambda_wl * n_wl
-
-                # Constrain the PPPFilter state: apply a tight
-                # pseudo-observation z = a_if_fixed - x[si] with tiny R
                 self._apply_fix(filt, si, a_if_fixed)
-
                 self._fixed[sv] = {'n1': n1_int, 'a_if_fixed': a_if_fixed}
                 newly_fixed[sv] = n1_int
-                log.info("NL fixed: %s N1=%d (frac=%.3f, sigma_N1=%.3f, "
-                         "A_IF: %.4f → %.4f m)",
+                log.info("NL fixed (rounding): %s N1=%d (frac=%.3f, "
+                         "sigma_N1=%.3f, A_IF: %.4f → %.4f m)",
                          sv, n1_int, n1_frac, sigma_n1,
                          a_if_float, a_if_fixed)
+
+        return newly_fixed
+
+    def _attempt_lambda(self, filt, screened):
+        """Try LAMBDA resolution on screened candidates.
+
+        Args:
+            filt: PPPFilter instance
+            screened: list of (sv, amb_idx, si, f1, f2, n_wl,
+                      lambda_wl, lambda_nl, alpha2) tuples
+
+        Returns:
+            dict of newly fixed satellites, or empty dict if failed
+        """
+        # Build NL float vector and covariance from filter state
+        svs = []
+        n1_floats = []
+        state_indices = []
+        params = []  # (lambda_wl, lambda_nl, alpha2, n_wl) per sat
+
+        for c in screened:
+            sv, amb_idx, si, f1, f2, n_wl, lambda_wl, lambda_nl, alpha2 = c
+            a_if_float = filt.x[si]
+            n1_float = (a_if_float - alpha2 * lambda_wl * n_wl) / lambda_nl
+            svs.append(sv)
+            n1_floats.append(n1_float)
+            state_indices.append(si)
+            params.append((lambda_wl, lambda_nl, alpha2, n_wl))
+
+        n1_vec = np.array(n1_floats)
+        si_arr = np.array(state_indices)
+
+        # Extract NL covariance from IF ambiguity covariance
+        # Qa_IF = P[si, si] submatrix; Qa_NL = Qa_IF / (lambda_nl^2)
+        # When all sats have the same lambda_nl (same constellation+freq),
+        # this is exact.  For mixed constellations, scale per element.
+        n_amb = len(svs)
+        Qa_nl = np.zeros((n_amb, n_amb))
+        for i in range(n_amb):
+            for j in range(n_amb):
+                Qa_nl[i, j] = filt.P[si_arr[i], si_arr[j]] / (
+                    params[i][1] * params[j][1])  # lambda_nl_i * lambda_nl_j
+
+        fixed_vec, n_fixed, ratio, mask = lambda_resolve(
+            n1_vec, Qa_nl, ratio_threshold=2.0, min_fixed=4)
+
+        if fixed_vec is None:
+            self.last_ratio = ratio
+            return {}
+
+        self.last_ratio = ratio
+        self.last_method = "lambda"
+        newly_fixed = {}
+        for i in range(n_amb):
+            if not mask[i]:
+                continue
+            sv = svs[i]
+            n1_int = int(fixed_vec[i])
+            lambda_wl, lambda_nl, alpha2, n_wl = params[i]
+            a_if_fixed = lambda_nl * n1_int + alpha2 * lambda_wl * n_wl
+            si = state_indices[i]
+
+            self._apply_fix(filt, si, a_if_fixed)
+            self._fixed[sv] = {'n1': n1_int, 'a_if_fixed': a_if_fixed}
+            newly_fixed[sv] = n1_int
+            log.info("NL fixed (LAMBDA): %s N1=%d (ratio=%.1f, "
+                     "%d/%d fixed, A_IF: %.4f → %.4f m)",
+                     sv, n1_int, ratio, n_fixed, n_amb,
+                     filt.x[si], a_if_fixed)
 
         return newly_fixed
 
@@ -265,4 +352,7 @@ class NarrowLaneResolver:
         return len(self._fixed)
 
     def summary(self):
-        return f"NL: {self.n_fixed} fixed"
+        s = f"NL: {self.n_fixed} fixed"
+        if self.last_ratio > 0:
+            s += f" R={self.last_ratio:.1f}"
+        return s
