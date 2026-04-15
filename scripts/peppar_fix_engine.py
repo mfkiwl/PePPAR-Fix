@@ -2276,7 +2276,7 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
     """
     gate_stats = None
     try:
-        from peppar_fix import PIServo, DisciplineScheduler
+        from peppar_fix import DisciplineScheduler
         from peppar_fix import compute_error_sources, ticc_only_error_source
         from peppar_fix.timestamper_state import TimestamperParams
     except ImportError:
@@ -2485,87 +2485,51 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
     else:
         log.info("TICC-only: skipping EXTTS setup (no PHC)")
 
-    if getattr(args, 'do_freq_est', False):
-        from peppar_fix.do_freq_est import DOFreqEst
-        from peppar_fix.timestamper_state import TimestamperParams
-        ts_params = TimestamperParams.resolve(args)
-        log.info("Timestamper: %s", ts_params)
-        sigma_ticc = ts_params.measurement_noise_ns
-        # Seed TCXO phase from bootstrap dt_rx so the filter starts in
-        # full 4-state mode from epoch 1 (no mid-run transition).
-        drift_path = getattr(args, 'drift_file', None) or 'data/drift.json'
-        bootstrap_dt_rx_ns = None
-        bootstrap_base_freq = None
-        try:
-            with open(drift_path) as f:
-                drift_data = json.load(f)
-            bootstrap_dt_rx_ns = drift_data.get('dt_rx_ns')
-            bootstrap_base_freq = drift_data.get('adjfine_ppb')
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-        if bootstrap_dt_rx_ns is not None:
-            log.info("DOFreqEst: seeding φ_tcxo from bootstrap dt_rx=%.1f ns",
-                     bootstrap_dt_rx_ns)
-        else:
-            log.warning("DOFreqEst: no bootstrap dt_rx — running 2-state only")
-        if bootstrap_base_freq is not None:
-            log.info("DOFreqEst: crystal freq from drift file: %.1f ppb "
-                     "(current_adj=%.1f, glide=%.1f)",
-                     bootstrap_base_freq, current_adj,
-                     current_adj - bootstrap_base_freq)
-        servo = DOFreqEst(
-            sigma_ticc_ns=sigma_ticc,
-            sigma_do_phase_ns=0.92,
-            sigma_do_freq_ppb=args.kalman_sigma_freq,
-            sigma_tcxo_phase_ns=2.0,    # rx TCXO (F9T) PPS TDEV(1s)
-            sigma_tcxo_freq_ppb=0.1,    # rx TCXO drift rate
-            max_ppb=caps['max_adj'],
-            initial_freq=current_adj,
-            initial_dt_rx_ns=bootstrap_dt_rx_ns,
-            base_freq=bootstrap_base_freq,
-        )
-        log.info("DOFreqEst 4-state: sigma_ticc=%.3f ns, "
-                 "sigma_do=[0.92 ns, %.4f ppb], "
-                 "sigma_tcxo=[2.0 ns, 0.1 ppb], "
-                 "initial_freq=%.1f ppb, base_freq=%s, tcxo_init=%s",
-                 sigma_ticc, args.kalman_sigma_freq, current_adj,
-                 f"{bootstrap_base_freq:.1f}" if bootstrap_base_freq else "None",
-                 bootstrap_dt_rx_ns is not None)
-    elif getattr(args, 'kalman_servo', False):
-        from peppar_fix.kalman_servo import KalmanServo
-        from peppar_fix.timestamper_state import TimestamperParams
-        ts_params = TimestamperParams.resolve(args)
-        log.info("Timestamper: %s", ts_params)
-        sigma_meas = ts_params.measurement_noise_ns
-        servo = KalmanServo(
-            sigma_meas_ns=sigma_meas,
-            sigma_phase_ns=0.92,   # DO floor from adjfine noise test
-            sigma_freq_ppb=args.kalman_sigma_freq,
-            max_ppb=caps['max_adj'],
-            initial_freq=current_adj,
-            q_weight=args.kalman_q_weight,
-            r_weight=args.kalman_r_weight,
-            dead_zone_ppb=args.kalman_dead_zone,
-        )
-        carrier_fusion = (not getattr(args, 'no_carrier', False)
-                          and args.ticc_drive)
-        log.info("Kalman servo: sigma_meas=%.3f ns, sigma_phase=0.92 ns, "
-                 "sigma_freq=%.4f ppb, q_weight=%.2f, r_weight=%.2f, "
-                 "dead_zone=%.2f ppb, carrier_fusion=%s, "
-                 "initial_freq=%.1f ppb",
-                 sigma_meas, args.kalman_sigma_freq,
-                 args.kalman_q_weight, args.kalman_r_weight,
-                 args.kalman_dead_zone, carrier_fusion, current_adj)
+    # ── DOFreqEst: 4-state EKF + LQR servo ──────────────────────── #
+    # Always used.  Models both oscillators (rx TCXO + DO), fuses raw
+    # TICC with PPP carrier phase, and applies optimal LQR control.
+    from peppar_fix.do_freq_est import DOFreqEst
+    sigma_ticc = ts_params.measurement_noise_ns
+    # Seed TCXO phase from bootstrap dt_rx so the filter starts in
+    # full 4-state mode from epoch 1 (no mid-run transition).
+    drift_path = getattr(args, 'drift_file', None) or 'data/drift.json'
+    bootstrap_dt_rx_ns = None
+    bootstrap_base_freq = None
+    try:
+        with open(drift_path) as f:
+            drift_data = json.load(f)
+        bootstrap_dt_rx_ns = drift_data.get('dt_rx_ns')
+        bootstrap_base_freq = drift_data.get('adjfine_ppb')
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    if bootstrap_dt_rx_ns is not None:
+        log.info("DOFreqEst: seeding φ_tcxo from bootstrap dt_rx=%.1f ns",
+                 bootstrap_dt_rx_ns)
     else:
-        # When bootstrap provides a frequency bias (_bootstrap_freq_ppb),
-        # the bias is added after the servo output.  Start the integrator
-        # at 0 so the servo provides corrections around the bias, not
-        # corrections around a gain-scaled version of the bias.
-        pi_initial = current_adj
-        if getattr(args, '_bootstrap_freq_ppb', None) is not None:
-            pi_initial = 0.0
-        servo = PIServo(args.track_kp, args.track_ki, max_ppb=caps['max_adj'],
-                        initial_freq=pi_initial)
+        log.warning("DOFreqEst: no bootstrap dt_rx — running 2-state only")
+    if bootstrap_base_freq is not None:
+        log.info("DOFreqEst: crystal freq from drift file: %.1f ppb "
+                 "(current_adj=%.1f, glide=%.1f)",
+                 bootstrap_base_freq, current_adj,
+                 current_adj - bootstrap_base_freq)
+    servo = DOFreqEst(
+        sigma_ticc_ns=sigma_ticc,
+        sigma_do_phase_ns=0.92,
+        sigma_do_freq_ppb=args.kalman_sigma_freq,
+        sigma_tcxo_phase_ns=2.0,    # rx TCXO (F9T) PPS TDEV(1s)
+        sigma_tcxo_freq_ppb=0.1,    # rx TCXO drift rate
+        max_ppb=caps['max_adj'],
+        initial_freq=current_adj,
+        initial_dt_rx_ns=bootstrap_dt_rx_ns,
+        base_freq=bootstrap_base_freq,
+    )
+    log.info("DOFreqEst 4-state: sigma_ticc=%.3f ns, "
+             "sigma_do=[0.92 ns, %.4f ppb], "
+             "sigma_tcxo=[2.0 ns, 0.1 ppb], "
+             "initial_freq=%.1f ppb, base_freq=%s, tcxo_init=%s",
+             sigma_ticc, args.kalman_sigma_freq, current_adj,
+             f"{bootstrap_base_freq:.1f}" if bootstrap_base_freq else "None",
+             bootstrap_dt_rx_ns is not None)
     scheduler = DisciplineScheduler(
         base_interval=args.discipline_interval,
         adaptive=args.adaptive_interval,
@@ -2945,9 +2909,8 @@ def _enter_obs_holdover(ctx, args, reason_code, detail):
     # better than zero.  TCXO/OCXO drift is dominated by temperature;
     # if temperature hasn't changed, the old frequency is correct.
     _purge_pps_state(ctx)
-    from peppar_fix import PIServo, DisciplineScheduler
-    ctx['servo'] = PIServo(args.track_kp, args.track_ki, max_ppb=ctx['caps']['max_adj'],
-                           initial_freq=last_freq)
+    from peppar_fix import DisciplineScheduler
+    ctx['servo'].reset(last_freq)
     ctx['scheduler'] = DisciplineScheduler(
         base_interval=args.discipline_interval,
         adaptive=args.adaptive_interval,
@@ -3686,48 +3649,22 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
                 adaptive_scale = max(0.01, min(1.0, error_ratio))
                 gain_scale *= adaptive_scale
 
-        is_ekf = getattr(args, 'do_freq_est', False)
-
-        if is_ekf and pps_err_ticc_ns is not None:
-            # DOFreqEst EKF: pass raw TICC (no qErr) + PPP dt_rx.
-            # The EKF has its own LQR gain — skip PI gain adaptation,
-            # landing mode, and anti-windup (those are PI-specific).
+        # DOFreqEst EKF: pass raw TICC (no qErr) + PPP dt_rx.
+        # The EKF has its own LQR gain — no PI gain adaptation,
+        # landing mode, or anti-windup needed.
+        if pps_err_ticc_ns is not None:
             adjfine_ppb = -servo.update(
                 pps_err_ticc_ns, dt=float(n_samples),
                 dt_rx_ns=dt_rx_ns, dt_rx_sigma_ns=dt_rx_sigma)
         else:
-            servo.kp = BASE_KP * gain_scale
-            servo.ki = BASE_KI * gain_scale
-            raw_adj = -servo.update(avg_error, dt=float(n_samples))
-            # Gain scaling attenuates the integrator, which carries the
-            # bootstrap frequency seed (initial_freq).  Add the bootstrap
-            # frequency as a fixed bias so the actuator stays near the
-            # measured OCXO offset regardless of gain scaling.  The servo
-            # provides corrections around this operating point.
-            freq_bias = getattr(args, '_bootstrap_freq_ppb', 0.0) or 0.0
-            adjfine_ppb = raw_adj + freq_bias
+            # No TICC measurement this epoch — hold previous frequency.
+            adjfine_ppb = ctx['adjfine_ppb']
         max_track_ppb = min(
             ctx['caps']['max_adj'],
             args.track_max_ppb if args.track_max_ppb is not None else ctx['caps']['max_adj'],
         )
         if abs(adjfine_ppb) > max_track_ppb:
-            log.warning(
-                "  Tracking clamp: adj=%+.1fppb limited to %+.1fppb",
-                adjfine_ppb,
-                math.copysign(max_track_ppb, adjfine_ppb),
-            )
             adjfine_ppb = math.copysign(max_track_ppb, adjfine_ppb)
-        if not is_ekf and args.ticc_drive and best.name == 'TICC' and ctx.get('tracking_mode') == 'landing':
-            landing_floor_ppb = abs(avg_error) / max(1e-6, args.ticc_landing_horizon_s)
-            landing_floor_ppb = min(max_track_ppb, landing_floor_ppb)
-            desired_sign = math.copysign(1.0, -avg_error) if avg_error != 0 else 1.0
-            if abs(adjfine_ppb) < landing_floor_ppb:
-                adjfine_ppb = math.copysign(landing_floor_ppb, desired_sign)
-        # Anti-windup: if adjfine is at the rail, reset integral
-        # to prevent windup-driven oscillation (PI servo only)
-        if not is_ekf and abs(adjfine_ppb) >= max_track_ppb * 0.95:
-            servo.integral = -adjfine_ppb / servo.ki if servo.ki != 0 else 0
-            log.warning(f'  Anti-windup: adj={adjfine_ppb:+.0f}ppb at rail, integral reset')
         if not args.freerun:
             ctx['actuator'].adjust_frequency_ppb(adjfine_ppb)
         ctx['adjfine_ppb'] = adjfine_ppb
@@ -3735,8 +3672,6 @@ def _servo_epoch(ctx, args, filt, obs_event, corr_snapshot, n_epochs,
 
         scheduler.update_drift_rate(time.monotonic(), adjfine_ppb)
         scheduler.compute_adaptive_interval(avg_confidence)
-        if not is_ekf and args.ticc_drive and best.name == 'TICC' and ctx.get('tracking_mode') == 'landing':
-            scheduler.interval = 1
 
         if n_epochs % 10 == 0:
             mode_suffix = ''
