@@ -171,6 +171,86 @@ If we switched to an SSR provider with L2L biases:
 The current policy: **always L5, documented as an SSR-driven choice,
 not a hardware limitation.**
 
+### Reason 4: TGD considerations for L1/L5 (under investigation)
+
+The GPS broadcast satellite clock is referenced to the L1/L2
+ionosphere-free combination.  When using L1/L5 instead, there is a
+differential group delay between L2 and L5 hardware paths on the
+satellite that is not corrected by the broadcast TGD parameter.  The
+correction requires `ISC_L5` from the CNAV message (not broadcast in
+LNAV) or an equivalent SSR code bias.
+
+In practice, the SSR code bias for L5 (if provided) absorbs this
+differential, so SSR-corrected processing should handle it.  Without
+SSR code biases, the L5 group delay differential produces a ~3-5m
+per-satellite pseudorange bias — small enough to be absorbed by the
+receiver clock state in the filter.
+
+**Status (2026-04-16)**: A systematic 50m PPP position bias is under
+investigation.  The TGD handling was tested (removing TGD worsened the
+bias from 50m to 100m, confirming the subtraction is needed in our
+pipeline).  The bias appears on both CNES and BKG SSR streams,
+pointing to a measurement model issue rather than SSR-specific error.
+See `memory/project_50m_bias_investigation.md` for current findings.
+
+### Diagnostic benefit of running one host on L2
+
+TimeHat's ZED-F9T (TIM 2.20) can run L1/L2, while MadHat and clkPoC3
+are locked to L1/L5.  Briefly running TimeHat on L2 while the others
+stay on L5 would provide:
+
+1. **TGD isolation**: If the 50m bias disappears on L2 but persists on
+   L5, the bias is L5-specific (group delay, ISC_L5, or L5 code bias)
+2. **Signal quality comparison**: L2 and L5 pseudorange residuals can
+   be compared for systematic patterns
+3. **Cross-frequency AR validation**: if an L2L-compatible SSR source
+   is found, L2 AR results can be compared against L5 AR
+
+This is a one-time diagnostic, not a permanent configuration.  After
+the investigation, TimeHat should return to L5 for consistency.
+
+## Full signal/correction chain for PPP-AR
+
+The choice of L2 vs L5 cannot be made in isolation — it propagates
+through every stage of the processing chain.  Here is the full
+dependency:
+
+```
+Receiver hardware (ZED-F9T variant)
+  ↓ determines available signals
+Signal tracking mode (L2CL vs L5Q)
+  ↓ determines RINEX observation codes
+SSR code bias lookup (C2L vs C5Q)
+  ↓ corrects pseudorange hardware delays
+SSR phase bias lookup (L2L vs L5Q → L5I)
+  ↓ makes carrier-phase ambiguities integer-valued
+IF combination (L1/L2 vs L1/L5)
+  ↓ determines noise amplification factor and wavelengths
+Melbourne-Wubbena wide-lane (λ_WL depends on f2 choice)
+  ↓ convergence speed depends on code noise
+Narrow-lane / LAMBDA resolution
+  ↓ integer validation depends on float convergence
+Position fix
+```
+
+At each stage, L2 and L5 have different characteristics:
+
+| Stage | L1/L2 | L1/L5 | Winner |
+|---|---|---|---|
+| Hardware support | TIM 2.20 only | Both firmwares | L5 |
+| SSR code bias | C2L (rare in SSR) | C5Q (common) | L5 |
+| SSR phase bias | L2W (CNES) ≠ L2CL (F9T) | L5I ≈ L5Q (same carrier) | L5 |
+| IF noise amplification | α ≈ 2.55 | α ≈ 2.26 | L5 |
+| Code precision | BPSK(1), ~3m | BPSK(10), ~0.3m | L5 |
+| WL wavelength | 86.2 cm | 75.2 cm | L2 |
+| WL convergence | ~600 epochs | ~60 epochs | L5 |
+| Broadcast TGD | Referenced to L1/L2 IF | Needs ISC_L5 correction | L2 |
+
+L5 wins on 6 of 8 criteria.  L2's only advantages are a slightly
+wider WL wavelength (easier integer fixing) and native TGD
+compatibility.  Neither advantage overcomes L5's decisive phase bias
+match with CNES and 10× better code precision.
+
 ## Implications for PePPAR Fix
 
 1. **F9T-TOP on TimeHat is the only receiver that can test L2 AR.**
