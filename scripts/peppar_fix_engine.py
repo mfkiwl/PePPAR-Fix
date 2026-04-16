@@ -2483,8 +2483,12 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
     # Shared preamble: measure PPS frequency and estimate dt_rx.
     # The TICC frequency measurement runs here — overlapping with the
     # obs_queue filling from serial/NTRIP threads already active.
-    result = _bootstrap_measure_freq_and_clock(
-        args, timestamper, known_ecef, obs_queue, beph, ssr, stop_event)
+    try:
+        result = _bootstrap_measure_freq_and_clock(
+            args, timestamper, known_ecef, obs_queue, beph, ssr, stop_event)
+    except Exception as e:
+        log.error("Bootstrap measurement failed: %s", e)
+        return False
     if result is None:
         return False
     pps_freq_ppb, pps_freq_unc, dt_rx_ns, dt_rx_series = result
