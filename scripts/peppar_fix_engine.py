@@ -4223,11 +4223,15 @@ def run(args):
     from peppar_fix.receiver import ensure_receiver_ready
     port_type = getattr(args, 'port_type', 'USB') or 'USB'
     systems_for_check = set(args.systems.split(',')) if args.systems else {'gps', 'gal'}
+    # If --receiver was explicitly set, force that driver (skip auto-detect).
+    # args.receiver is None when unset (default applied later in main()).
+    forced = get_driver(args.receiver) if args.receiver is not None else None
     driver, receiver_identity = ensure_receiver_ready(
         args.serial, args.baud, port_type=port_type,
         systems=systems_for_check,
         sfrbx_rate=args.sfrbx_rate,
-        measurement_rate_ms=args.measurement_rate_ms)
+        measurement_rate_ms=args.measurement_rate_ms,
+        forced_driver=forced)
     if driver is None:
         driver = get_driver(args.receiver)
         log.warning("Receiver check failed — falling back to %s (may lack dual-freq)",
@@ -4714,7 +4718,8 @@ Two-phase operation:
     serial.add_argument("--baud", type=int, default=None,
                         help="Baud rate (default: 115200, or from host config)")
     serial.add_argument("--receiver", default=None,
-                        help="Receiver model/profile: f9t, f9t-l5, f10t (default: f9t)")
+                        help="Receiver model/profile: f9t, f9t-l5, f9t-l2, f10t "
+                             "(default: f9t = L5; f9t-l2 = L2, TIM 2.20 only)")
     serial.add_argument("--port-type", default=None,
                         choices=["UART", "UART2", "USB", "SPI", "I2C"],
                         help="Receiver port type for UBX message routing (default: USB)")

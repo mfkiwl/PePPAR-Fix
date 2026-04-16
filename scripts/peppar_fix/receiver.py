@@ -250,10 +250,10 @@ class F10TDriver(ReceiverDriver):
 def get_driver(name):
     """Return the receiver driver for a CLI receiver name."""
     key = (name or "f9t").strip().lower()
-    if key == "f9t":
-        return F9TDriver()
-    if key in {"f9t-l5", "f9t_l5"}:
+    if key in {"f9t", "f9t-l5", "f9t_l5"}:
         return F9TL5Driver()
+    if key in {"f9t-l2", "f9t_l2"}:
+        return F9TDriver()
     if key == "f10t":
         return F10TDriver()
     raise ValueError(f"Unknown receiver model: {name}")
@@ -1004,7 +1004,8 @@ def _detect_second_freq(sig_ids_seen):
 def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
                           timeout_s=10, sfrbx_rate=1,
                           measurement_rate_ms=1000,
-                          state_dir=None):
+                          state_dir=None,
+                          forced_driver=None):
     """Check that dual-frequency observations are arriving; reconfigure if not.
 
     This is the single entry point for receiver readiness. It:
@@ -1017,6 +1018,9 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
 
     Args:
         state_dir: directory for receiver state files (default: state/receivers)
+        forced_driver: if set, skip auto-detection and configure this
+            specific driver.  Use for diagnostics (e.g. forcing L2 on a
+            receiver that would normally auto-switch to L5).
 
     Returns:
         (driver, identity) tuple where:
@@ -1072,6 +1076,51 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
     else:
         log.warning("Could not identify receiver on %s — state persistence disabled",
                     port)
+
+    # Forced driver: skip auto-detection, configure the specified driver.
+    # Used for diagnostics (e.g. --receiver f9t to force L2 on TimeHat).
+    if forced_driver is not None:
+        log.info("Forced driver: %s — skipping auto-detection", forced_driver.name)
+        # Check if already configured for the forced driver's signals
+        dual, total, sigs = _check_dual_freq(port, baud, forced_driver, systems,
+                                             timeout_s=timeout_s)
+        if dual >= 4:
+            log.info("Receiver already on %s: %d/%d SVs dual-freq",
+                     forced_driver.name, dual, total)
+            return forced_driver, identity
+
+        log.info("Reconfiguring receiver for %s...", forced_driver.name)
+        _ensure_imports()
+        port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4, "I2C": 0}
+        pid = port_id.get(port_type, 3)
+        ser, ubr = open_receiver(port, baud)
+        ok = configure_signals(ser, ubr, driver=forced_driver)
+        if not ok:
+            log.error("Signal configuration for %s NAK'd", forced_driver.name)
+            ser.close()
+            return None, identity
+        # L5 health override if applicable
+        if isinstance(forced_driver, F9TL5Driver):
+            l5_ok = configure_gps_l5_health(ser, ubr)
+            if l5_ok:
+                log.info("GPS L5 health override applied — warm restarting")
+                warm_restart(ser)
+                ser.close()
+                ser, ubr = reopen_after_reset(port, wait_s=10)
+        configure_rate_ms(ser, ubr, measurement_rate_ms)
+        configure_messages(ser, ubr, pid, sfrbx_rate=sfrbx_rate)
+        configure_nmea_off(ser, ubr, pid)
+        ser.close()
+        # Verify
+        dual, total, sigs = _check_dual_freq(port, baud, forced_driver, systems,
+                                             timeout_s=timeout_s)
+        if dual >= 4:
+            log.info("Forced driver %s OK: %d/%d SVs dual-freq",
+                     forced_driver.name, dual, total)
+            return forced_driver, identity
+        log.error("Forced driver %s failed: %d/%d SVs dual-freq",
+                  forced_driver.name, dual, total)
+        return None, identity
 
     # First check: are dual-freq observations already arriving?
     log.info("Checking receiver signal status...")
