@@ -472,14 +472,15 @@ class FixedPosFilter:
 
     IDX_CLK = 0
     IDX_CLK_RATE = 1
-    IDX_ISB_GAL = 2
-    IDX_ISB_BDS = 3
-    N_STATES = 4
+    IDX_ZTD = 2
+    IDX_ISB_GAL = 3
+    IDX_ISB_BDS = 4
+    N_STATES = 5
 
     def __init__(self, pos_ecef):
         self.pos = np.array(pos_ecef)
-        self.x = np.zeros(self.N_STATES)     # [clock, clock_rate, isb_gal, isb_bds] in meters
-        self.P = np.diag([1e18, 1e6, 1e8, 1e8])  # ISBs start uncertain (~100m)
+        self.x = np.zeros(self.N_STATES)     # [clock, clock_rate, dZTD, isb_gal, isb_bds] in meters
+        self.P = np.diag([1e18, 1e6, 0.5**2, 1e8, 1e8])  # dZTD: 0.5m initial sigma
         self.prev_geo = {}  # sv → {rho_corr, sat_clk_m, phi_if_m, tropo}
         self.initialized = False  # Will seed clock from first epoch
 
@@ -491,12 +492,13 @@ class FixedPosFilter:
         F = np.eye(self.N_STATES)
         F[0, 1] = dt
         self.P = F @ self.P @ F.T
-        # Process noise: TCXO model + small ISB walk
+        # Process noise: TCXO model + ZTD drift + small ISB walk
         Q = np.zeros((self.N_STATES, self.N_STATES))
         Q[0, 0] = 0.01 * dt      # phase noise (m²/s)
         Q[1, 1] = 0.01 * dt      # frequency noise (m²/s³)
-        Q[2, 2] = 1e-6 * dt      # GAL ISB random walk (very slow — ~ns/hour)
-        Q[3, 3] = 1e-6 * dt      # BDS ISB random walk
+        Q[self.IDX_ZTD, self.IDX_ZTD] = (5e-5)**2 * dt  # ~5 cm/hour RMS (IGS standard)
+        Q[self.IDX_ISB_GAL, self.IDX_ISB_GAL] = 1e-6 * dt  # GAL ISB random walk
+        Q[self.IDX_ISB_BDS, self.IDX_ISB_BDS] = 1e-6 * dt  # BDS ISB random walk
         self.P += Q
 
     def compute_geometry(self, sv, sp3, t, clk_file, pr_m=None):
@@ -535,11 +537,14 @@ class FixedPosFilter:
         if elev < ELEV_MASK:
             return None
 
-        tropo = 2.3 / math.sin(math.radians(max(5, elev)))
+        sin_elev = math.sin(math.radians(max(5, elev)))
+        tropo = 2.3 / sin_elev
+        m_wet = 1.0 / sin_elev  # wet mapping function
         return {
             'rho': rho,
             'sat_clk_m': sat_clk * C,
             'tropo': tropo,
+            'm_wet': m_wet,
             'elev': elev,
         }
 
@@ -613,6 +618,8 @@ class FixedPosFilter:
                 'rho': geo['rho'],
                 'sat_clk_m': geo['sat_clk_m'],
                 'tropo': geo['tropo'],
+                'm_wet': geo['m_wet'],
+                'ztd_corr': self.x[self.IDX_ZTD] * geo['m_wet'],
                 'phi_if_m': obs.get('phi_if_m'),
             }
 
@@ -621,8 +628,9 @@ class FixedPosFilter:
             elev_factor = math.sin(math.radians(elev))
             w = max(0.01, cno_factor * elev_factor)
 
-            # Predicted range (without receiver clock)
-            rho_corr = geo['rho'] - geo['sat_clk_m'] + geo['tropo']
+            # Predicted range (without receiver clock), including ZTD residual
+            m_wet = geo['m_wet']
+            rho_corr = geo['rho'] - geo['sat_clk_m'] + geo['tropo'] + self.x[self.IDX_ZTD] * m_wet
 
             # ISB: select the appropriate inter-system bias for this constellation
             sys_name = obs.get('sys', 'gps')
@@ -639,6 +647,7 @@ class FixedPosFilter:
             dz_pr = obs['pr_if'] - rho_corr - self.x[0] - isb_val
             h_pr = np.zeros(self.N_STATES)
             h_pr[0] = 1.0
+            h_pr[self.IDX_ZTD] = m_wet
             if isb_idx is not None:
                 h_pr[isb_idx] = 1.0
             H_rows.append(h_pr)
@@ -656,10 +665,13 @@ class FixedPosFilter:
                     self.prev_geo[sv]['phi_if_m'] is not None):
                 prev = self.prev_geo[sv]
                 delta_phi = obs['phi_if_m'] - prev['phi_if_m']
-                delta_rho_corr = rho_corr - (prev['rho'] - prev['sat_clk_m'] + prev['tropo'])
+                # Use stored rho_corr (includes previous ZTD contribution)
+                prev_rho_corr = prev['rho'] - prev['sat_clk_m'] + prev['tropo'] + prev.get('ztd_corr', 0.0)
+                delta_rho_corr = rho_corr - prev_rho_corr
                 dz_td = (delta_phi - delta_rho_corr + self.prev_clock) - self.x[0]
                 h_td = np.zeros(self.N_STATES)
                 h_td[0] = 1.0
+                h_td[self.IDX_ZTD] = m_wet  # ZTD change maps through wet MF
                 # ISB cancels in time difference (constant bias)
                 H_rows.append(h_td)
                 z_rows.append(dz_td)

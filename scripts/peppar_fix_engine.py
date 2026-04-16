@@ -1732,7 +1732,10 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             dt_rx_sigma = math.sqrt(max(0, p_clk)) / C * 1e9
             n_epochs += 1
 
-            # Extract ISBs for logging
+            # Extract ZTD and ISBs for logging
+            dztd_m = 0.0
+            if hasattr(filt, 'IDX_ZTD') and filt.x.shape[0] > filt.IDX_ZTD:
+                dztd_m = filt.x[filt.IDX_ZTD]
             isb_gal_ns = 0.0
             isb_bds_ns = 0.0
             if hasattr(filt, 'IDX_ISB_GAL') and filt.x.shape[0] > filt.IDX_ISB_GAL:
