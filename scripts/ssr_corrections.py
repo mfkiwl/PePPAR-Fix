@@ -841,17 +841,21 @@ class RealtimeCorrections:
         if vel is None:
             return None
 
-        # Unit vectors for RAC frame
-        r_hat = -bcast_pos / np.linalg.norm(bcast_pos)  # Radial (toward Earth center)
-        c_hat = np.cross(r_hat, vel)
-        c_norm = np.linalg.norm(c_hat)
+        # Unit vectors for RAC frame — must match RTKLIB/RTCM convention:
+        #   ea = normalized velocity (along-track)
+        #   ec = normalized cross(position, velocity) (cross-track)
+        #   er = cross(ea, ec) (radial, pointing AWAY from Earth center)
+        # Previous code had r_hat = -pos/|pos| (toward Earth), which
+        # inverted the radial and cross-track correction signs.
+        a_hat = vel / np.linalg.norm(vel)  # Along-track
+        c_vec = np.cross(bcast_pos, vel)
+        c_norm = np.linalg.norm(c_vec)
         if c_norm < 1e-10:
             return None
-        c_hat = c_hat / c_norm
-        a_hat = np.cross(c_hat, r_hat)  # Along-track
+        c_hat = c_vec / c_norm             # Cross-track
+        r_hat = np.cross(a_hat, c_hat)     # Radial (outward from Earth)
 
-        # Apply correction: positive radial = satellite moved away from Earth
-        # SSR convention: subtract the correction from broadcast
+        # SSR convention (RTCM/RTKLIB): subtract delta from broadcast
         delta_ecef = (oc.radial * r_hat +
                       oc.along * a_hat +
                       oc.cross * c_hat)
