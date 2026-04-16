@@ -142,29 +142,34 @@ the a priori model handles ~95% of the delay.
 
 - NL threshold tuning: keep the tight thresholds (0.10/0.08).
 
-## Implementation plan
+## Implementation plan — COMPLETED 2026-04-16
 
-1. **Add `IDX_ZTD` to PPPFilter** (~30 lines):
-   - Extend state vector and covariance by 1
-   - Initialize from Saastamoinen residual (~0)
-   - Process noise: random walk `q_ztd * dt`
-   - Bump `N_BASE` from 6 to 7
+1. **Add `IDX_ZTD` to PPPFilter** — ✅ Done (prior session).
+   N_BASE = 7, IDX_ZTD = 6, process noise (5e-5)² m²/s.
 
-2. **Compute elevation angles** (~20 lines):
-   - Already have satellite ECEF positions in the update step
-   - Compute elevation from receiver position + satellite position
-   - Need: `elevation = arcsin((sat_ecef - rx_ecef) . up / |sat_ecef - rx_ecef|)`
+2. **Compute elevation angles** — ✅ Done (prior session).
+   Already computed in PPPFilter.update() for elevation masking.
 
-3. **Add ZTD term to H matrix** (~10 lines):
-   - For each observation: `H[i, IDX_ZTD] = M_wet(elevation_i)`
-   - Start with `M(e) = 1/sin(e)`, upgrade to Niell later
+3. **Add ZTD term to H matrix** — ✅ Done (commit c1be133, 2026-04-16).
+   Added to FixedPosFilter: dZTD state at IDX_ZTD=2, wet mapping
+   function 1/sin(e) in H-matrix for PR and TD observations.
+   PPPFilter already had it.
 
-4. **Update ambiguity index management** (~5 lines):
-   - `N_BASE` changes from 6 to 7
-   - `NarrowLaneResolver` hardcodes `N_BASE = 6` — must update
+4. **Update ambiguity index management** — ✅ Already correct.
+   NarrowLaneResolver imports N_BASE from solve_ppp (not hardcoded).
 
-5. **Test**: Run parallel 1-hour tests, compare cross-host agreement.
-   Target: < 1m horizontal with NL fixes.
+5. **Test** — ✅ Done (2026-04-16, 3-hour 3-host run).
+   Results:
+   - Cross-host horizontal agreement: <0.2m (target was <1m)
+   - Cross-host altitude spread: <0.6m (was 8m without ZTD)
+   - Altitude drift: <0.2m/hour (was 3-5m/hour without ZTD)
+   - AR fixes held continuously for 2+ hours on all three hosts
+   - nav2Δ: 2-4m stable (was 2-6m oscillating without ZTD)
+
+### Possible future refinement
+
+- Upgrade mapping function from 1/sin(e) to Niell wet or GMF.
+  Not critical since low-elevation satellites are already excluded.
 
 ## Risk assessment
 
