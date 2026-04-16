@@ -337,6 +337,25 @@ def _close_all_shared_ports() -> None:
 atexit.register(_close_all_shared_ports)
 
 
+def prewarm_ticc_port(port: str, baud: int = 115200) -> None:
+    """Open the TICC serial port early to absorb any Arduino reboot.
+
+    Must be called BEFORE the GNSS serial reader starts.  Opening the
+    TICC port may trigger an Arduino reboot (DTR rising edge) which
+    causes USB re-enumeration — if the F9T is on the same USB bus,
+    its /dev/ttyACMx path can shift or disconnect.
+
+    After this call, the shared port is open with HUPCL cleared.
+    Subsequent opens (bootstrap timestamper, TICC reader thread) go
+    through _SharedTiccPort and get the warm path — no reboot, no
+    USB disruption.
+    """
+    shared = _get_shared_port(port, baud)
+    shared.acquire(wait_for_boot=True)
+    log.info("TICC port pre-warmed: %s (boot=%s)", port,
+             "warm" if shared.booted else "cold")
+
+
 class Ticc:
     """
     Context manager that opens the TICC serial port and yields
