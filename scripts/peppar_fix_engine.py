@@ -1131,6 +1131,17 @@ class AntPosEstThread(threading.Thread):
                 opinion.get('pdop') or 0, opinion.get('num_sv') or 0,
             )
             if self._nav2_tension_streak >= self._nav2_alarm_count:
+                # Don't reset AR-fixed positions — PPP with integer
+                # ambiguities (~3 cm) is more precise than NAV2 (~2 m).
+                # The ~2 m PPP-NAV2 systematic offset plus NAV2 wander
+                # can produce 4-5 m displacement, falsely triggering
+                # the reset and destroying valid AR fixes.
+                if n_nl_fixed > 0:
+                    log.info("NAV2 tension %.1f but %d NL fixes active "
+                             "— AR position trusted over NAV2, skipping reset",
+                             tension, n_nl_fixed)
+                    self._nav2_tension_streak = 0
+                    return
                 lat, lon, alt = ecef_to_lla(
                     pos_ecef[0], pos_ecef[1], pos_ecef[2])
                 nav2_lat = opinion['lat']
