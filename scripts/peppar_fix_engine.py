@@ -1309,43 +1309,47 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             if not _do_bootstrap_init(args, ptp, known_ecef, obs_queue,
                                         beph, ssr, stop_event,
                                         dfe_sm=dfe_sm):
-                log.error("DO bootstrap failed — cannot start servo")
+                log.warning("DO bootstrap failed — continuing without servo "
+                            "(AntPosEst will still run)")
                 if ptp is not None:
                     ptp.close()
-                return 1
-            log.info("DO bootstrap succeeded (%s)", getattr(args, 'do_type', 'phc'))
-            if dfe_sm is not None:
-                dfe_sm.transition(DOFreqEstState.TRACKING, "DO bootstrap succeeded")
-
-        # Set up servo with PPS retry (absorbs wrapper's exit-code-3 retry).
-        # No-PPS (return 3) is retryable — PPS may appear after a few seconds
-        # if the receiver just started or the cable was reconnected.
-        pps_max_retries = 3
-        pps_backoff = 5
-        servo_result = None
-        for pps_attempt in range(1, pps_max_retries + 1):
-            servo_result = _setup_servo(args, known_ecef, qerr_store, ptp=ptp)
-            if not isinstance(servo_result, int) or servo_result != 3:
-                break
-            if pps_attempt < pps_max_retries:
-                log.warning("No PPS — retry %d/%d in %ds",
-                            pps_attempt, pps_max_retries, pps_backoff)
-                time.sleep(pps_backoff)
-                pps_backoff = min(pps_backoff * 2, 60)
+                    ptp = None
+                want_servo = False
             else:
-                log.error("No PPS after %d attempts — giving up", pps_max_retries)
-        # Promote clockClass to 52 (initialized) after successful bootstrap
-        # and servo setup — mirrors what the wrapper's
-        # promote_clock_class_initialized did.
-        if not isinstance(servo_result, int) and servo_result.get('pmc'):
-            _set_clock_class(servo_result, "initialized")
-        if isinstance(servo_result, int):
-            log.error("Failed to set up servo (exit code %d)", servo_result)
-            return servo_result
-        servo_ctx = servo_result
-        servo_ctx["correlation_gate"] = StrictCorrelationGate()
-        if dfe_sm is not None:
-            servo_ctx["dfe_sm"] = dfe_sm
+                log.info("DO bootstrap succeeded (%s)", getattr(args, 'do_type', 'phc'))
+                if dfe_sm is not None:
+                    dfe_sm.transition(DOFreqEstState.TRACKING, "DO bootstrap succeeded")
+
+        if want_servo:
+            # Set up servo with PPS retry (absorbs wrapper's exit-code-3 retry).
+            # No-PPS (return 3) is retryable — PPS may appear after a few seconds
+            # if the receiver just started or the cable was reconnected.
+            pps_max_retries = 3
+            pps_backoff = 5
+            servo_result = None
+            for pps_attempt in range(1, pps_max_retries + 1):
+                servo_result = _setup_servo(args, known_ecef, qerr_store, ptp=ptp)
+                if not isinstance(servo_result, int) or servo_result != 3:
+                    break
+                if pps_attempt < pps_max_retries:
+                    log.warning("No PPS — retry %d/%d in %ds",
+                                pps_attempt, pps_max_retries, pps_backoff)
+                    time.sleep(pps_backoff)
+                    pps_backoff = min(pps_backoff * 2, 60)
+                else:
+                    log.error("No PPS after %d attempts — giving up", pps_max_retries)
+            # Promote clockClass to 52 (initialized) after successful bootstrap
+            # and servo setup — mirrors what the wrapper's
+            # promote_clock_class_initialized did.
+            if not isinstance(servo_result, int) and servo_result.get('pmc'):
+                _set_clock_class(servo_result, "initialized")
+            if isinstance(servo_result, int):
+                log.error("Failed to set up servo (exit code %d)", servo_result)
+                return servo_result
+            servo_ctx = servo_result
+            servo_ctx["correlation_gate"] = StrictCorrelationGate()
+            if dfe_sm is not None:
+                servo_ctx["dfe_sm"] = dfe_sm
 
     prev_t = None
     n_epochs = 0
@@ -2453,13 +2457,10 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
         args.ptp_dev = args.servo
 
     # Build the timestamper for frequency measurement.
+    # TICC is preferred: 60ps resolution, immune to igc driver bugs.
+    # EXTTS is fallback only (8ns resolution, vulnerable to TX cascade).
     ticc_port = getattr(args, 'ticc_port', None)
-    if ptp is not None:
-        timestamper = ExttsTimestamper(ptp, args.extts_channel,
-                                       pps_pin=getattr(args, 'pps_pin', None))
-        log.info("Bootstrap timestamper: EXTTS (channel %d, pin %s)",
-                 args.extts_channel, args.pps_pin)
-    elif ticc_port:
+    if ticc_port:
         ticc_baud = getattr(args, 'ticc_baud', 115200)
         timestamper = TiccDifferentialTimestamper(
             ticc_port, ticc_baud,
@@ -2467,6 +2468,11 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
             ref_channel=getattr(args, 'ticc_ref_channel', 'chB'))
         log.info("Bootstrap timestamper: TICC differential (%s, %s-%s)",
                  ticc_port, timestamper.do_channel, timestamper.ref_channel)
+    elif ptp is not None:
+        timestamper = ExttsTimestamper(ptp, args.extts_channel,
+                                       pps_pin=getattr(args, 'pps_pin', None))
+        log.info("Bootstrap timestamper: EXTTS (channel %d, pin %s)",
+                 args.extts_channel, args.pps_pin)
     else:
         log.error("No timestamper available: need --servo (EXTTS) or --ticc-port")
         return False
@@ -2851,17 +2857,18 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
             if dropped:
                 log.debug("Dropped one stale PPS notification due to full queue")
 
-    if have_phc and extts_ok:
-        # EXTTS-driven: PPS events come from EXTTS hardware timestamps
+    # TICC is the preferred PPS correlation source (60ps, immune to igc).
+    # Only start EXTTS when no TICC is configured.
+    if args.ticc_port:
+        t_extts = None
+        log.info("TICC chB is primary PPS correlation source (EXTTS disabled)")
+    elif have_phc and extts_ok:
         t_extts = threading.Thread(target=extts_reader, daemon=True)
         t_extts.start()
-        log.info("EXTTS reader started (PPS source for correlation)")
+        log.info("EXTTS reader started (PPS source for correlation, no TICC)")
     else:
         t_extts = None
-        if not have_phc:
-            log.info("TICC-only mode: TICC chB provides PPS correlation (no PHC)")
-        else:
-            log.info("EXTTS not available: TICC chB provides PPS correlation")
+        log.info("No PPS correlation source available (no TICC, no EXTTS)")
 
     if args.ticc_port:
         ticc_tracker = TiccPairTracker(args.ticc_phc_channel, args.ticc_ref_channel)
@@ -2955,9 +2962,10 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
                                                      "(raw=%.2f corr=%.2f ns²)",
                                                      qvir, rv, cv)
 
-                            # When EXTTS is not running, chB (reference PPS)
-                            # events replace EXTTS as the PPS source for
-                            # correlation.
+                            # TICC chB is the primary PPS source for the
+                            # correlation gate.  EXTTS is only used when
+                            # no TICC is configured (t_extts is None
+                            # whenever TICC is present).
                             if t_extts is None and event.channel == args.ticc_ref_channel:
                                 # Derive approximate PHC second from realtime
                                 # (PPS fires at the GPS second boundary; recv_mono
