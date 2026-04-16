@@ -128,15 +128,13 @@ def _sat_clock(eph, dt_clk, Ek):
     """
     # Relativistic correction
     delta_tr = F_REL * eph['e'] * eph['sqrt_a'] * math.sin(Ek)
-    # Polynomial clock model + relativistic.
-    # TGD is NOT subtracted here: the broadcast clock is referenced to
-    # the L1/L2 IF combination.  For dual-frequency IF processing (our
-    # case), TGD cancels out.  Single-frequency users must subtract TGD
-    # themselves.  See GPS ICD 30.3.3.3.1.1.
-    # Previous code subtracted TGD here, which is only correct for L1
-    # single-frequency use and introduces a ~3-5m bias for IF users.
+    # Polynomial clock model + relativistic - group delay.
+    # TGD subtraction is needed because the broadcast clock polynomial
+    # (af0/af1/af2) is defined for the L1/L2 IF combination, and TGD
+    # compensates for the L1 group delay relative to IF.  Our IF
+    # pseudoranges use SSR-corrected clocks which expect this baseline.
     return (eph['af0'] + eph['af1'] * dt_clk + eph['af2'] * dt_clk ** 2
-            + delta_tr)
+            + delta_tr - eph.get('tgd', 0.0))
 
 
 # ── RTCM field → ephemeris dict mapping ────────────────────────────────────── #
