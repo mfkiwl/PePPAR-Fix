@@ -232,6 +232,36 @@ allowing us to reject the bad fix before it migrates into `known_ecef`.
 **Reference**: 2026-04-08 ocxo bring-up + MadHat overnight failure;
 project memory `project_madhat_ekf_overconfidence`.
 
+## Post-fix residual monitoring for wrong-integer detection
+
+**What**: After NL ambiguities are fixed, continuously monitor the
+pseudorange and carrier-phase residuals.  Wrong integers produce
+residuals that grow as satellite geometry changes — correct integers
+produce stable residuals regardless of geometry.
+
+**Why**: The current AR validation gates (LAMBDA ratio test, bootstrap
+P > 0.999, float-vs-fixed displacement check) prevent most wrong
+integers, but a gap remains in the 2–10 m range.  The NAV2 sanity
+check now uses a 10 m threshold for AR-fixed positions (commit
+54d4cb2, 2026-04-16) — anything below 10 m is trusted.  A wrong
+integer that shifts the position by 3–8 m would persist undetected
+until the satellite sets and the ambiguity drops.
+
+**How**: After each NL fix epoch, compute the post-fit pseudorange
+residuals for all fixed satellites.  Track the RMS and per-satellite
+residuals over a sliding window (e.g., 60 epochs).  If a fixed
+satellite's residual grows monotonically (indicating the integer is
+pulling against the geometry), unfix that satellite and re-attempt.
+
+A simpler first step: compare the post-fix pseudorange RMS against
+the float RMS.  A correct fix should reduce or maintain the RMS.
+If the RMS increases after fixing, the integers are suspect.
+
+**Discovered**: 2026-04-16 while investigating TimeHat AR loss.
+The loss turned out to be NAV2 resets (not wrong integers), but the
+investigation revealed the integrity gap for wrong integers in the
+2–10 m range.
+
 ## MAD-based outlier rejection
 
 **What**: Reject individual PPS error samples that are statistical
