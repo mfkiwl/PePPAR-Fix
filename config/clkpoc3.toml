@@ -1,6 +1,6 @@
 [peppar]
 serial = "/dev/ttyACM1"
-baud = 9600
+baud = 115200
 ubx_port = "USB"
 receiver = "f9t-l5"
 # No ptp_dev — the engine does not use the CM4's PHC.
