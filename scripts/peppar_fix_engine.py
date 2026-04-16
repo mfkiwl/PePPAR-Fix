@@ -1073,6 +1073,7 @@ class AntPosEstThread(threading.Thread):
         self._prev_t = None
         self._best_sigma = position_sigma_3d(self._filt.P)
         self._nav2_tension_streak = 0  # consecutive high-tension checks
+        self._nav2_cooldown_until = 0  # epoch number: skip checks until this
 
     @property
     def decimation(self):
@@ -1149,6 +1150,12 @@ class AntPosEstThread(threading.Thread):
                 self._prev_t = None
                 self._best_sigma = 999.0
                 self._nav2_tension_streak = 0
+                # Cooldown: let the filter converge before checking again.
+                # 120 epochs ≈ 2 min — enough for float to settle and WL
+                # to re-accumulate before comparing against NAV2.
+                self._nav2_cooldown_until = self._n_epochs + 120
+                log.info("NAV2 check cooldown until epoch %d",
+                         self._nav2_cooldown_until)
                 # Transition back to CONVERGING
                 if self._ape_sm.state == AntPosEstState.RESOLVED:
                     self._ape_sm.transition(
@@ -1300,7 +1307,8 @@ class AntPosEstThread(threading.Thread):
             # NAV2 position sanity check (every 10 epochs ≈ 10s)
             if (self._nav2_store is not None
                     and self._n_epochs % 10 == 0
-                    and self._n_epochs >= 30):
+                    and self._n_epochs >= 30
+                    and self._n_epochs >= self._nav2_cooldown_until):
                 self._check_nav2(filt, mw, nl, pos_ecef, sigma_3d, n_nl_fixed)
 
             # Position callback when improved
