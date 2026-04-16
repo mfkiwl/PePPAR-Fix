@@ -336,12 +336,19 @@ class PPPFilter:
 
         for obs in observations:
             sv = obs['sv']
-            sat_pos, sat_clk_sp3 = sp3.sat_position(sv, t)
+            # Evaluate satellite position at TRANSMISSION time, not reception
+            # time.  The satellite moves ~300m during the ~77ms signal travel
+            # time; computing at t_rx creates a per-satellite range error
+            # proportional to radial velocity (±60m), which was the dominant
+            # source of the systematic 50m PPP position bias.
+            tau_approx = obs['pr_if'] / C if 'pr_if' in obs else 0.075
+            t_tx = t - timedelta(seconds=tau_approx)
+            sat_pos, sat_clk_sp3 = sp3.sat_position(sv, t_tx)
             if sat_pos is None:
                 continue
             # Use CLK file for satellite clock if available, else SP3
             if clk_file is not None:
-                sat_clk = clk_file.sat_clock(sv, t)
+                sat_clk = clk_file.sat_clock(sv, t_tx)
                 if sat_clk is None:
                     sat_clk = sat_clk_sp3
             else:
@@ -492,13 +499,16 @@ class FixedPosFilter:
         Q[3, 3] = 1e-6 * dt      # BDS ISB random walk
         self.P += Q
 
-    def compute_geometry(self, sv, sp3, t, clk_file):
+    def compute_geometry(self, sv, sp3, t, clk_file, pr_m=None):
         """Compute corrected range and satellite clock for one SV."""
-        sat_pos, sat_clk_sp3 = sp3.sat_position(sv, t)
+        # Transmission time: approximate with pseudorange or default 77ms
+        tau_approx = pr_m / C if pr_m else 0.075
+        t_tx = t - timedelta(seconds=tau_approx)
+        sat_pos, sat_clk_sp3 = sp3.sat_position(sv, t_tx)
         if sat_pos is None:
             return None
         if clk_file is not None:
-            sat_clk = clk_file.sat_clock(sv, t)
+            sat_clk = clk_file.sat_clock(sv, t_tx)
             if sat_clk is None:
                 sat_clk = sat_clk_sp3
         else:
@@ -546,7 +556,8 @@ class FixedPosFilter:
             sys_resid = {}  # sys_name → list of residuals
             for obs in observations:
                 sv = obs['sv']
-                geo = self.compute_geometry(sv, sp3, t, clk_file)
+                geo = self.compute_geometry(sv, sp3, t, clk_file,
+                                           pr_m=obs.get('pr_if'))
                 if geo is None:
                     continue
                 rho_corr = geo['rho'] - geo['sat_clk_m'] + geo['tropo']
@@ -593,7 +604,8 @@ class FixedPosFilter:
 
         for obs in observations:
             sv = obs['sv']
-            geo = self.compute_geometry(sv, sp3, t, clk_file)
+            geo = self.compute_geometry(sv, sp3, t, clk_file,
+                                       pr_m=obs.get('pr_if'))
             if geo is None:
                 continue
 
@@ -705,7 +717,9 @@ def ls_init(observations, sp3, t, clk_file=None):
 
     sat_positions = []
     for obs in observations:
-        sp, _ = sp3.sat_position(obs['sv'], t)
+        tau_approx = obs.get('pr_if', 23e6) / C
+        t_tx = t - timedelta(seconds=tau_approx)
+        sp, _ = sp3.sat_position(obs['sv'], t_tx)
         if sp is not None:
             sat_positions.append(sp)
     if len(sat_positions) >= 4:
@@ -724,11 +738,13 @@ def ls_init(observations, sp3, t, clk_file=None):
         for obs in observations:
             if obs['sv'] in excluded_svs:
                 continue
-            sat_pos, sat_clk_sp3 = sp3.sat_position(obs['sv'], t)
+            tau_approx = obs.get('pr_if', 23e6) / C
+            t_tx = t - timedelta(seconds=tau_approx)
+            sat_pos, sat_clk_sp3 = sp3.sat_position(obs['sv'], t_tx)
             if sat_pos is None:
                 continue
             if clk_file is not None:
-                sat_clk = clk_file.sat_clock(obs['sv'], t)
+                sat_clk = clk_file.sat_clock(obs['sv'], t_tx)
                 if sat_clk is None:
                     sat_clk = sat_clk_sp3
             else:
