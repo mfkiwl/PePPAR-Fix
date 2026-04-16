@@ -429,7 +429,9 @@ class Nav2PositionStore:
         self._height_m = None     # height above ellipsoid (m)
         self._h_acc_m = None      # horizontal accuracy estimate (m)
         self._v_acc_m = None      # vertical accuracy estimate (m)
+        self._pdop = None         # position dilution of precision
         self._fix_type = None     # 0=no, 2=2D, 3=3D
+        self._gnss_fix_ok = False # fix valid flag
         self._num_sv = 0
         self._host_mono = None
         self._update_count = 0
@@ -448,26 +450,40 @@ class Nav2PositionStore:
             self._v_acc_m = getattr(parsed_msg, 'vAcc', None)
             if self._v_acc_m is not None:
                 self._v_acc_m /= 1000.0
+            self._pdop = getattr(parsed_msg, 'pDOP', None)
             self._fix_type = getattr(parsed_msg, 'fixType', None)
+            self._gnss_fix_ok = bool(getattr(parsed_msg, 'gnssFixOk', 0))
             self._num_sv = getattr(parsed_msg, 'numSV', 0)
             self._host_mono = time.monotonic()
             self._update_count += 1
 
-    def get_ecef(self, max_age_s=30.0):
-        """Return (ecef_xyz, h_acc_m, age_s) or (None, None, None) if stale.
+    def get_opinion(self, max_age_s=30.0):
+        """Return a position opinion dict, or None if stale/unavailable.
 
-        Converts from LLH to ECEF using a simple WGS84 formula.
+        The opinion contains all confidence-relevant fields for the
+        position confidence framework (see docs/position-confidence.md).
         """
         with self._lock:
             if self._host_mono is None:
-                return None, None, None
+                return None
             age = time.monotonic() - self._host_mono
             if age > max_age_s:
-                return None, None, None
+                return None
             if self._fix_type not in (2, 3) or self._lat is None:
-                return None, None, None
-            lat, lon, h = self._lat, self._lon, self._height_m or 0.0
-        # WGS84 LLH → ECEF
+                return None
+            if not self._gnss_fix_ok:
+                return None
+            lat = self._lat
+            lon = self._lon
+            h = self._height_m or 0.0
+            h_acc = self._h_acc_m
+            v_acc = self._v_acc_m
+            pdop = self._pdop
+            num_sv = self._num_sv
+            fix_type = self._fix_type
+            n = self._update_count
+
+        # WGS84 LLH -> ECEF
         import math
         a = 6378137.0
         f = 1 / 298.257223563
@@ -480,8 +496,32 @@ class Nav2PositionStore:
         x = (N + h) * cos_lat * math.cos(lon_r)
         y = (N + h) * cos_lat * math.sin(lon_r)
         z = (N * (1 - e2) + h) * sin_lat
+
         import numpy as np
-        return np.array([x, y, z]), self._h_acc_m, age
+        return {
+            'source': 'nav2',
+            'ecef': np.array([x, y, z]),
+            'lat': lat,
+            'lon': lon,
+            'alt_m': h,
+            'h_acc_m': h_acc,
+            'v_acc_m': v_acc,
+            'pdop': pdop,
+            'fix_type': fix_type,
+            'num_sv': num_sv,
+            'age_s': age,
+            'n_updates': n,
+        }
+
+    def get_ecef(self, max_age_s=30.0):
+        """Return (ecef_xyz, h_acc_m, age_s) or (None, None, None) if stale.
+
+        Legacy interface — prefer get_opinion() for new code.
+        """
+        opinion = self.get_opinion(max_age_s=max_age_s)
+        if opinion is None:
+            return None, None, None
+        return opinion['ecef'], opinion['h_acc_m'], opinion['age_s']
 
     def summary(self):
         """One-line status for logging."""
@@ -490,7 +530,8 @@ class Nav2PositionStore:
                 return "NAV2: no data"
             age = time.monotonic() - self._host_mono
             return (f"NAV2: fix={self._fix_type} sv={self._num_sv} "
-                    f"hAcc={self._h_acc_m:.1f}m age={age:.0f}s "
+                    f"hAcc={self._h_acc_m:.1f}m vAcc={self._v_acc_m:.1f}m "
+                    f"pDOP={self._pdop:.1f} age={age:.0f}s "
                     f"n={self._update_count}")
 
 

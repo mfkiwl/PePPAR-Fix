@@ -1040,7 +1040,9 @@ class AntPosEstThread(threading.Thread):
 
     def __init__(self, known_ecef, corrections, stop_event, ape_sm,
                  bootstrap_result=None, position_callback=None,
-                 resolved_decimation=10, resolve_threshold=4):
+                 resolved_decimation=10, resolve_threshold=4,
+                 nav2_store=None, nav2_tension_threshold=5.0,
+                 nav2_alarm_count=3):
         super().__init__(daemon=True, name="AntPosEst")
         self.obs_queue = queue.Queue(maxsize=50)
         self._corrections = corrections
@@ -1049,6 +1051,9 @@ class AntPosEstThread(threading.Thread):
         self._position_callback = position_callback
         self._resolved_decimation = resolved_decimation
         self._resolve_threshold = resolve_threshold  # min NL-fixed SVs for RESOLVED
+        self._nav2_store = nav2_store
+        self._nav2_tension_threshold = nav2_tension_threshold
+        self._nav2_alarm_count = nav2_alarm_count  # consecutive checks before reset
 
         # Initialize from bootstrap result or create fresh filter
         if bootstrap_result is not None and bootstrap_result.ppp_filter is not None:
@@ -1067,6 +1072,7 @@ class AntPosEstThread(threading.Thread):
         self._n_epochs = 0
         self._prev_t = None
         self._best_sigma = position_sigma_3d(self._filt.P)
+        self._nav2_tension_streak = 0  # consecutive high-tension checks
 
     @property
     def decimation(self):
@@ -1090,6 +1096,70 @@ class AntPosEstThread(threading.Thread):
             self.obs_queue.put_nowait((gps_time, observations))
         except queue.Full:
             pass
+
+    def _check_nav2(self, filt, mw, nl, pos_ecef, sigma_3d, n_nl_fixed):
+        """Compare AntPosEst position against NAV2 and reset if they disagree.
+
+        Computes tension = displacement / combined_uncertainty.  If tension
+        exceeds the threshold for several consecutive checks, unfix all NL
+        ambiguities and reset the PPPFilter to the NAV2 position.
+
+        See docs/position-confidence.md for the confidence framework design.
+        """
+        opinion = self._nav2_store.get_opinion(max_age_s=30.0)
+        if opinion is None:
+            return
+
+        nav2_ecef = opinion['ecef']
+        nav2_h_acc = opinion['h_acc_m'] or 5.0  # default 5m if missing
+        displacement = float(np.linalg.norm(pos_ecef - nav2_ecef))
+
+        # Combined uncertainty: AntPosEst sigma + NAV2 hAcc in quadrature
+        combined_unc = math.sqrt(sigma_3d ** 2 + nav2_h_acc ** 2)
+        tension = displacement / max(combined_unc, 0.1)
+
+        if tension > self._nav2_tension_threshold:
+            self._nav2_tension_streak += 1
+            log.warning(
+                "NAV2 tension: %.1f (displacement=%.1fm, σ=%.2fm, "
+                "hAcc=%.1fm, streak=%d/%d) NAV2=(%.6f,%.6f,%.1f) "
+                "pDOP=%.1f sv=%d",
+                tension, displacement, sigma_3d, nav2_h_acc,
+                self._nav2_tension_streak, self._nav2_alarm_count,
+                opinion['lat'], opinion['lon'], opinion['alt_m'],
+                opinion.get('pdop') or 0, opinion.get('num_sv') or 0,
+            )
+            if self._nav2_tension_streak >= self._nav2_alarm_count:
+                lat, lon, alt = ecef_to_lla(
+                    pos_ecef[0], pos_ecef[1], pos_ecef[2])
+                nav2_lat = opinion['lat']
+                nav2_lon = opinion['lon']
+                log.warning(
+                    "NAV2 RESET: AntPosEst (%.6f,%.6f) disagrees with "
+                    "NAV2 (%.6f,%.6f) by %.1fm for %d consecutive checks. "
+                    "Unfixing all NL and resetting filter to NAV2 position.",
+                    lat, lon, nav2_lat, nav2_lon,
+                    displacement, self._nav2_tension_streak,
+                )
+                # Unfix all NL ambiguities
+                for sv in list(nl._fixed.keys()):
+                    nl.unfix(sv)
+                # Reset PPPFilter to NAV2 position
+                filt.initialize(nav2_ecef, 0.0)
+                self._prev_t = None
+                self._best_sigma = 999.0
+                self._nav2_tension_streak = 0
+                # Transition back to CONVERGING
+                if self._ape_sm.state == AntPosEstState.RESOLVED:
+                    self._ape_sm.transition(
+                        AntPosEstState.CONVERGING,
+                        f"NAV2 disagreement ({displacement:.0f}m)",
+                    )
+        else:
+            if self._nav2_tension_streak > 0:
+                log.info("NAV2 tension resolved: %.1f (displacement=%.1fm)",
+                         tension, displacement)
+            self._nav2_tension_streak = 0
 
     def run(self):
         log.info("AntPosEstThread started (resolved_decimation=%d, resolve_threshold=%d)",
@@ -1227,6 +1297,12 @@ class AntPosEstThread(threading.Thread):
                     f"NL fixes dropped to {n_nl_fixed}",
                 )
 
+            # NAV2 position sanity check (every 10 epochs ≈ 10s)
+            if (self._nav2_store is not None
+                    and self._n_epochs % 10 == 0
+                    and self._n_epochs >= 30):
+                self._check_nav2(filt, mw, nl, pos_ecef, sigma_3d, n_nl_fixed)
+
             # Position callback when improved
             if sigma_3d < self._best_sigma:
                 self._best_sigma = sigma_3d
@@ -1237,12 +1313,18 @@ class AntPosEstThread(threading.Thread):
             if self._n_epochs % 10 == 0:
                 rms = np.sqrt(np.mean(resid ** 2)) if len(resid) > 0 else 0
                 lat, lon, alt = ecef_to_lla(pos_ecef[0], pos_ecef[1], pos_ecef[2])
+                nav2_tag = ""
+                if self._nav2_store is not None:
+                    opinion = self._nav2_store.get_opinion(max_age_s=30.0)
+                    if opinion is not None:
+                        d = float(np.linalg.norm(pos_ecef - opinion['ecef']))
+                        nav2_tag = f" nav2Δ={d:.1f}m"
                 log.info(
                     "  [AntPosEst %d] σ=%.3fm pos=(%.6f, %.6f, %.1f) "
-                    "n=%d amb=%d %s %s",
+                    "n=%d amb=%d %s %s%s",
                     self._n_epochs, sigma_3d, lat, lon, alt,
                     n_used, len(filt.sv_to_idx),
-                    mw.summary(), nl.summary(),
+                    mw.summary(), nl.summary(), nav2_tag,
                 )
 
         log.info("AntPosEstThread stopped after %d epochs", self._n_epochs)
@@ -4432,6 +4514,7 @@ def run(args):
             ape_sm=ape_sm,
             bootstrap_result=bootstrap_result,
             position_callback=_position_improved,
+            nav2_store=nav2_store,
         )
         ape_thread.start()
 
