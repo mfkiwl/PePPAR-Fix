@@ -4,7 +4,7 @@ baud = 115200
 ubx_port = "USB"
 receiver = "f9t-l5"
 ptp_profile = "i226"
-ptp_dev = "/dev/ptp1"
+ptp_dev = "/dev/ptp_i226"
 ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
 # CNES SSR for PPP-AR: GAL fully matched (L1C/L5Q), GPS works via

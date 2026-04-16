@@ -36,7 +36,13 @@ SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="2341", ENV{BRLTTY_DEVICE}="0"
 SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="0403", ENV{ID_SERIAL_SHORT}=="D30GD1PE", SYMLINK+="f10t", MODE="0664", GROUP="dialout"
 
 # ── PTP hardware clocks (igc driver, TimeHAT / OTC boards) ──
-SUBSYSTEM=="ptp", KERNEL=="ptp[0-9]*", DRIVERS=="igc", MODE="0664", GROUP="dialout"
+# Stable symlink: /dev/ptp* numbering is not stable across boots once
+# the Pi's built-in gem-ptp-timer also registers a PHC.  We learned this
+# on 2026-04-16 when configs aimed at /dev/ptp1 landed on gem-ptp-timer
+# (n_pins=0) instead of the i226 (n_pins=2) — silent PEROUT failure.
+# SYMLINK="ptp_i226" gives a name that tracks the i226 regardless of
+# which /dev/ptpN the kernel happens to assign.
+SUBSYSTEM=="ptp", KERNEL=="ptp[0-9]*", DRIVERS=="igc", SYMLINK+="ptp_i226", MODE="0664", GROUP="dialout"
 
 # ── Host ocxo: stable network interface names (MAC-keyed) ──
 # Three NIC families share this host and the kernel/systemd default
