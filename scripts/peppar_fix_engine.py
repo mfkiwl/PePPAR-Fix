@@ -1131,15 +1131,19 @@ class AntPosEstThread(threading.Thread):
                 opinion.get('pdop') or 0, opinion.get('num_sv') or 0,
             )
             if self._nav2_tension_streak >= self._nav2_alarm_count:
-                # Don't reset AR-fixed positions — PPP with integer
-                # ambiguities (~3 cm) is more precise than NAV2 (~2 m).
-                # The ~2 m PPP-NAV2 systematic offset plus NAV2 wander
-                # can produce 4-5 m displacement, falsely triggering
-                # the reset and destroying valid AR fixes.
-                if n_nl_fixed > 0:
+                # AR-fixed positions use a higher displacement threshold.
+                # PPP-AR (~3 cm) is more precise than NAV2 (~2 m), so
+                # the normal ~2-4 m PPP-NAV2 offset would falsely trigger
+                # the reset and destroy valid integer fixes.  But we
+                # can't skip the check entirely — wrong integers could
+                # shift the position by 5-10 m and we need to catch that.
+                # Threshold: 10 m when AR-fixed (catches wrong integers),
+                # vs the normal ~5 m threshold for float positions.
+                if n_nl_fixed > 0 and displacement < 10.0:
                     log.info("NAV2 tension %.1f but %d NL fixes active "
-                             "— AR position trusted over NAV2, skipping reset",
-                             tension, n_nl_fixed)
+                             "and displacement %.1fm < 10m "
+                             "— AR position trusted over NAV2",
+                             tension, n_nl_fixed, displacement)
                     self._nav2_tension_streak = 0
                     return
                 lat, lon, alt = ecef_to_lla(
