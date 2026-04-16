@@ -277,6 +277,14 @@ class NarrowLaneResolver:
 
         self.last_ratio = ratio
         self.last_method = "lambda"
+
+        # Position displacement check: save float state, apply fixes,
+        # check if position jumps too far, roll back if it does.
+        float_pos = filt.x[:3].copy()
+        float_sigma = math.sqrt(max(filt.P[0, 0], filt.P[1, 1], filt.P[2, 2]))
+        saved_x = filt.x.copy()
+        saved_P = filt.P.copy()
+
         newly_fixed = {}
         for i in range(n_amb):
             if not mask[i]:
@@ -286,16 +294,34 @@ class NarrowLaneResolver:
             lambda_wl, lambda_nl, alpha2, n_wl = params[i]
             a_if_fixed = lambda_nl * n1_int + alpha2 * lambda_wl * n_wl
             si = state_indices[i]
-
             self._apply_fix(filt, si, a_if_fixed)
-            self._fixed[sv] = {'n1': n1_int, 'a_if_fixed': a_if_fixed}
-            newly_fixed[sv] = n1_int
-            log.info("NL fixed (LAMBDA): %s N1=%d (ratio=%.1f, P=%.4f, "
-                     "%d/%d fixed, A_IF: %.4f → %.4f m)",
-                     sv, n1_int, ratio, self.last_success_rate,
-                     n_fixed, n_amb, filt.x[si], a_if_fixed)
+            newly_fixed[sv] = (n1_int, a_if_fixed, si)
 
-        return newly_fixed
+        # Check position displacement
+        fixed_pos = filt.x[:3]
+        displacement_m = np.linalg.norm(fixed_pos - float_pos)
+        max_displacement = max(3.0 * float_sigma, 1.0)  # at least 1m floor
+
+        if displacement_m > max_displacement:
+            # Roll back — integers moved position too far
+            log.warning("LAMBDA rejected: position displacement %.1fm "
+                        "exceeds %.1fm (3σ=%.1fm). Rolling back %d fixes.",
+                        displacement_m, max_displacement,
+                        3.0 * float_sigma, len(newly_fixed))
+            filt.x = saved_x
+            filt.P = saved_P
+            return {}
+
+        # Commit the fixes
+        for sv, (n1_int, a_if_fixed, si) in newly_fixed.items():
+            self._fixed[sv] = {'n1': n1_int, 'a_if_fixed': a_if_fixed}
+            log.info("NL fixed (LAMBDA): %s N1=%d (ratio=%.1f, P=%.4f, "
+                     "Δpos=%.1fm, %d/%d fixed, A_IF: %.4f → %.4f m)",
+                     sv, n1_int, ratio, self.last_success_rate,
+                     displacement_m, n_fixed, n_amb,
+                     filt.x[si], a_if_fixed)
+
+        return {sv: info[0] for sv, info in newly_fixed.items()}
 
     def _apply_fix(self, filt, state_idx, fixed_value):
         """Constrain a PPPFilter ambiguity state to a fixed value.
