@@ -2457,10 +2457,18 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
         args.ptp_dev = args.servo
 
     # Build the timestamper for frequency measurement.
-    # TICC is preferred: 60ps resolution, immune to igc driver bugs.
-    # EXTTS is fallback only (8ns resolution, vulnerable to TX cascade).
+    # EXTTS is preferred for bootstrap: opening the TICC serial port
+    # reboots the Arduino (HUPCL), which can cause USB re-enumeration
+    # and crash the F9T serial reader on hosts sharing the USB bus.
+    # TICC takes over as primary PPS source in the correlation gate
+    # (started later, after the serial reader is established).
     ticc_port = getattr(args, 'ticc_port', None)
-    if ticc_port:
+    if ptp is not None:
+        timestamper = ExttsTimestamper(ptp, args.extts_channel,
+                                       pps_pin=getattr(args, 'pps_pin', None))
+        log.info("Bootstrap timestamper: EXTTS (channel %d, pin %s)",
+                 args.extts_channel, args.pps_pin)
+    elif ticc_port:
         ticc_baud = getattr(args, 'ticc_baud', 115200)
         timestamper = TiccDifferentialTimestamper(
             ticc_port, ticc_baud,
@@ -2468,11 +2476,6 @@ def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
             ref_channel=getattr(args, 'ticc_ref_channel', 'chB'))
         log.info("Bootstrap timestamper: TICC differential (%s, %s-%s)",
                  ticc_port, timestamper.do_channel, timestamper.ref_channel)
-    elif ptp is not None:
-        timestamper = ExttsTimestamper(ptp, args.extts_channel,
-                                       pps_pin=getattr(args, 'pps_pin', None))
-        log.info("Bootstrap timestamper: EXTTS (channel %d, pin %s)",
-                 args.extts_channel, args.pps_pin)
     else:
         log.error("No timestamper available: need --servo (EXTTS) or --ticc-port")
         return False
