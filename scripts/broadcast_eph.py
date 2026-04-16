@@ -314,7 +314,30 @@ class BroadcastEphemeris:
             if key in eph:
                 eph[key] = eph[key] * math.pi
 
-        self._ephs[prn] = eph
+        # Keep up to 2 ephemeris sets per satellite (current + next).
+        # NTRIP streams often broadcast the next epoch's ephemeris before
+        # it becomes current.  Unconditionally replacing the current set
+        # causes large clock extrapolation errors (dt_clk >> 0) that
+        # produce ~50-100m pseudorange bias.  At query time, sat_position()
+        # selects the set with the smallest |dt_clk|.
+        if prn not in self._ephs:
+            self._ephs[prn] = [eph]
+        else:
+            existing = self._ephs[prn]
+            new_toc = eph.get('toc', 0)
+            # Replace if same toc (updated parameters), otherwise keep both
+            replaced = False
+            for i, e in enumerate(existing):
+                if e.get('toc', 0) == new_toc:
+                    existing[i] = eph
+                    replaced = True
+                    break
+            if not replaced:
+                existing.append(eph)
+                # Keep only the 2 most recent (by toc)
+                if len(existing) > 2:
+                    existing.sort(key=lambda e: e.get('toc', 0))
+                    self._ephs[prn] = existing[-2:]
         self._update_count += 1
         self._last_update_mono = getattr(msg, 'recv_mono', None)
         self._last_update_queue_remains = getattr(msg, 'queue_remains', None)
@@ -364,14 +387,31 @@ class BroadcastEphemeris:
         Returns:
             (np.array([x, y, z]), clock_seconds) or (None, None)
         """
-        eph = self._ephs.get(prn)
-        if eph is None:
+        eph_list = self._ephs.get(prn)
+        if eph_list is None:
             return None, None
 
-        # Exclude unhealthy satellites (e.g. Galileo E14/E18 in wrong orbits)
-        if eph.get('health', 0) != 0:
-            return None, None
+        # Select the ephemeris with the smallest |dt_clk| (closest toc).
+        # This avoids using a "next epoch" ephemeris that requires large
+        # clock extrapolation.
+        best_eph = None
+        best_dt = float('inf')
+        for candidate in eph_list:
+            if candidate.get('health', 0) != 0:
+                continue
+            sys = candidate['system']
+            if sys == 'C':
+                _, sow = self._bds_seconds_of_week(t)
+            else:
+                _, sow = self._gps_seconds_of_week(t)
+            dt = abs(_check_week_crossover(sow - candidate['toc']))
+            if dt < best_dt:
+                best_dt = dt
+                best_eph = candidate
 
+        if best_eph is None:
+            return None, None
+        eph = best_eph
         sys = eph['system']
 
         # Compute time since ephemeris reference epoch
@@ -396,11 +436,18 @@ class BroadcastEphemeris:
 
         SSR corrections reference a specific IOD to ensure consistency
         between the broadcast ephemeris and the correction.
+
+        When multiple ephemeris sets are stored (current + next), returns
+        the IOD from the most recently stored set (highest toc), which is
+        most likely to match the SSR correction's IOD reference.
         """
-        eph = self._ephs.get(prn)
-        if eph is None:
+        eph_list = self._ephs.get(prn)
+        if eph_list is None:
             return None
-        return eph.get('iode') or eph.get('iod')
+        # Use the most recent ephemeris (highest toc) for IOD matching —
+        # SSR corrections typically reference the latest broadcast IOD.
+        best = max(eph_list, key=lambda e: e.get('toc', 0))
+        return best.get('iode') or best.get('iod')
 
     def sat_velocity(self, prn, t, dt=0.5):
         """Numerical satellite velocity via central difference.
@@ -418,19 +465,20 @@ class BroadcastEphemeris:
         return (pos_fwd - pos_bck) / (2.0 * dt)
 
     def age_of_ephemeris(self, prn, t):
-        """Return age (seconds) of ephemeris for a satellite at time t.
+        """Return age (seconds) of the best ephemeris for a satellite at time t.
 
         Large ages (>2h for GPS, >4h for GAL) indicate stale ephemeris.
         """
-        eph = self._ephs.get(prn)
-        if eph is None:
+        eph_list = self._ephs.get(prn)
+        if eph_list is None:
             return None
-        sys = eph['system']
+        # Use the ephemeris with the closest toe
+        sys = eph_list[0]['system']
         if sys == 'C':
             _, sow = self._bds_seconds_of_week(t)
         else:
             _, sow = self._gps_seconds_of_week(t)
-        return abs(_check_week_crossover(sow - eph['toe']))
+        return min(abs(_check_week_crossover(sow - e['toe'])) for e in eph_list)
 
     def summary(self):
         """Return a string summarizing current ephemeris state."""
