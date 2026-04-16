@@ -120,9 +120,9 @@ NTS is used on Internet sources for MITM protection.
 
 | Receiver | Host | Antenna | Splitter | Mount site |
 |----------|------|---------|----------|------------|
-| F9T-TOP (ZED-F9T, TIM 2.20) | TimeHat | shared (TBD) | splitter (TBD) | TBD |
-| F9T-BOT (ZED-F9T-20B, TIM 2.25) | MadHat | shared (TBD) | splitter (TBD) | TBD |
-| F9T-3RD (ZED-F9T-20B, TIM 2.25) | clkPoC3 | shared (TBD) | splitter (TBD) | TBD |
+| F9T-TOP (ZED-F9T, TIM 2.20) | TimeHat | Patch3 | GUS #2 | East roof slope |
+| F9T-BOT (ZED-F9T-20B, TIM 2.25) | MadHat | Patch3 | GUS #2 | East roof slope |
+| F9T-3RD (ZED-F9T-20B, TIM 2.25) | clkPoC3 | Patch3 | GUS #2 | East roof slope |
 | F9T (OTC SBC) | otcBob1 | UFO (SPK6618H) | GUS #1 | West roof slope |
 | PX1125T (SkyTraq) | Onocoy | UFO (SPK6618H) | GUS #1 | West roof slope |
 | Adafruit Ultimate GPS (MTK-3301) | bbb | Patch1 | SV1AFN L1 | East roof slope |
@@ -130,26 +130,26 @@ NTS is used on Internet sources for MITM protection.
 
 ### TICC wiring
 
-**TICC #1** (PiPuss, /dev/ticc)
+**TICC #1** (TimeHat, /dev/ticc1)
 
 | Channel | Source | PPS from |
 |---------|--------|----------|
-| chA | TimeHAT PHC PPS OUT (SDP0, SMA1 J4) | PHC-disciplined |
-| chB | F9T-BOT PPS (PiPuss) | Patch3 |
+| chA | TimeHat i226 PEROUT (SDP0, PPS OUT) | PHC-disciplined |
+| chB | F9T-TOP PPS (EVK SMA) | Patch3 via GUS #2 |
 
-**TICC #2** (PiPuss, /dev/ticc2)
-
-| Channel | Source | PPS from |
-|---------|--------|----------|
-| chA | otcBob1 PPS OUT | ClockMatrix → i226 PEROUT (DPLL_3, OCXO) |
-| chB | (not connected) | |
-
-**TICC #3** (TimeHat, /dev/ticc)
+**TICC #2** (MadHat, /dev/ticc2)
 
 | Channel | Source | PPS from |
 |---------|--------|----------|
-| chA | TimeHAT PHC PPS OUT (SDP0, SMA1 J4) | PHC-disciplined |
-| chB | F9T-3RD PPS (EVK SMA) | UFO via GUS #1 |
+| chA | MadHat i226 PEROUT (SDP0, PPS OUT) | PHC-disciplined |
+| chB | F9T-BOT PPS (EVK SMA) | Patch3 via GUS #2 |
+
+**TICC #3** (clkPoC3, /dev/ticc3)
+
+| Channel | Source | PPS from |
+|---------|--------|----------|
+| chA | DO PPS (OCXO via CTI OSC5A2B02 + TADD-2 divider) | DAC-disciplined |
+| chB | F9T-3RD PPS (EVK SMA) | Patch3 via GUS #2 |
 
 ### 10 MHz reference chain
 
@@ -171,6 +171,25 @@ NTS is used on Internet sources for MITM protection.
 
 Record topology changes here so the history of what was connected when
 is preserved. Include date, what changed, and why.
+
+### 2026-04-16 — TICC wiring updated, PiPuss in drawer, antenna clarified
+
+- **PiPuss is powered down and stored in a drawer.**  Both F9Ts have
+  moved to other hosts (see 2026-04-13 entry).  PiPuss no longer has
+  any receivers or TICCs.
+- **All three F9Ts share Patch3 antenna via GUS #2 splitter.**  This is
+  the same antenna/splitter that was used for PiPuss zero-baseline testing
+  (see 2026-03-20 entry).  Same ARP for all three receivers.
+- **TICC wiring (current)**:
+  - TICC #1 on TimeHat (/dev/ticc1): chA = TimeHat i226 PEROUT (PPS OUT),
+    chB = F9T-TOP PPS (GNSS PPS)
+  - TICC #2 on MadHat (/dev/ticc2): chA = MadHat i226 PEROUT (PPS OUT),
+    chB = F9T-BOT PPS (GNSS PPS)
+  - TICC #3 on clkPoC3 (/dev/ticc3): chA = DO PPS (OCXO-derived),
+    chB = F9T-3RD PPS (GNSS PPS)
+  - All three TICCs referenced to Geppetto GPSDO 10 MHz via SV1AFN dist amp
+- **PTP device paths**: TimeHat and MadHat have i226 PHC at `/dev/ptp1`
+  (not `/dev/ptp0` as in the host configs — needs config file update)
 
 ### 2026-04-13 — Receiver shuffle, PiPuss renamed to MadHat, all three F9Ts on one antenna
 
