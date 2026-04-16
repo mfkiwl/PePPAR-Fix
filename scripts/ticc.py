@@ -337,7 +337,7 @@ def _close_all_shared_ports() -> None:
 atexit.register(_close_all_shared_ports)
 
 
-def prewarm_ticc_port(port: str, baud: int = 115200) -> None:
+def warm_ticc_port(port: str, baud: int = 115200) -> None:
     """Open the TICC serial port early to absorb any Arduino reboot.
 
     Must be called BEFORE the GNSS serial reader starts.  Opening the
@@ -352,7 +352,7 @@ def prewarm_ticc_port(port: str, baud: int = 115200) -> None:
     """
     shared = _get_shared_port(port, baud)
     shared.acquire(wait_for_boot=True)
-    log.info("TICC port pre-warmed: %s (boot=%s)", port,
+    log.info("TICC port warmed: %s (boot=%s)", port,
              "warm" if shared.booted else "cold")
 
 

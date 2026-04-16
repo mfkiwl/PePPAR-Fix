@@ -4245,19 +4245,19 @@ def run(args):
     except Exception as e:
         log.warning("NAV2 config attempt failed: %s (continuing without)", e)
 
-    # Pre-warm TICC port BEFORE the serial reader starts.
+    # Warm TICC port BEFORE the serial reader starts.
     # Opening the TICC may reboot the Arduino (DTR edge), which causes
     # USB re-enumeration that can disconnect the F9T serial port on hosts
-    # sharing the USB bus (clkPoC3, MadHat).  Pre-warming absorbs the
+    # sharing the USB bus (clkPoC3, MadHat).  Warming absorbs the
     # reboot here, while nothing else is using USB serial.  Subsequent
     # TICC opens (bootstrap, reader thread) get the warm path.
     ticc_port = getattr(args, 'ticc_port', None)
     if ticc_port:
         try:
-            from ticc import prewarm_ticc_port
-            prewarm_ticc_port(ticc_port, getattr(args, 'ticc_baud', 115200))
+            from ticc import warm_ticc_port
+            warm_ticc_port(ticc_port, getattr(args, 'ticc_baud', 115200))
         except Exception as e:
-            log.warning("TICC pre-warm failed: %s (will retry later)", e)
+            log.warning("TICC warm failed: %s (will retry later)", e)
 
     # Start serial reader
     serial_kwargs = {}
