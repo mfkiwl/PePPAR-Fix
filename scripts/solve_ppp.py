@@ -385,6 +385,13 @@ class PPPFilter:
 
             # --- IF Pseudorange ---
             dz_pr = obs['pr_if'] - rho_pred
+            # One-time diagnostic: log per-satellite residuals at first epoch
+            if not hasattr(self, '_diag_logged'):
+                log.info("  DIAG %s: elev=%.0f° rho=%.0f sat_clk=%.6fs "
+                         "tropo=%.1f pr_if=%.1f rho_pred=%.1f "
+                         "dz_pr=%.1f m",
+                         sv, elev, rho, sat_clk, tropo,
+                         obs['pr_if'], rho_pred, dz_pr)
             h_pr = np.zeros(len(self.x))
             h_pr[0] = -e_los[0]
             h_pr[1] = -e_los[1]
@@ -416,6 +423,9 @@ class PPPFilter:
 
             n_used += 1
             sys_counts[obs['sys']] += 1
+
+        if not hasattr(self, '_diag_logged'):
+            self._diag_logged = True
 
         if n_used < 4:
             return n_used, np.array([]), {}
