@@ -1131,19 +1131,21 @@ class AntPosEstThread(threading.Thread):
                 opinion.get('pdop') or 0, opinion.get('num_sv') or 0,
             )
             if self._nav2_tension_streak >= self._nav2_alarm_count:
-                # AR-fixed positions use a higher displacement threshold.
-                # PPP-AR (~3 cm) is more precise than NAV2 (~2 m), so
-                # the normal ~2-4 m PPP-NAV2 offset would falsely trigger
-                # the reset and destroy valid integer fixes.  But we
-                # can't skip the check entirely — wrong integers could
-                # shift the position by 5-10 m and we need to catch that.
-                # Threshold: 10 m when AR-fixed (catches wrong integers),
-                # vs the normal ~5 m threshold for float positions.
-                if n_nl_fixed > 0 and displacement < 10.0:
-                    log.info("NAV2 tension %.1f but %d NL fixes active "
-                             "and displacement %.1fm < 10m "
-                             "— AR position trusted over NAV2",
-                             tension, n_nl_fixed, displacement)
+                # Require both high tension AND high displacement to reset.
+                # Tension alone is unreliable: a host whose F9T reports
+                # tight hAcc (0.7 m vs 0.9 m) crosses the 5.0 tension
+                # threshold on the same ~4 m systematic NAV2↔PPP-AR offset
+                # that leaves other hosts at 3.9.  The observed NAV2 bias
+                # is shared across hosts on the same antenna, so it isn't
+                # a wrong-integer signal — wrong integers produce >=6 m
+                # shifts in float, ≥10 m once NL is fixed.
+                disp_floor = 10.0 if n_nl_fixed > 0 else 6.0
+                if displacement < disp_floor:
+                    guard = (f"{n_nl_fixed} NL fixes active"
+                             if n_nl_fixed > 0 else "float (NL=0)")
+                    log.info("NAV2 tension %.1f but displacement %.1fm < %.0fm "
+                             "(%s) — position trusted over NAV2",
+                             tension, displacement, disp_floor, guard)
                     self._nav2_tension_streak = 0
                     return
                 lat, lon, alt = ecef_to_lla(
