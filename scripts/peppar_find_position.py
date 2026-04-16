@@ -32,7 +32,6 @@ from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections
 from ntrip_client import NtripStream
 from realtime_ppp import serial_reader, ntrip_reader
-from peppar_fix import save_position, load_position
 
 log = logging.getLogger("find_position")
 
@@ -355,18 +354,15 @@ def run_find_position(args):
 
     # Save if requested
     if args.save and converged:
-        # Primary: save to receiver state if we have a receiver ID
         receiver_id = getattr(args, 'receiver_id', None)
         if receiver_id:
             from peppar_fix.receiver_state import save_position_to_receiver
             save_position_to_receiver(int(receiver_id), pos_ecef, sigma_3d,
                                       "ppp_bootstrap")
             log.info("Position saved to receiver state (id=%s)", receiver_id)
-        # Legacy: also save to position file for backward compatibility
-        save_path = args.position_file
-        save_position(save_path, pos_ecef, sigma_3d, "ppp_bootstrap",
-                       note=f"Converged in {n_epochs} epochs ({elapsed:.0f}s)")
-        log.info(f"Position saved to {save_path}")
+        else:
+            log.warning("--save specified but --receiver-id not given; "
+                        "position not persisted")
 
     if converged:
         log.info(f"Position: {lat:.7f}, {lon:.7f}, {alt:.3f}m "
@@ -407,9 +403,8 @@ Exit codes:
 
     # Output
     ap.add_argument("--save", action="store_true",
-                    help="Save converged position to position file")
-    ap.add_argument("--position-file", default="data/position.json",
-                    help="Legacy position file path (default: data/position.json)")
+                    help="Save converged position to receiver state "
+                         "(requires --receiver-id)")
     ap.add_argument("--receiver-id", default=None,
                     help="Receiver unique_id for state persistence")
     ap.add_argument("--out", help="CSV log file for convergence tracking")

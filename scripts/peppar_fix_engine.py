@@ -16,17 +16,12 @@ Phase 2 — Steady state (position known):
 
 Usage:
     peppar-fix-engine --serial /dev/gnss-top --ntrip-conf ntrip.conf \\
-        --position-file data/position.json \\
-        --servo /dev/ptp0 --pps-pin 1 \\
+        --servo /dev/ptp_i226 --pps-pin 1 \\
         --out solution.csv --systems gps,gal,bds
 
     # Bootstrap only (no servo):
     peppar-fix-engine --serial /dev/gnss-top --ntrip-conf ntrip.conf \\
-        --position-file data/position.json --out bootstrap.csv
-
-    # With existing position (skip bootstrap):
-    peppar-fix-engine --serial /dev/gnss-top --ntrip-conf ntrip.conf \\
-        --position-file data/position.json --servo /dev/ptp0 --pps-pin 1
+        --out bootstrap.csv
 """
 
 import argparse
@@ -66,8 +61,6 @@ from peppar_fix import (
     estimator_sample_weight,
     estimate_correlation_confidence,
     match_pps_event_from_history,
-    load_position,
-    save_position,
 )
 from peppar_fix.event_time import PpsEvent
 from peppar_fix.fault_injection import get_delay_injector, get_source_mute_controller
@@ -4443,15 +4436,6 @@ def run(args):
         # Persist to receiver state so future runs use it directly
         if uid is not None:
             save_position_to_receiver(uid, known_ecef, 0.0, "known_pos")
-    if known_ecef is None and args.position_file:
-        # Migration fallback: read legacy data/position.json once,
-        # then migrate it into receiver state so future runs skip this.
-        known_ecef = load_position(args.position_file)
-        if known_ecef is not None:
-            pos_source = "file (migrating to receiver state)"
-            pos_sigma_m = 10.0  # unknown quality — will be validated
-            if uid is not None:
-                save_position_to_receiver(uid, known_ecef, 10.0, "migrated_from_legacy")
     if known_ecef is not None:
         lat, lon, alt = ecef_to_lla(known_ecef[0], known_ecef[1], known_ecef[2])
         log.info(f"Position ({pos_source}): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
@@ -4688,7 +4672,6 @@ def _apply_host_config(args):
         "ssr_mount":        ("ssr_mount",        str),
         "ssr_ntrip_conf":   ("ssr_ntrip_conf",   str),
         "known_pos":        ("known_pos",        str),
-        "position_file":    ("position_file",    str),
         "systems":          ("systems",          str),
         "duration":         ("duration",         int),
         "log":              ("servo_log",        str),
@@ -4753,8 +4736,6 @@ Two-phase operation:
                      help="Known position as lat,lon,alt (skips bootstrap)")
     pos.add_argument("--seed-pos",
                      help="Seed position for bootstrap (speeds convergence)")
-    pos.add_argument("--position-file", default="data/position.json",
-                     help="Position file for save/load (default: data/position.json)")
     pos.add_argument("--sigma", type=float, default=0.1,
                      help="Bootstrap convergence threshold in meters (default: 0.1)")
     pos.add_argument("--timeout", type=int, default=3600,

@@ -22,7 +22,6 @@ KEYS = (
     "eph_mount",
     "ssr_mount",
     "known_pos",
-    "position_file",
     "systems",
     "duration",
     "log",

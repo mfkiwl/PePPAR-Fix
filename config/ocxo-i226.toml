@@ -28,8 +28,7 @@ ssr_mount = "SSRA01CAS1"
 # Approximate antenna position from a live LS fix on 2026-04-08 after
 # the antenna was recabled.  Refine to a converged PPP fix once the
 # bring-up is fully verified — the engine will save the refined value
-# back to data/position.json automatically.
+# to state/receivers/<unique_id>.json automatically.
 known_pos = "41.8437,-88.1036,141"
-position_file = "data/position.json"
 
 systems = "gps,gal"

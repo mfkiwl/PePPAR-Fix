@@ -195,9 +195,9 @@ def check_receiver_change(current_id, port, state_dir=None):
 def save_position_to_receiver(unique_id, ecef, sigma_m, source, state_dir=None):
     """Save a position fix into the receiver's state file.
 
-    This supplements (does not replace) the legacy data/position.json.
     The receiver state carries its own position because different
-    receivers may be connected to different antennas.
+    receivers may be connected to different antennas — position is a
+    property of the receiver/antenna pair, not of the host.
 
     Args:
         unique_id: receiver unique ID

@@ -3,11 +3,11 @@
 
 See docs/glossary.md for term definitions (DO, PHC, rx TCXO, etc.).
 
-Requires a stored position file.  Measures DO frequency from PPS,
-runs a short PPP clock solution, then evaluates DO phase and
-frequency.  Intervenes only if they disagree with GNSS-derived
-estimates: optimal stopping for the best achievable phase step,
-then a glide slope for smooth servo handoff.
+Requires a receiver state file with last_known_position.  Measures DO
+frequency from PPS, runs a short PPP clock solution, then evaluates
+DO phase and frequency.  Intervenes only if they disagree with
+GNSS-derived estimates: optimal stopping for the best achievable
+phase step, then a glide slope for smooth servo handoff.
 
 Exit codes:
     0 — PHC is ready for servo (blessed or stepped)
@@ -17,10 +17,9 @@ Exit codes:
 Usage:
     python3 phc_bootstrap.py \
         --serial /dev/gnss-top --baud 115200 --port-type USB \
-        --position-file data/position.json \
         --ntrip-conf ntrip.conf --eph-mount BCEP00BKG0 \
         --systems gps,gal \
-        --ptp-dev /dev/ptp0 --ptp-profile i226 \
+        --ptp-dev /dev/ptp_i226 --ptp-profile i226 \
         --drift-file data/drift.json
 """
 
@@ -46,12 +45,6 @@ log = logging.getLogger("phc_bootstrap")
 C = 299_792_458.0
 
 # ── Helpers ──────────────────────────────────────────────────────── #
-
-
-def load_position(path):
-    with open(path) as f:
-        pos = json.load(f)
-    return np.array(pos["ecef_m"])
 
 
 def load_drift(path):
@@ -457,8 +450,6 @@ def _apply_bootstrap_profile(args):
 
 def main():
     ap = argparse.ArgumentParser(description="PHC bootstrap")
-    ap.add_argument("--position-file", default=None,
-                    help="Legacy position file (fallback if receiver state has no position)")
     ap.add_argument("--serial", required=True)
     ap.add_argument("--baud", type=int, default=9600)
     ap.add_argument("--port-type", default="USB",
@@ -547,11 +538,6 @@ def main():
         if known_ecef is not None:
             lat, lon, alt = ecef_to_lla(*known_ecef)
             log.info("Loaded position (receiver state): %.6f, %.6f, %.1fm", lat, lon, alt)
-    if known_ecef is None and args.position_file and os.path.exists(args.position_file):
-        known_ecef = load_position(args.position_file)
-        if known_ecef is not None:
-            lat, lon, alt = ecef_to_lla(*known_ecef)
-            log.info("Loaded position (legacy file): %.6f, %.6f, %.1fm", lat, lon, alt)
     if known_ecef is None:
         log.error("No position available — run position bootstrap first")
         return 1

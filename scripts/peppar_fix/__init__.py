@@ -5,7 +5,6 @@ from peppar_fix.servo import PIServo
 from peppar_fix.error_sources import ErrorSource, compute_error_sources, PPPCalibration, CarrierPhaseTracker, ppp_qerr
 from peppar_fix.discipline import DisciplineScheduler
 from peppar_fix.watchdog import PositionWatchdog
-from peppar_fix.position import save_position, load_position
 from peppar_fix.correlation_gate import (
     CorrectionFreshnessGate,
     StrictCorrelationGate,
@@ -36,7 +35,6 @@ __all__ = [
     'estimate_correlation_confidence',
     'merge_correlation_confidence',
     'TimebaseRelationEstimator',
-    'save_position', 'load_position',
     'receiver',
     'receiver_state',
 ]

@@ -18,7 +18,7 @@ Architecture:
 Usage:
     # Standalone:
     python ntrip_caster.py --serial /dev/gnss-bot --bind :2102 \\
-        --position data/position.json
+        --receiver-id 136395244089
 
     # The unified CLI will integrate this as --caster :2102
 """
@@ -34,7 +34,6 @@ import time
 from datetime import datetime, timezone, timedelta
 
 from rtcm_encoder import encode_epoch, encode_1005
-from peppar_fix import load_position
 
 log = logging.getLogger(__name__)
 
@@ -325,7 +324,7 @@ def rawx_to_caster_obs(parsed):
     return gps_time, observations
 
 
-def caster_serial_loop(port, baud, caster, position_file, stop_event,
+def caster_serial_loop(port, baud, caster, stop_event,
                        phase2_event=None, receiver_id=None):
     """Read UBX from serial and feed observations to the NTRIP caster.
 
@@ -333,7 +332,6 @@ def caster_serial_loop(port, baud, caster, position_file, stop_event,
         port: serial port path
         baud: baud rate
         caster: NtripCasterServer instance
-        position_file: path to position.json for reference ARP (legacy fallback)
         stop_event: threading.Event to signal shutdown
         phase2_event: optional threading.Event, set when position is converged
                       (Phase 2 lock). Reference position is only broadcast
@@ -373,15 +371,12 @@ def caster_serial_loop(port, baud, caster, position_file, stop_event,
             # Only advertise after Phase 2 lock (if phase2_event is provided)
             if phase2_event is None or phase2_event.is_set():
                 if not ref_loaded or n_epochs % 60 == 0:
-                    loaded = None
                     if receiver_id is not None:
                         from peppar_fix.receiver_state import load_position_from_receiver
                         loaded = load_position_from_receiver(receiver_id)
-                    if loaded is None and position_file:
-                        loaded = load_position(position_file)
-                    if loaded is not None:
-                        ref_ecef = loaded
-                        ref_loaded = True
+                        if loaded is not None:
+                            ref_ecef = loaded
+                            ref_loaded = True
 
             caster.broadcast_epoch(observations, gps_time,
                                    ref_ecef=ref_ecef)
@@ -416,8 +411,6 @@ def main():
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--bind", default=":2102",
                     help="Bind address:port (default: :2102)")
-    ap.add_argument("--position", default="data/position.json",
-                    help="Legacy position file for reference ARP (default: data/position.json)")
     ap.add_argument("--receiver-id", type=int, default=None,
                     help="Receiver unique_id for state-based position lookup")
     ap.add_argument("--station-id", type=int, default=0,
@@ -458,7 +451,7 @@ def main():
     # Run serial reader → caster loop
     try:
         caster_serial_loop(
-            args.serial, args.baud, caster, args.position, stop_event,
+            args.serial, args.baud, caster, stop_event,
             receiver_id=args.receiver_id)
     finally:
         caster.stop()

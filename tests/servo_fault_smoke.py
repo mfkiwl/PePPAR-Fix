@@ -22,7 +22,6 @@ def parse_args():
     ap.add_argument("--ntrip-conf", required=True)
     ap.add_argument("--eph-mount", required=True)
     ap.add_argument("--systems", default="gps,gal")
-    ap.add_argument("--position-file", default=None)
     ap.add_argument("--known-pos", default=None)
     ap.add_argument("--ptp-profile", required=True)
     ap.add_argument("--servo", required=True)
@@ -183,8 +182,6 @@ def main():
     ]
     if args.receiver:
         cmd.extend(["--receiver", args.receiver])
-    if args.position_file:
-        cmd.extend(["--position-file", args.position_file])
     if args.known_pos:
         cmd.extend(["--known-pos", args.known_pos])
     if args.gate_stats:

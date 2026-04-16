@@ -5,6 +5,5 @@ ubx_port = "USB"
 receiver = "f9t-l5"
 ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
-position_file = "data/position.json"
 systems = "gps,gal"
 # No ptp_dev — PiPuss is for position/caster testing, not PHC discipline

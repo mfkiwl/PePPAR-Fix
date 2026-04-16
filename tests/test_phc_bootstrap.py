@@ -6,8 +6,8 @@ it makes the right decisions about phase and frequency intervention.
 
 Requires:
   - A working GNSS receiver with dual-frequency observations
-  - A PHC device (/dev/ptp0 or similar)
-  - A valid position file
+  - A PHC device (/dev/ptp_i226 or similar)
+  - A populated receiver state file with last_known_position
   - NTRIP connectivity
 
 Tests:
@@ -19,9 +19,8 @@ Tests:
 Usage:
     python3 test_phc_bootstrap.py \
         --serial /dev/gnss-top --baud 115200 --port-type USB \
-        --position-file data/position.json \
         --ntrip-conf ntrip.conf --eph-mount BCEP00BKG0 \
-        --ptp-dev /dev/ptp0 --extts-channel 0 --pps-pin 1 --program-pin
+        --ptp-dev /dev/ptp_i226 --extts-channel 0 --pps-pin 1 --program-pin
 """
 
 import argparse
@@ -58,7 +57,6 @@ def run_bootstrap(args, extra_args=None):
         "--serial", args.serial,
         "--baud", str(args.baud),
         "--port-type", args.port_type,
-        "--position-file", args.position_file,
         "--ntrip-conf", args.ntrip_conf,
         "--eph-mount", args.eph_mount,
         "--systems", args.systems,
@@ -277,7 +275,6 @@ def main():
     ap.add_argument("--serial", required=True)
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--port-type", default="USB")
-    ap.add_argument("--position-file", required=True)
     ap.add_argument("--ntrip-conf", required=True)
     ap.add_argument("--eph-mount", required=True)
     ap.add_argument("--ssr-mount", default=None)
