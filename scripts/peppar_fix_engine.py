@@ -1309,47 +1309,42 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             if not _do_bootstrap_init(args, ptp, known_ecef, obs_queue,
                                         beph, ssr, stop_event,
                                         dfe_sm=dfe_sm):
-                log.warning("DO bootstrap failed — continuing without servo "
-                            "(AntPosEst will still run)")
-                if ptp is not None:
-                    ptp.close()
-                    ptp = None
-                want_servo = False
+                log.warning("DO bootstrap failed — proceeding to servo setup "
+                            "(TICC reader, noise estimator will still start)")
             else:
                 log.info("DO bootstrap succeeded (%s)", getattr(args, 'do_type', 'phc'))
                 if dfe_sm is not None:
                     dfe_sm.transition(DOFreqEstState.TRACKING, "DO bootstrap succeeded")
 
-        if want_servo:
-            # Set up servo with PPS retry (absorbs wrapper's exit-code-3 retry).
-            # No-PPS (return 3) is retryable — PPS may appear after a few seconds
-            # if the receiver just started or the cable was reconnected.
-            pps_max_retries = 3
-            pps_backoff = 5
-            servo_result = None
-            for pps_attempt in range(1, pps_max_retries + 1):
-                servo_result = _setup_servo(args, known_ecef, qerr_store, ptp=ptp)
-                if not isinstance(servo_result, int) or servo_result != 3:
-                    break
-                if pps_attempt < pps_max_retries:
-                    log.warning("No PPS — retry %d/%d in %ds",
-                                pps_attempt, pps_max_retries, pps_backoff)
-                    time.sleep(pps_backoff)
-                    pps_backoff = min(pps_backoff * 2, 60)
-                else:
-                    log.error("No PPS after %d attempts — giving up", pps_max_retries)
-            # Promote clockClass to 52 (initialized) after successful bootstrap
-            # and servo setup — mirrors what the wrapper's
-            # promote_clock_class_initialized did.
-            if not isinstance(servo_result, int) and servo_result.get('pmc'):
-                _set_clock_class(servo_result, "initialized")
-            if isinstance(servo_result, int):
-                log.error("Failed to set up servo (exit code %d)", servo_result)
-                return servo_result
-            servo_ctx = servo_result
-            servo_ctx["correlation_gate"] = StrictCorrelationGate()
-            if dfe_sm is not None:
-                servo_ctx["dfe_sm"] = dfe_sm
+        # Set up servo with PPS retry (absorbs wrapper's exit-code-3 retry).
+        # No-PPS (return 3) is retryable — PPS may appear after a few seconds
+        # if the receiver just started or the cable was reconnected.
+        pps_max_retries = 3
+        pps_backoff = 5
+        servo_result = None
+        for pps_attempt in range(1, pps_max_retries + 1):
+            servo_result = _setup_servo(args, known_ecef, qerr_store, ptp=ptp)
+            if not isinstance(servo_result, int) or servo_result != 3:
+                break
+            if pps_attempt < pps_max_retries:
+                log.warning("No PPS — retry %d/%d in %ds",
+                            pps_attempt, pps_max_retries, pps_backoff)
+                time.sleep(pps_backoff)
+                pps_backoff = min(pps_backoff * 2, 60)
+            else:
+                log.error("No PPS after %d attempts — giving up", pps_max_retries)
+        # Promote clockClass to 52 (initialized) after successful bootstrap
+        # and servo setup — mirrors what the wrapper's
+        # promote_clock_class_initialized did.
+        if not isinstance(servo_result, int) and servo_result.get('pmc'):
+            _set_clock_class(servo_result, "initialized")
+        if isinstance(servo_result, int):
+            log.error("Failed to set up servo (exit code %d)", servo_result)
+            return servo_result
+        servo_ctx = servo_result
+        servo_ctx["correlation_gate"] = StrictCorrelationGate()
+        if dfe_sm is not None:
+            servo_ctx["dfe_sm"] = dfe_sm
 
     prev_t = None
     n_epochs = 0
