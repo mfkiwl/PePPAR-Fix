@@ -1357,7 +1357,8 @@ class AntPosEstThread(threading.Thread):
 
 def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                      stop_event, qerr_store=None, out_w=None, nav2_store=None,
-                     ape_sm=None, dfe_sm=None, ape_thread=None):
+                     ape_sm=None, dfe_sm=None, ape_thread=None,
+                     ar_position=None, ar_pos_lock=None):
     """Run FixedPosFilter for clock estimation with optional servo.
 
     This is the steady-state phase: position is known, we estimate clock
@@ -1694,6 +1695,26 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
             if n_used < 4:
                 skip_stats["too_few_meas"] += 1
                 continue
+
+            # Blend AntPosEst's refined position into DOFreqEst's reference.
+            # Exponential blend: 12 ps/epoch migration rate for 5m offset —
+            # invisible to the servo (200× below PPS noise floor).
+            # See docs/ppp-ar-design.md "Gradual position feed-in".
+            if ar_position is not None and ar_pos_lock is not None:
+                with ar_pos_lock:
+                    ar_ecef = ar_position.get('ecef')
+                    ar_sigma = ar_position.get('sigma')
+                if ar_ecef is not None and ar_sigma is not None and ar_sigma < 1.0:
+                    alpha = 0.001  # τ ≈ 1000 epochs (1000 s at 1 Hz)
+                    delta = ar_ecef - known_ecef
+                    step = alpha * delta
+                    known_ecef += step
+                    filt.pos = np.array(known_ecef)
+                    step_mm = float(np.linalg.norm(step)) * 1000
+                    if n_epochs % 100 == 0 and float(np.linalg.norm(delta)) > 0.01:
+                        log.info("Position blend: Δ=%.2fm step=%.1fmm "
+                                 "(AR σ=%.3fm)",
+                                 float(np.linalg.norm(delta)), step_mm, ar_sigma)
 
             # Watchdog with NAV2 position consensus
             resid_rms = float(np.sqrt(np.mean(resid ** 2))) if len(resid) > 0 else 0.0
@@ -4531,11 +4552,20 @@ def run(args):
         # the converged PPPFilter from bootstrap.  On warm start (position
         # loaded from receiver state), creates a fresh PPPFilter at the
         # known position.
+        # AntPosEst → DOFreqEst position migration via exponential blend.
+        # The callback writes the latest AR position; the steady-state loop
+        # blends it into filt.pos at alpha=0.001 per epoch (~17 min τ).
+        # See docs/ppp-ar-design.md "Gradual position feed-in: the math".
+        _ar_position = {'ecef': None, 'sigma': None}
+        _ar_pos_lock = threading.Lock()
+
         def _position_improved(ecef, sigma_m):
             lat, lon, alt = ecef_to_lla(ecef[0], ecef[1], ecef[2])
             log.info("AntPosEst position improved: σ=%.3fm (%.6f, %.6f, %.1f)",
                      sigma_m, lat, lon, alt)
-            # Future: blend into DOFreqEst's phase reference
+            with _ar_pos_lock:
+                _ar_position['ecef'] = np.array(ecef, dtype=float)
+                _ar_position['sigma'] = sigma_m
 
         ape_thread = AntPosEstThread(
             known_ecef=known_ecef,
@@ -4566,6 +4596,8 @@ def run(args):
                 ape_sm=ape_sm,
                 dfe_sm=dfe_sm,
                 ape_thread=ape_thread,
+                ar_position=_ar_position,
+                ar_pos_lock=_ar_pos_lock,
             )
             # run_steady_state returns an int exit code on error,
             # or a gate_stats dict on normal completion.
