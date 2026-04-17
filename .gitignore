@@ -1,8 +1,11 @@
 # Observation data and correction products (large, downloadable)
 data/
 
-# Host-local state (receiver identity, position, DO characterization)
-state/
+# Host-local state (receiver identity, position, DO characterization).
+# Runtime JSON is host-specific; README.md files are checked in so
+# lab hosts get directory descriptions on pull.
+state/**/*.json
+state/**/*.tmp
 
 # Credentials
 ntrip.conf

@@ -19,8 +19,7 @@ Usage:
         --serial /dev/gnss-top --baud 115200 --port-type USB \
         --ntrip-conf ntrip.conf --eph-mount BCEP00BKG0 \
         --systems gps,gal \
-        --ptp-dev /dev/ptp_i226 --ptp-profile i226 \
-        --drift-file data/drift.json
+        --ptp-dev /dev/ptp_i226 --ptp-profile i226
 """
 
 import argparse
@@ -47,28 +46,6 @@ C = 299_792_458.0
 # ── Helpers ──────────────────────────────────────────────────────── #
 
 
-def load_drift(path):
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-
-
-def save_drift(path, adjfine_ppb, phc_dev, tcxo_freq_corr_ppb=None,
-               dt_rx_ns=None):
-    data = {
-        "adjfine_ppb": adjfine_ppb,
-        "phc": phc_dev,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    if tcxo_freq_corr_ppb is not None:
-        data["tcxo_freq_corr_ppb"] = tcxo_freq_corr_ppb
-    if dt_rx_ns is not None:
-        data["dt_rx_ns"] = dt_rx_ns
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
 
 
 def lla_to_ecef(lat, lon, alt):
@@ -477,7 +454,6 @@ def main():
                     choices=["gps", "utc", "tai"])
     ap.add_argument("--leap", type=int, default=18)
     ap.add_argument("--tai-minus-gps", type=int, default=19)
-    ap.add_argument("--drift-file", default="data/drift.json")
     ap.add_argument("--epochs", type=int, default=10,
                     help="Number of filter epochs before evaluating PHC")
     ap.add_argument("--freq-tolerance-ppb", type=float, default=10.0,
@@ -553,12 +529,7 @@ def main():
     except Exception:
         pass
     if drift is None:
-        drift = load_drift(args.drift_file)
-        if drift:
-            log.info("Drift (legacy): adjfine=%.1f ppb (from %s)",
-                     drift["adjfine_ppb"], drift.get("timestamp", "?"))
-    if drift is None:
-        log.info("No drift data found")
+        log.info("No DO state found — bootstrapping from scratch")
 
     # Open PHC
     ptp = PtpDevice(args.ptp_dev)
@@ -1007,16 +978,14 @@ def main():
             log.info("ClockMatrix FCW set: %.1f ppb (base=%.1f + glide=%.1f)",
                      target_freq, base_freq, glide_offset)
 
-            # Save to DO state and legacy drift file
-            save_drift(args.drift_file, base_freq, args.ptp_dev,
-                       tcxo_freq_corr_ppb, dt_rx_ns=dt_rx_ns)
+            # Save to DO state
             try:
                 from peppar_fix.do_state import phc_unique_id, save_do_freq_offset
                 save_do_freq_offset(phc_unique_id(args.ptp_dev), base_freq)
-            except Exception:
-                pass
-            log.info("Drift saved: base=%.1f ppb, dt_rx=%.1f ns",
-                     base_freq, dt_rx_ns)
+                log.info("DO freq saved: base=%.1f ppb, dt_rx=%.1f ns",
+                         base_freq, dt_rx_ns)
+            except Exception as e:
+                log.warning("Failed to save DO state: %s", e)
 
             # Don't close cm_i2c — the engine will reopen its own handle.
             # Don't teardown actuator — engine inherits write_freq mode.
@@ -1037,16 +1006,14 @@ def main():
              target_freq, base_freq, glide_offset)
     ptp.adjfine(target_freq)
 
-    # Save to DO state and legacy drift file (not the transient glide offset)
-    save_drift(args.drift_file, base_freq, args.ptp_dev, tcxo_freq_corr_ppb,
-               dt_rx_ns=dt_rx_ns)
+    # Save to DO state (not the transient glide offset)
     try:
         from peppar_fix.do_state import phc_unique_id, save_do_freq_offset
         save_do_freq_offset(phc_unique_id(args.ptp_dev), base_freq)
-    except Exception:
-        pass
-    log.info("Drift saved: base=%.1f ppb, dt_rx=%.1f ns",
-             base_freq, dt_rx_ns)
+        log.info("DO freq saved: base=%.1f ppb, dt_rx=%.1f ns",
+                 base_freq, dt_rx_ns)
+    except Exception as e:
+        log.warning("Failed to save DO state: %s", e)
 
     _enable_pps_out(ptp, args)
     ptp.close()

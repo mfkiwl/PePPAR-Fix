@@ -2129,8 +2129,8 @@ def _set_clock_class(ctx, state):
 def _save_osc_freq_corr(ctx):
     """Save refined oscillator frequency corrections on clean shutdown.
 
-    Saves to DO state (state/dos/<id>.json) and also to the TCXO offset
-    in receiver state.  Legacy drift.json is kept for backward compat.
+    DO adjfine goes to state/dos/<uid>.json; the F9T rx TCXO offset goes
+    to state/receivers/<uid>.json.
 
     Skipped in --freerun mode: the live adjfine there is what the servo
     *would have* written if it were actuating, not a value the PHC has
@@ -2138,65 +2138,46 @@ def _save_osc_freq_corr(ctx):
     bootstrap with a fictitious frequency.
     """
     if ctx.get('freerun'):
-        log.info("Skipping drift save (freerun mode)")
+        log.info("Skipping DO-state save (freerun mode)")
         return
-    drift_path = ctx.get('drift_file', 'data/drift.json')
     adjfine = ctx.get('adjfine_ppb', 0.0)
     carrier_tracker = ctx.get('carrier_tracker')
-    phc_dev = ctx.get('phc_dev', '/dev/ptp0')
 
     tcxo_corr = None
     if (carrier_tracker is not None and carrier_tracker._n_d > 0
             and carrier_tracker.drift_rate_ppb != 0):
         tcxo_corr = adjfine - carrier_tracker.drift_rate_ppb
 
-    # Save to DO state (primary)
+    # Save DO freq offset
     do_uid = ctx.get('do_unique_id')
     if do_uid is not None:
         try:
             from peppar_fix.do_state import save_do_freq_offset
             save_do_freq_offset(do_uid, adjfine)
-            log.info("Saved DO freq offset: adjfine=%.1f ppb (DO %s)", adjfine, do_uid)
+            log.info("Saved DO freq offset: adjfine=%.1f ppb (DO %s)",
+                     adjfine, do_uid)
         except Exception as e:
             log.warning("Failed to save DO state: %s", e)
 
-    # Save TCXO offset to receiver state if available
-    if tcxo_corr is not None:
+    # Save rx TCXO offset + last known dt_rx to receiver state
+    receiver_uid = ctx.get('receiver_unique_id')
+    if receiver_uid is not None:
         try:
-            receiver_uid = ctx.get('receiver_unique_id')
-            if receiver_uid is not None:
-                from peppar_fix.receiver_state import load_receiver_state, save_receiver_state
-                state = load_receiver_state(receiver_uid)
-                if state is not None:
-                    state.setdefault("tcxo", {})
+            from peppar_fix.receiver_state import (load_receiver_state,
+                                                    save_receiver_state)
+            state = load_receiver_state(receiver_uid)
+            if state is not None:
+                state.setdefault("tcxo", {})
+                if tcxo_corr is not None:
                     state["tcxo"]["last_known_freq_offset_ppb"] = tcxo_corr
-                    state["tcxo"]["updated"] = time.strftime(
-                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                    save_receiver_state(state)
+                if ctx.get('_prev_dt_rx_ns') is not None:
+                    state["tcxo"]["last_known_dt_rx_ns"] = (
+                        ctx['_prev_dt_rx_ns'])
+                state["tcxo"]["updated"] = time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                save_receiver_state(state)
         except Exception as e:
-            log.warning("Failed to save TCXO offset to receiver state: %s", e)
-
-    # Legacy drift.json (kept for backward compat and carrier tracker seeding)
-    try:
-        import json as _json
-        data = {}
-        try:
-            with open(drift_path) as f:
-                data = _json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-        data['adjfine_ppb'] = adjfine
-        data['phc'] = phc_dev
-        data['timestamp'] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        if tcxo_corr is not None:
-            data['tcxo_freq_corr_ppb'] = tcxo_corr
-        if ctx.get('_prev_dt_rx_ns') is not None:
-            data['dt_rx_ns'] = ctx['_prev_dt_rx_ns']
-        os.makedirs(os.path.dirname(drift_path) or '.', exist_ok=True)
-        with open(drift_path, 'w') as f:
-            _json.dump(data, f, indent=2)
-    except Exception as e:
-        log.warning("Failed to save legacy drift.json: %s", e)
+            log.warning("Failed to save rx TCXO state: %s", e)
 
 
 def _log_do_characterization(args):
@@ -2270,8 +2251,8 @@ def _init_carrier_tracker(args):
     """Create CarrierPhaseTracker, seeding D from state or drift file.
 
     D = phc_freq_corr - tcxo_freq_corr, computed from two independently
-    measured oscillator frequency corrections.  Tries DO + receiver state
-    first, falls back to legacy drift.json.
+    measured oscillator frequency corrections, loaded from DO state
+    (phc_corr) and receiver state (tcxo_corr).
     """
     tracker = CarrierPhaseTracker()
 
@@ -2301,24 +2282,6 @@ def _init_carrier_tracker(args):
             pass
     if phc_corr is not None and tcxo_corr is not None:
         source = "state"
-
-    # Fall back to legacy drift.json
-    if phc_corr is None or tcxo_corr is None:
-        drift_path = getattr(args, 'drift_file', None) or 'data/drift.json'
-        try:
-            import json as _json
-            with open(drift_path) as f:
-                drift = _json.load(f)
-            if phc_corr is None:
-                phc_corr = drift.get('adjfine_ppb')
-            if tcxo_corr is None:
-                tcxo_corr = drift.get('tcxo_freq_corr_ppb')
-            if phc_corr is not None and tcxo_corr is not None and source is None:
-                source = drift_path
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-
-    if phc_corr is not None and tcxo_corr is not None:
         d = phc_corr - tcxo_corr
         tracker.drift_rate_ppb = d
         log.info("Carrier tracker: D=%.1f ppb "
@@ -2435,8 +2398,6 @@ def _bootstrap_compute_base_freq(args, pps_freq_ppb, pps_freq_unc,
 
     Returns (base_freq, tcxo_freq_corr_ppb).
     """
-    from phc_bootstrap import load_drift
-
     freq_sane = abs(pps_freq_ppb) <= args.freq_tolerance_ppb
     if freq_sane:
         log.info("Frequency sane: PPS=%.1f ±%.1f ppb (within ±%.1f ppb)",
@@ -2449,14 +2410,26 @@ def _bootstrap_compute_base_freq(args, pps_freq_ppb, pps_freq_unc,
         base_freq = current_adj_ppb
         log.info("Base frequency: %.1f ppb (current, freq sane)", base_freq)
     else:
-        drift = load_drift(args.drift_file)
+        # Pull last-known frequency from DO state if we can't trust PPS.
+        stored_adjfine = None
+        do_uid = ctx_do_uid if (ctx_do_uid := getattr(args, 'do_unique_id', None)) else None
+        if do_uid is None:
+            do_uid = _resolve_do_uid(args)
+        if do_uid is not None:
+            try:
+                from peppar_fix.do_state import load_do_state
+                s = load_do_state(do_uid)
+                if s is not None:
+                    stored_adjfine = s.get("last_known_freq_offset_ppb")
+            except Exception:
+                pass
         if pps_freq_unc is not None and pps_freq_unc <= args.freq_tolerance_ppb:
             base_freq = current_adj_ppb - pps_freq_ppb
             freq_source = ("PPS correction: %.1f - %.1f"
                            % (current_adj_ppb, pps_freq_ppb))
-        elif drift:
-            base_freq = drift["adjfine_ppb"]
-            freq_source = "drift file"
+        elif stored_adjfine is not None:
+            base_freq = stored_adjfine
+            freq_source = "DO state"
         else:
             base_freq = 0.0
             freq_source = "default (no data)"
@@ -2512,8 +2485,6 @@ def _do_bootstrap_vcocxo(args, ptp, pps_freq_ppb, pps_freq_unc,
 
     Returns True on success, False on fatal error.
     """
-    from phc_bootstrap import load_drift, save_drift
-
     do_label = getattr(args, 'do_label', None) or 'vcocxo'
 
     # ── 1. ARM the TADD divider (skipped if already done) ─────────── #
@@ -2570,10 +2541,18 @@ def _do_bootstrap_vcocxo(args, ptp, pps_freq_ppb, pps_freq_unc,
         dac._bus.close()
         dac._bus = None
 
-    save_drift(args.drift_file, base_freq, do_label,
-               tcxo_freq_corr_ppb, dt_rx_ns=dt_rx_ns)
-    log.info("Drift file updated: %s (base=%.1f ppb, dt_rx=%.1f ns)",
-             args.drift_file, base_freq, dt_rx_ns)
+    try:
+        from peppar_fix.do_state import load_do_state, save_do_state
+        from peppar_fix.do_state import new_do_state
+        do_uid = do_label
+        state = load_do_state(do_uid) or new_do_state(do_uid, label=do_label)
+        state["last_known_freq_offset_ppb"] = base_freq
+        state["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        save_do_state(state)
+        log.info("DO freq saved: base=%.1f ppb, dt_rx=%.1f ns",
+                 base_freq, dt_rx_ns)
+    except Exception as e:
+        log.warning("Failed to save DO state: %s", e)
 
     log.info("VCOCXO bootstrap complete — servo may start")
     return True
@@ -2587,7 +2566,6 @@ def _do_bootstrap_phc(args, ptp, pps_freq_ppb, pps_freq_unc,
     Returns True on success, False on fatal error.
     """
     from phc_bootstrap import (
-        load_drift, save_drift,
         _realtime_to_phc_offset_s, _enable_pps_out,
     )
 
@@ -2725,8 +2703,7 @@ def _do_bootstrap_phc(args, ptp, pps_freq_ppb, pps_freq_unc,
             log.info("ClockMatrix FCW set: %.1f ppb (base=%.1f + glide=%.1f)",
                      target_freq, base_freq, glide_offset)
 
-            save_drift(args.drift_file, base_freq, args.servo,
-                       tcxo_freq_corr_ppb, dt_rx_ns=dt_rx_ns)
+            _save_phc_bootstrap_freq(args, base_freq, dt_rx_ns)
             cm_i2c.close()
 
             _enable_pps_out(ptp, args)
@@ -2743,14 +2720,22 @@ def _do_bootstrap_phc(args, ptp, pps_freq_ppb, pps_freq_unc,
              target_freq, base_freq, glide_offset)
     ptp.adjfine(target_freq)
 
-    save_drift(args.drift_file, base_freq, args.servo,
-               tcxo_freq_corr_ppb, dt_rx_ns=dt_rx_ns)
-    log.info("Drift file updated: %s (base=%.1f ppb, dt_rx=%.1f ns)",
-             args.drift_file, base_freq, dt_rx_ns)
+    _save_phc_bootstrap_freq(args, base_freq, dt_rx_ns)
 
     _enable_pps_out(ptp, args)
     log.info("PHC bootstrap complete — servo may start")
     return True
+
+
+def _save_phc_bootstrap_freq(args, base_freq, dt_rx_ns):
+    """Persist the computed base adjfine to DO state."""
+    try:
+        from peppar_fix.do_state import phc_unique_id, save_do_freq_offset
+        save_do_freq_offset(phc_unique_id(args.servo), base_freq)
+        log.info("DO freq saved: base=%.1f ppb, dt_rx=%.1f ns",
+                 base_freq, dt_rx_ns)
+    except Exception as e:
+        log.warning("Failed to save DO state: %s", e)
 
 
 def _do_bootstrap_init(args, ptp, known_ecef, obs_queue, beph, ssr,
@@ -3092,24 +3077,35 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
     from peppar_fix.do_freq_est import DOFreqEst
     sigma_ticc = ts_params.measurement_noise_ns
     # Seed TCXO phase from bootstrap dt_rx so the filter starts in
-    # full 4-state mode from epoch 1 (no mid-run transition).
-    drift_path = getattr(args, 'drift_file', None) or 'data/drift.json'
+    # full 4-state mode from epoch 1 (no mid-run transition).  Pull
+    # both from state (DO state → adjfine, receiver state → dt_rx).
     bootstrap_dt_rx_ns = None
     bootstrap_base_freq = None
-    try:
-        with open(drift_path) as f:
-            drift_data = json.load(f)
-        bootstrap_dt_rx_ns = drift_data.get('dt_rx_ns')
-        bootstrap_base_freq = drift_data.get('adjfine_ppb')
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+    do_uid_local = getattr(args, 'do_unique_id', None) or _resolve_do_uid(args)
+    if do_uid_local is not None:
+        try:
+            from peppar_fix.do_state import load_do_state
+            s = load_do_state(do_uid_local)
+            if s is not None:
+                bootstrap_base_freq = s.get('last_known_freq_offset_ppb')
+        except Exception:
+            pass
+    receiver_uid_local = getattr(args, 'receiver_unique_id', None)
+    if receiver_uid_local is not None:
+        try:
+            from peppar_fix.receiver_state import load_receiver_state
+            rx = load_receiver_state(receiver_uid_local)
+            if rx is not None:
+                bootstrap_dt_rx_ns = rx.get('tcxo', {}).get('last_known_dt_rx_ns')
+        except Exception:
+            pass
     if bootstrap_dt_rx_ns is not None:
-        log.info("DOFreqEst: seeding φ_tcxo from bootstrap dt_rx=%.1f ns",
+        log.info("DOFreqEst: seeding φ_tcxo from receiver-state dt_rx=%.1f ns",
                  bootstrap_dt_rx_ns)
     else:
         log.warning("DOFreqEst: no bootstrap dt_rx — running 2-state only")
     if bootstrap_base_freq is not None:
-        log.info("DOFreqEst: crystal freq from drift file: %.1f ppb "
+        log.info("DOFreqEst: crystal freq from DO state: %.1f ppb "
                  "(current_adj=%.1f, glide=%.1f)",
                  bootstrap_base_freq, current_adj,
                  current_adj - bootstrap_base_freq)
@@ -3399,7 +3395,6 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
     return {
         'ptp': ptp,
         'phc_dev': args.servo,
-        'drift_file': getattr(args, 'drift_file', None) or 'data/drift.json',
         'receiver_unique_id': getattr(args, 'receiver_unique_id', None),
         'do_unique_id': _resolve_do_uid(args),
         'ts_params': ts_params,
@@ -5191,8 +5186,6 @@ Two-phase operation:
 
     # DO bootstrap (absorbed from phc_bootstrap.py)
     boot = ap.add_argument_group("DO bootstrap (automatic when --servo)")
-    boot.add_argument("--drift-file", default="data/drift.json",
-                      help="Drift file for warm-start frequency seed (default: data/drift.json)")
     boot.add_argument("--pps-out-pin", type=int, default=-1,
                       help="SDP pin for PPS OUT (PEROUT), -1 = none")
     boot.add_argument("--pps-out-channel", type=int, default=0,

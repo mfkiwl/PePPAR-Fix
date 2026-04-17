@@ -500,3 +500,105 @@ Same search budget, same PHC, same host load.
 
 We already have an accurate PPS-measured phase error (`phi_0`),
 which is exactly the relative offset `ADJ_SETOFFSET` wants.
+
+
+## Reference Oscillator (RO) characterization
+
+**What**: Treat the oscillator driving each TICC's 10 MHz reference
+input as a first-class entity — the **Reference Oscillator** (RO) —
+with its own characterization, bootstrap, runtime tracking, and
+clean-shutdown state save.  Parallel to how we already treat the
+**Disciplined Oscillator** (DO).
+
+**Why it matters**:
+
+- TICC chA−chB is a *differential* measurement — the RO's absolute
+  frequency cancels in the difference, so for TDEV of a single
+  channel against the reference all we need is stability, not a
+  known frequency.
+- But chB alone (F9T PPS against RO) *does* carry the RO's
+  absolute frequency error relative to GPS time.  The F9T PPS is
+  within ±a few ns of GPS over any reasonable window; any long-term
+  trend in chB−nominal is the RO's offset from GPS.
+- Today our TICCs are driven by a Geppetto GPSDO OCXO — RO offset
+  from GPS should be indistinguishable from zero.  Next generation
+  may use inexpensive OCXOs with meaningful nominal offset,
+  temperature drift, ageing, and ASD/PSD noise.  Those are all
+  slow-moving; tracking them lets us:
+  1. Hand every consumer of TICC timestamps a *calibrated*
+     measurement (chA − known_RO_ppb*τ gives true DO phase, not
+     DO phase contaminated by RO drift).
+  2. **Detect F9T spoofing**: a large, unexplained offset between
+     chB and our known-stable RO frequency is a signal the F9T PPS
+     is being manipulated — the RO is the trusted anchor, the
+     F9T is what's being tested.
+  3. Sanity-check RO replacement or ageing: a TICC that's always
+     been driven by a 30 ppb OCXO with 1 ppb/year drift that
+     suddenly reads 50 ppb offset needs investigation.
+
+**Storage**: extend `state/timestampers/<unique_id>.json` (already
+designed for noise parameters) with an `ro` block parallel to the
+receiver's `tcxo` block:
+
+```json
+"reference_oscillator": {
+  "label": "Geppetto GPSDO",
+  "type": "gpsdo-ocxo",
+  "nominal_offset_ppb": 0.0,
+  "last_known_offset_ppb": -0.05,
+  "last_known_adev_1s": 1e-13,
+  "tempco_ppb_per_C": null,
+  "ageing_ppb_per_day": null,
+  "samples": 86400,
+  "updated": "2026-04-17T12:00:00Z",
+  "method": "chB vs F9T PPS over 24 h"
+}
+```
+
+**Lifecycle** (mirrors DO exactly):
+
+1. **Bootstrap**: load last-known RO offset.  Measure chB−nominal
+   over the first N epochs, compare against stored offset.  If
+   within `freq_tolerance_ppb`, bless; otherwise log a warning
+   and keep using the measured value.
+2. **Runtime tracking**: an `ROFreqEst` (light EKF or just running
+   mean + variance) accumulates offset estimates epoch-by-epoch,
+   writes periodic snapshots to state.
+3. **Clean shutdown**: save the latest estimate and sample count.
+
+**Shared code with DO**: the only fundamental difference is that
+the DO is steerable and the RO is observable-only.  The filter
+math, bootstrap sanity check, state save/load, glossary conventions
+(last_known_freq_offset_ppb, updated timestamps) should all be the
+same.  Target: a common base class for "frequency source tracked
+against GPS", with DO and RO as steerable/read-only specializations.
+
+**Does this help DOFreqEst reject a wrong-ridge lock?**  Yes —
+modestly.  DOFreqEst can settle on a biased dt_rx state that's
+self-consistent with its inputs.  One of those inputs is the TICC
+chA−chB differential, which until now has been treated as
+intrinsically trustworthy because the RO cancels out.  But if we
+*also* know the RO's independently-measured frequency from chB
+vs F9T, we can consistency-check the filter: the DOFreqEst's
+implied DO frequency should equal (chA−chB slope) + RO offset,
+and if it doesn't, the filter has locked onto the wrong ridge.
+This is an instance of the "filter σ ≠ correctness" invariant in
+`docs/architecture-vision.md` — adding an independent measurement
+for an otherwise unchecked state.
+
+**Implementation order**:
+
+1. Add `reference_oscillator` block to timestampers schema
+   (`docs/state-persistence-design.md` + the TICC writer).
+2. Add an initial frequency measurement to bootstrap (chB
+   interval trend over N epochs, report ppb).
+3. Trust-but-verify: if a stored offset exists and the new
+   measurement disagrees by more than `freq_tolerance_ppb`, log
+   both and use the new one (don't block bootstrap).
+4. Runtime tracker: maintain running mean + variance, snapshot
+   state periodically (not every epoch).
+5. Clean-shutdown save — matches the pattern already in place for
+   DO state.
+6. Later: characterize the inexpensive-OCXO variants against GPS
+   over days/weeks, populate `tempco_ppb_per_C` and
+   `ageing_ppb_per_day`, feed those into the consistency check.

@@ -34,6 +34,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from peppar_fix.ptp_device import PtpDevice
 
 
+# TODO: this test was built around data/drift.json.  Drift storage
+# has moved to state/dos/<uid>.json; the fault-injection helpers
+# below need to be ported before this integration test is useful
+# again.  Kept here for now as a reference for the test intent.
+
+
 def read_drift(path):
     try:
         with open(path) as f:
@@ -43,7 +49,7 @@ def read_drift(path):
 
 
 def write_drift(path, adjfine_ppb, phc_dev):
-    """Write a drift file, creating parent directories if needed."""
+    """[DEPRECATED] Drift storage moved to state/dos/<uid>.json."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         json.dump({"adjfine_ppb": adjfine_ppb, "phc": phc_dev,

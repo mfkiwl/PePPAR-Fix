@@ -624,6 +624,42 @@ Each step is independently testable and deployable.
 | `--freerun` (no PHC at all) | `--no-do` | AntPosEst only |
 | `peppar-fix` wrapper | thin launcher or `exec peppar_fix.py` | Intelligence moves to Python |
 
+## Design invariant: filter σ ≠ correctness
+
+An EKF's reported σ measures *self-consistency with its own inputs*,
+not *absolute truth*.  A filter can report σ=30 mm on a position
+that's 5 m wrong, or σ=0.1 ns on a dt_rx that's 100 ns biased, if
+its inputs are biased in a way the filter has already absorbed into
+its state estimate.  The 2026-04-16/17 wrong-integer investigation
+made this painful: PPPFilter reported σ<0.05 m while AR-fixed
+positions on the same shared antenna disagreed by 1–7 m across
+three hosts, and in one case Phase 1 converged 323 m from truth
+with σ=0.03 m.
+
+**Every EKF state therefore needs an independent cross-check.**
+The filter's own confidence gate is necessary but not sufficient —
+we need a measurement *external* to the filter's input stream that
+a wrong state couldn't satisfy:
+
+- **AntPosEst**: cross-checked against NAV2's secondary code-only
+  single-freq fix (different physics, same antenna) plus post-fit
+  PR residual trends (PFR monitor).
+- **DOFreqEst**: cross-checked against TICC chA−chB differential
+  (different measurement chain, independent of the EXTTS/qErr
+  stream the filter consumes).  If chA−chB and the filter's state
+  disagree over a window, the filter is servoing to a biased
+  reference.
+- **Cross-host consensus**: identical receivers on a shared antenna
+  should agree to sub-cm on position and sub-ns on PPS phase.  Any
+  larger disagreement is evidence that at least one host's filter
+  has settled on a self-consistent wrong state.
+
+If an EKF has no independent cross-check, treat it as unverified
+and prefer exposing the raw measurement to a consumer that does
+have one.  The temptation to trust a tight σ is the most common
+failure mode — protect against it at the architecture level, not
+just by "being careful".
+
 ## Cross-references
 
 - **Three-source consensus + self-healing**: `docs/future-work.md`
