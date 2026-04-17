@@ -1083,23 +1083,32 @@ class PostFixResidualMonitor:
         Args:
             epoch: AntPosEst epoch counter (int).
             resid: np.ndarray of post-fit residuals (in meters).
-            labels: list of (sv, 'pr' | 'phi') aligned with resid.
+            labels: list of (sv, 'pr'|'phi', elev_deg) aligned with resid.
             nl_fixed: set of SVs currently NL-fixed.
         """
         if resid is None or len(resid) == 0:
             return
-        for (sv, kind), r in zip(labels, resid):
+        # Accept both legacy 2-tuple labels and new 3-tuples (with elev).
+        def _unpack(lab):
+            if len(lab) == 3:
+                return lab[0], lab[1], lab[2]
+            return lab[0], lab[1], None
+        for lab, r in zip(labels, resid):
+            sv, kind, elev = _unpack(lab)
             if kind != 'pr':
                 continue
             if sv not in nl_fixed:
-                # We only track residuals for fixed SVs; unfixed SVs are
-                # still float and legitimately have larger misfit.
                 continue
             dq = self._per_sv.setdefault(sv, self._deque_factory())
             dq.append(abs(float(r)))
+            # Track latest elevation per SV so the L1 unfix log can include it.
+            self._per_sv_last_elev = getattr(self, '_per_sv_last_elev', {})
+            if elev is not None:
+                self._per_sv_last_elev[sv] = float(elev)
         # Overall PR RMS across all fixed SVs (latest epoch only).
-        fixed_resids = [abs(float(r)) for (sv, kind), r in zip(labels, resid)
-                        if kind == 'pr' and sv in nl_fixed]
+        fixed_resids = [abs(float(r))
+                        for lab, r in zip(labels, resid)
+                        if _unpack(lab)[1] == 'pr' and _unpack(lab)[0] in nl_fixed]
         if fixed_resids:
             import math as _math
             rms = _math.sqrt(sum(r*r for r in fixed_resids) / len(fixed_resids))
@@ -1144,9 +1153,11 @@ class PostFixResidualMonitor:
         # Misfit detected.  If we've been at this level long enough without
         # improvement, escalate.  Otherwise take the first action at level 1.
         if self._level == 0:
+            elev = getattr(self, '_per_sv_last_elev', {}).get(worst_sv)
+            elev_str = f", elev={elev:.0f}°" if elev is not None else ""
             return {'level': 1, 'sv': worst_sv,
                     'reason': f"PR resid {worst_sv}={worst_mean:.1f}m "
-                              f"(rms={rms_recent:.1f}m)"}
+                              f"(rms={rms_recent:.1f}m{elev_str})"}
         self._eval_count_since_action += 1
         if self._eval_count_since_action < self._patience:
             return None

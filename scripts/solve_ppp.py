@@ -382,7 +382,7 @@ class PPPFilter:
         H_rows = []
         z_rows = []
         R_diag = []
-        labels = []  # (sv, 'pr' | 'phi') aligned with rows for post-fit residual lookup
+        labels = []  # (sv, 'pr'|'phi', elev_deg) aligned with rows — elev for PFR diagnostics
         n_used = 0
         sys_counts = defaultdict(int)
         receiver_pos = self.x[:3]
@@ -463,7 +463,7 @@ class PPPFilter:
             H_rows.append(h_pr)
             z_rows.append(dz_pr)
             R_diag.append((SIGMA_P_IF / w) ** 2)
-            labels.append((sv, 'pr'))
+            labels.append((sv, 'pr', elev))
 
             # --- IF Carrier phase ---
             if sv in self.sv_to_idx:
@@ -481,7 +481,7 @@ class PPPFilter:
                 H_rows.append(h_phi)
                 z_rows.append(dz_phi)
                 R_diag.append((SIGMA_PHI_IF / w) ** 2)
-                labels.append((sv, 'phi'))
+                labels.append((sv, 'phi', elev))
 
             n_used += 1
             sys_counts[obs['sys']] += 1
