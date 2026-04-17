@@ -8,8 +8,9 @@ listed first.
 
 | Term | Definition |
 |---|---|
-| **DO** | Disciplined Oscillator.  The crystal whose frequency is steered by the servo.  On TimeHat/MadHat this is the i226 TCXO controlled via `adjfine()`.  On Timebeat OTC this is the on-board OCXO controlled via ClockMatrix FCW.  Use "DO" when the statement applies regardless of the actuator. |
-| **PHC** | PTP Hardware Clock.  The Linux kernel's interface to a NIC's hardware clock.  Use "PHC" only when referring to the specific `adjfine()` / `clock_settime()` / `EXTTS` kernel API.  Not all DOs are PHCs (e.g., ClockMatrix DPLL). |
+| **DO** | Disciplined Oscillator.  The crystal whose frequency is steered by the servo.  On TimeHat/MadHat this is the i226 TCXO controlled via `adjfine()`.  On Timebeat OTC this is the on-board OCXO controlled via ClockMatrix FCW.  Use "DO" when the statement applies regardless of the actuator.  Every PHC has a DO at its core, but a DO can exist without any PHC. |
+| **PHC** | PTP Hardware Clock.  The Linux kernel's interface to a NIC's hardware clock (`adjfine()` / `clock_settime()` / `EXTTS`).  Separable from the DO — a PHC always has a DO (some crystal is ticking under it), but not every DO has a PHC.  Use "PHC" only when referring to the kernel interface; use "DO" when talking about the underlying oscillator. |
+| **RO** | Reference Oscillator.  The oscillator driving a TICC's 10 MHz reference input.  Parallels the DO: the RO sets the timescale the TICC uses to report edge timestamps.  We can't steer the RO, but we expect and assert long-term stability by comparing it against GPS time via the F9T PPS train on chB.  See `docs/future-work.md` "Reference Oscillator (RO) characterization". |
 | **rx TCXO** | The TCXO inside the GNSS receiver (F9T).  Drives the receiver's 125 MHz clock and determines where PPS edges fire (quantized to the 8 ns tick grid).  Do NOT use bare "TCXO" — it's ambiguous with the DO's crystal on i226 hosts, which is also a TCXO. |
 | **OCXO** | Oven-Controlled Crystal Oscillator.  Higher stability than TCXO.  The DO on Timebeat OTC boards. |
 | **adjfine** | PHC frequency adjustment.  Sets the clock rate in parts-per-billion via the `PTP_CLOCK_SETFINE` ioctl. |
