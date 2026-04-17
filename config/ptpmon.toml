@@ -1,0 +1,13 @@
+[peppar]
+# ptpmon — E810-based x86 host with F9T on I2C (kernel GNSS char device).
+# RAWX is rate-limited by the I2C bus to ~0.5 Hz.  No TICC on this host.
+# Position-only use for now (--no-do on CLI) — different antenna than the
+# shared-antenna pair; does not agree with TimeHat/MadHat/clkPoC3.
+serial = "/dev/gnss0"
+baud = 9600
+ubx_port = "I2C"
+receiver = "f9t-l5"
+ntrip_conf = "ntrip.conf"
+eph_mount = "BCEP00BKG0"
+ssr_ntrip_conf = "ntrip-cnes.conf"
+systems = "gal"
