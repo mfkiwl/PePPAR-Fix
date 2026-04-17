@@ -61,7 +61,7 @@ IF_WL = {
 SIGMA_P_IF = 3.0
 SIGMA_PHI_IF = 0.03
 
-ELEV_MASK = 15.0  # degrees; raised from 10° on 2026-04-17 after PFR caught E02 at 12° producing 3.6m PR residuals on TimeHat.  Low-elevation SVs combine worst multipath, ionosphere residual, and tropo mapping-function error — cheaper to exclude than to let them poison NL fixes.
+ELEV_MASK = 10.0  # degrees.  Tried 15° on 2026-04-17: with GAL-only the SV count dropped to 6/epoch (from ~8–10 at 10°) and LAMBDA couldn't fix NL at all — all three hosts went into persistent NAV2-reset cycling.  Low-elevation SVs do cause wrong-integer poisoning, but the remedy can't be a harder hard cut on SV-limited runs.  Next try: elevation-dependent measurement weighting (already partially present via `cno_factor * elev_factor` in SIGMA_P_IF weighting) or per-SV exclusion in the NL resolver rather than the observation stream.
 BDS_MIN_PRN = 19  # Exclude BDS-2 GEO/IGSO
 
 # F9T signal name → RINEX observation code mapping
