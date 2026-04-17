@@ -510,28 +510,32 @@ with its own characterization, bootstrap, runtime tracking, and
 clean-shutdown state save.  Parallel to how we already treat the
 **Disciplined Oscillator** (DO).
 
+**The observations, written out**: All TICC timestamps are in RO
+timescale.  With GPS as our truth reference (f_gps ≡ 0 by definition),
+
+```
+chA slope (DO PPS vs GPS in TICC time)  = f_do − f_ro
+chB slope (F9T PPS vs GPS in TICC time) = f_gps − f_ro = −f_ro
+```
+
+The **differential** chA − chB = f_do removes f_ro algebraically, so
+relative TDEV between two clocks on the same TICC only needs the RO
+to be *stable*, not to be at a known frequency.  But for any
+single-channel work — chA-only TDEV of a DO against truth, or chB
+alone to monitor F9T PPS — the RO's actual offset from GPS matters.
+
 **Why it matters**:
 
-- TICC chA−chB is a *differential* measurement — the RO's absolute
-  frequency cancels in the difference, so for TDEV of a single
-  channel against the reference all we need is stability, not a
-  known frequency.
-- But chB alone (F9T PPS against RO) *does* carry the RO's
-  absolute frequency error relative to GPS time.  The F9T PPS is
-  within ±a few ns of GPS over any reasonable window; any long-term
-  trend in chB−nominal is the RO's offset from GPS.
-- Today our TICCs are driven by a Geppetto GPSDO OCXO — RO offset
-  from GPS should be indistinguishable from zero.  Next generation
-  may use inexpensive OCXOs with meaningful nominal offset,
-  temperature drift, ageing, and ASD/PSD noise.  Those are all
-  slow-moving; tracking them lets us:
+- Today our TICCs are driven by a Geppetto GPSDO OCXO, so f_ro ≈ 0
+  within any reasonable window.  Next generation may use inexpensive
+  OCXOs with meaningful nominal offset, temperature drift, ageing,
+  and ASD/PSD noise.  All slow-moving; tracking them lets us:
   1. Hand every consumer of TICC timestamps a *calibrated*
-     measurement (chA − known_RO_ppb*τ gives true DO phase, not
+     measurement (`chA − known_RO_ppb·τ` gives true DO phase, not
      DO phase contaminated by RO drift).
-  2. **Detect F9T spoofing**: a large, unexplained offset between
-     chB and our known-stable RO frequency is a signal the F9T PPS
-     is being manipulated — the RO is the trusted anchor, the
-     F9T is what's being tested.
+  2. **Detect F9T spoofing**: an unexplained offset between chB
+     and our known-stable RO frequency flags F9T PPS manipulation —
+     the RO is the trusted anchor, the F9T is what's being tested.
   3. Sanity-check RO replacement or ageing: a TICC that's always
      been driven by a 30 ppb OCXO with 1 ppb/year drift that
      suddenly reads 50 ppb offset needs investigation.
@@ -567,24 +571,58 @@ receiver's `tcxo` block:
 3. **Clean shutdown**: save the latest estimate and sample count.
 
 **Shared code with DO**: the only fundamental difference is that
-the DO is steerable and the RO is observable-only.  The filter
-math, bootstrap sanity check, state save/load, glossary conventions
-(last_known_freq_offset_ppb, updated timestamps) should all be the
-same.  Target: a common base class for "frequency source tracked
-against GPS", with DO and RO as steerable/read-only specializations.
+the DO is steerable and the RO is observable-only.  Filter math,
+bootstrap sanity check, state save/load, conventions
+(`last_known_freq_offset_ppb`, `updated`) are identical.  Concretely,
+both `DOFreqEst` and any future `RxTcxoEst` should accept an
+optional `ro_freq_ppb` parameter (or read it from the timestamper
+state file); every TICC-timed measurement has that known offset
+subtracted before the innovation step.  That's the useful code
+sharing, and it neatly enforces the "don't silently conflate
+oscillators" invariant.
 
-**Does this help DOFreqEst reject a wrong-ridge lock?**  Yes —
-modestly.  DOFreqEst can settle on a biased dt_rx state that's
-self-consistent with its inputs.  One of those inputs is the TICC
-chA−chB differential, which until now has been treated as
-intrinsically trustworthy because the RO cancels out.  But if we
-*also* know the RO's independently-measured frequency from chB
-vs F9T, we can consistency-check the filter: the DOFreqEst's
-implied DO frequency should equal (chA−chB slope) + RO offset,
-and if it doesn't, the filter has locked onto the wrong ridge.
-This is an instance of the "filter σ ≠ correctness" invariant in
-`docs/architecture-vision.md` — adding an independent measurement
-for an otherwise unchecked state.
+**Does this help DOFreqEst reject a wrong-ridge lock?**  Yes,
+*structurally* — this is more than a cross-check.
+
+A ridge exists in DOFreqEst because every TICC chA observation is
+of the form `f_do − f_ro`; filter states `f_do` and `f_ro` are
+only constrained jointly.  Priors on f_ro keep the covariance
+non-singular, but the gradient of information perpendicular to the
+ridge is zero.  Small biases (or numerical drift) slide the state
+along the ridge to a self-consistent but wrong point, and the
+filter reports tight σ because any point on the ridge *is*
+self-consistent.  This is exactly analogous to the ISB/clock
+degeneracy that hit the position-side PPPFilter 2026-04-16, fixed
+by pinning the ISB when its reference system is absent (see
+`PPPFilter.initialize(systems=…)` in `scripts/solve_ppp.py`).
+
+Two ways to use the known RO in the DO filter, with different
+strengths:
+
+1. **Pin (breaks the ridge structurally)**.  Inject a pseudo-
+   measurement `f_ro = stored_value ± σ_ro` with small σ — or,
+   equivalently, treat `f_ro` as a known parameter rather than a
+   state, shrinking the filter by one dimension.  The degenerate
+   ridge collapses and `f_do` becomes observable on its own.
+   This is the primary value of RO knowledge.
+2. **Cross-check (doesn't change filter math)**.  After the filter
+   reports its state, verify that `filter's implied f_do`
+   ≈ `(chA − chB slope) + stored f_ro`.  Disagreement flags a
+   biased fit even when the ridge has been pinned.  This implements
+   the "filter σ ≠ correctness" invariant in
+   `docs/architecture-vision.md`.
+
+**Does this help a future rx_tcxo filter reject wrong-ridge locks?**
+*Less directly.*  The primary input to rx_tcxo estimation is PPP's
+`dt_rx`, which is GPS-referenced and doesn't involve the RO at all
+— no RO-shaped ridge to break.  But if the rx_tcxo filter also
+consumes chB slope (as a short-tau frequency cross-check), that
+measurement is `(f_rxtcxo_after_F9T_discipline − f_ro)`.  Without
+knowing f_ro, we'd silently conflate RO and rx_tcxo drift.  With
+f_ro known, chB gives an independent, clean estimate of f_rxtcxo
+— a legitimate cross-check rather than a contaminated one.  Same
+decontamination applies to using chB as a sanity check on F9T
+spoofing, or on rx_tcxo temperature sensitivity.
 
 **Implementation order**:
 
