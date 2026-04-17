@@ -128,9 +128,17 @@ class NarrowLaneResolver:
     """
 
     def __init__(self, frac_threshold=0.10, sigma_threshold=0.12,
-                 blacklist_epochs=60):
+                 corner_margin_sum=1.6, blacklist_epochs=60):
         self.frac_threshold = frac_threshold    # |N1_frac| < this to fix
         self.sigma_threshold = sigma_threshold  # sigma_N1 < this to fix
+        # Corner-margin gate on the rounding path: reject when
+        # (frac/frac_cap) + (sigma/sigma_cap) ≥ corner_margin_sum.
+        # 2.0 = top-right corner of the rectangle (= fully marginal).
+        # Default 1.6 excludes the top-right ~20 % of the accept region
+        # without tightening either threshold.  See E26 2026-04-17:
+        # frac=0.100, sigma=0.114 → 1.95 (accepted under old logic,
+        # rejected under margin).
+        self.corner_margin_sum = corner_margin_sum
         self._fixed = {}  # sv -> {'n1': int, 'a_if_fixed': float}
         self.last_ratio = 0.0   # LAMBDA ratio test value (0 = not attempted)
         self.last_method = ""   # "lambda" or "rounding"
@@ -241,7 +249,22 @@ class NarrowLaneResolver:
             n1_frac = abs(n1_float - round(n1_float))
             sigma_n1 = sigma_a / lambda_nl
 
-            if n1_frac < self.frac_threshold and sigma_n1 < self.sigma_threshold:
+            # Basic rectangle gate: both metrics must be under their caps.
+            in_rect = (n1_frac < self.frac_threshold
+                       and sigma_n1 < self.sigma_threshold)
+            # Corner-margin gate: reject cases that sit near the top-right
+            # of the accept rectangle, where BOTH frac and sigma are
+            # simultaneously marginal (the classic "barely-everywhere"
+            # premature fix).  The sum-of-normalized-ratios must have
+            # some headroom from 2.0 (the corner).  1.6 excludes the
+            # top-right ~20% of the rectangle.  Example: frac=0.10,
+            # sigma=0.114 → 1.0 + 0.95 = 1.95 > 1.6 → reject.
+            corner_ok = (
+                (n1_frac / max(self.frac_threshold, 1e-9))
+                + (sigma_n1 / max(self.sigma_threshold, 1e-9))
+                < self.corner_margin_sum
+            )
+            if in_rect and corner_ok:
                 n1_int = round(n1_float)
                 a_if_fixed = lambda_nl * n1_int + alpha2 * lambda_wl * n_wl
                 self._apply_fix(filt, si, a_if_fixed)
