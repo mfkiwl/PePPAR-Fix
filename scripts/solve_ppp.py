@@ -61,7 +61,7 @@ IF_WL = {
 SIGMA_P_IF = 3.0
 SIGMA_PHI_IF = 0.03
 
-ELEV_MASK = 10.0
+ELEV_MASK = 15.0  # degrees; raised from 10° on 2026-04-17 after PFR caught E02 at 12° producing 3.6m PR residuals on TimeHat.  Low-elevation SVs combine worst multipath, ionosphere residual, and tropo mapping-function error — cheaper to exclude than to let them poison NL fixes.
 BDS_MIN_PRN = 19  # Exclude BDS-2 GEO/IGSO
 
 # F9T signal name → RINEX observation code mapping
