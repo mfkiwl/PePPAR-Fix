@@ -64,12 +64,23 @@ SIGMA_PHI_IF = 0.03
 ELEV_MASK = 10.0
 BDS_MIN_PRN = 19  # Exclude BDS-2 GEO/IGSO
 
-# F9T signal name → RINEX observation code mapping
+# F9T signal name → RINEX observation code mapping.
+# Used for looking up SSR code and phase biases in the correction stream.
+# NOTE on GPS-L5Q: F9T tracks L5 in the Q (pilot) component and reports
+# sigId=7 → GPS-L5Q, but CNES publishes GPS L5 phase biases only under
+# L5I (sig_id=14 / RTCM L5I).  L5I and L5Q share the same carrier, so
+# the phase bias is the same to within the satellite-side I-vs-Q group
+# delay (sub-cm).  Map to ('C5I', 'L5I') so the lookup finds the bias;
+# without this the entire GPS L5 phase-bias correction is silently
+# dropped and NL integer fixes are off by a ~meter bias that the
+# filter absorbs into position, producing wrong-integer drift
+# (see 2026-04-16 PFR investigation).
 SIG_TO_RINEX = {
     'GPS-L1CA': ('C1C', 'L1C'),   # Code, Phase
     'GPS-L2CL': ('C2L', 'L2L'),
     'GPS-L2CM': ('C2S', 'L2S'),
-    'GPS-L5Q':  ('C5Q', 'L5Q'),
+    'GPS-L5Q':  ('C5I', 'L5I'),   # CNES only publishes L5I biases for GPS
+    'GPS-L5I':  ('C5I', 'L5I'),   # if F9T ever reports L5I directly, same lookup
     'GAL-E1C':  ('C1C', 'L1C'),
     'GAL-E5bQ': ('C7Q', 'L7Q'),
     'GAL-E5aQ': ('C5Q', 'L5Q'),
