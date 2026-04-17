@@ -186,6 +186,43 @@ def _zigzag(s):
     return sign * ((s + 1) // 2)
 
 
+# Fixed-failure-rate ratio-test critical values at P_fail = 0.001.
+# Source: Wang & Feng 2013/2016 tabulated values (also in Verhagen &
+# Teunissen 2013).  The critical value for accepting the best LAMBDA
+# candidate depends on n_amb (number of ambiguities in the solution)
+# — a single fixed threshold (e.g., 2.0 or 3.0) is known to be
+# systematically too loose for small n_amb (weak models) and too
+# tight for large n_amb.  FFRT normalizes acceptance to the target
+# failure rate regardless of problem size.
+_FFRT_P001 = [
+    (1, 15.77), (2, 7.89), (3, 5.37), (4, 4.14), (5, 3.41),
+    (6, 2.94),  (7, 2.59), (8, 2.34), (9, 2.14), (10, 1.98),
+    (12, 1.74), (15, 1.51), (20, 1.31), (30, 1.14), (50, 1.04),
+]
+
+
+def ffrt_critical_ratio(n_amb, p_fail=0.001):
+    """FFRT critical ratio at the given failure-rate target.
+
+    Currently only P_fail=0.001 is tabulated.  Linear interpolation in
+    (n, ratio).  For n outside the table, extrapolates to the nearest
+    endpoint.
+    """
+    if p_fail != 0.001:
+        raise NotImplementedError("only p_fail=0.001 tabulated so far")
+    if n_amb <= _FFRT_P001[0][0]:
+        return _FFRT_P001[0][1]
+    if n_amb >= _FFRT_P001[-1][0]:
+        return _FFRT_P001[-1][1]
+    for i in range(len(_FFRT_P001) - 1):
+        n0, r0 = _FFRT_P001[i]
+        n1, r1 = _FFRT_P001[i + 1]
+        if n0 <= n_amb <= n1:
+            t = (n_amb - n0) / (n1 - n0)
+            return r0 + t * (r1 - r0)
+    return _FFRT_P001[-1][1]
+
+
 def bootstrap_success_rate(D):
     """Bootstrap success rate (Teunissen 1999).
 
@@ -213,18 +250,23 @@ def bootstrap_success_rate(D):
     return p
 
 
-def lambda_resolve(a_float, Qa, ratio_threshold=2.0, min_fixed=4,
-                   min_success_rate=0.999):
+def lambda_resolve(a_float, Qa, ratio_threshold=None, min_fixed=4,
+                   min_success_rate=0.999, p_fail=0.001):
     """Full LAMBDA AR with partial AR fallback.
 
     Args:
         a_float: (n,) float ambiguity vector
         Qa: (n, n) ambiguity covariance matrix
-        ratio_threshold: accept if Omega(2nd)/Omega(1st) > this
+        ratio_threshold: accept if Omega(2nd)/Omega(1st) > this.  If None
+            (default), use the FFRT critical value sized for the current
+            n_amb at target failure rate p_fail.  A fixed threshold can
+            still be passed (e.g. for testing or to match legacy behavior).
         min_fixed: minimum ambiguities for partial AR
         min_success_rate: minimum bootstrap success rate to accept
             (Teunissen 1999).  Prevents premature fixing when the
             float covariance is too large for reliable integers.
+        p_fail: target failure rate for FFRT (only used if ratio_threshold
+            is None).  Default 0.001 — community standard.
 
     Returns:
         (fixed_vector, n_fixed, ratio, fixed_mask)
@@ -268,7 +310,13 @@ def lambda_resolve(a_float, Qa, ratio_threshold=2.0, min_fixed=4,
 
         ratio = candidates[1][1] / max(candidates[0][1], 1e-30)
 
-        if ratio > ratio_threshold:
+        # FFRT: if no fixed threshold was passed, compute one sized
+        # for the current n_amb at the target failure rate.
+        effective_threshold = (ratio_threshold
+                               if ratio_threshold is not None
+                               else ffrt_critical_ratio(len(indices), p_fail))
+
+        if ratio > effective_threshold:
             # Accept — back-transform to original space
             z_fixed = candidates[0][0]
             # Z^{-T} * z_fixed = original-space integers

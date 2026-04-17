@@ -1397,6 +1397,11 @@ class AntPosEstThread(threading.Thread):
             prov_str = (" {" + "; ".join(provenance) + "}") if provenance else ""
             log.warning("PFR L1: unfixing %s (%s)%s", sv, reason, prov_str)
             nl.unfix(sv)
+            # Anti-lock-in: prevent this SV from being re-proposed for NL
+            # fixing for the next N epochs.  Without this, the resolver
+            # immediately re-fixes to the same wrong integer because the
+            # underlying float state hasn't changed enough to flip it.
+            nl.blacklist(sv)
             filt.inflate_ambiguity(sv)
             mw.reset(sv)
         elif level == 2:
@@ -1537,6 +1542,7 @@ class AntPosEstThread(threading.Thread):
                     mw.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
 
             # NL resolution attempt (after warmup)
+            nl.tick()  # advance blacklist expiry
             if self._n_epochs >= 5:
                 nl.attempt(filt, mw)
 

@@ -127,13 +127,44 @@ class NarrowLaneResolver:
     Fixes the PPPFilter ambiguity state when N1 is close to integer.
     """
 
-    def __init__(self, frac_threshold=0.10, sigma_threshold=0.12):
+    def __init__(self, frac_threshold=0.10, sigma_threshold=0.12,
+                 blacklist_epochs=60):
         self.frac_threshold = frac_threshold    # |N1_frac| < this to fix
         self.sigma_threshold = sigma_threshold  # sigma_N1 < this to fix
         self._fixed = {}  # sv -> {'n1': int, 'a_if_fixed': float}
         self.last_ratio = 0.0   # LAMBDA ratio test value (0 = not attempted)
         self.last_method = ""   # "lambda" or "rounding"
         self.last_success_rate = 0.0  # bootstrap success rate (0 = not computed)
+        # Anti-lock-in: after PFR (or any external agent) unfixes an SV,
+        # skip it from candidates for this many epochs so the next NL
+        # attempt doesn't immediately propose the same wrong integer.
+        # Classic "fix-and-hold lock-in" mitigation — see rtklibexplorer
+        # 2016/2021 posts and Laurichesse 2025 PPP-AR residual-monitoring
+        # paper.
+        self._blacklist_epochs = int(blacklist_epochs)
+        self._blacklist = {}  # sv -> epoch_until
+        self._epoch = 0
+
+    def tick(self):
+        """Advance the resolver's epoch counter — call once per observation epoch.
+
+        Used to drive blacklist expiry; no effect on the float filter state.
+        """
+        self._epoch += 1
+
+    def blacklist(self, sv, epochs=None):
+        """Mark an SV as temporarily ineligible for NL fixing."""
+        n = self._blacklist_epochs if epochs is None else int(epochs)
+        self._blacklist[sv] = self._epoch + n
+
+    def is_blacklisted(self, sv):
+        until = self._blacklist.get(sv)
+        if until is None:
+            return False
+        if self._epoch >= until:
+            del self._blacklist[sv]
+            return False
+        return True
 
     def attempt(self, filt, mw_tracker):
         """Try to fix ambiguities in the PPPFilter.
@@ -159,10 +190,12 @@ class NarrowLaneResolver:
             if si < len(filt.x):
                 self._apply_fix(filt, si, fix_info['a_if_fixed'])
 
-        # Collect WL-fixed, not-yet-NL-fixed candidates with their params
+        # Collect WL-fixed, not-yet-NL-fixed, not-blacklisted candidates
         cands = []  # list of (sv, amb_idx, si, f1, f2, n_wl, lambda_wl, lambda_nl, alpha2)
         for sv, amb_idx in list(filt.sv_to_idx.items()):
             if sv in self._fixed:
+                continue
+            if self.is_blacklisted(sv):
                 continue
             n_wl = mw_tracker.get_wl(sv)
             if n_wl is None:
@@ -278,8 +311,13 @@ class NarrowLaneResolver:
         _, _, D_diag = lambda_decorrelate(Qa_reg)
         self.last_success_rate = bootstrap_success_rate(D_diag)
 
+        # ratio_threshold=None → FFRT-adaptive critical value at P_fail=0.001
+        # (Wang & Feng 2013/2016).  The old fixed 2.0 was systematically
+        # too loose for small n_amb, which is the regime we're in on
+        # GAL-only: ratio=2.0 at n_amb=5 corresponds to ~5% failure rate,
+        # not the intended 0.1%.
         fixed_vec, n_fixed, ratio, mask = lambda_resolve(
-            n1_vec, Qa_nl, ratio_threshold=2.0, min_fixed=4,
+            n1_vec, Qa_nl, ratio_threshold=None, min_fixed=4,
             min_success_rate=0.999)
 
         if fixed_vec is None:
