@@ -741,11 +741,17 @@ def ls_init(observations, sp3, t, clk_file=None):
     Includes residual-based outlier rejection to handle satellites
     with inaccurate broadcast clocks (e.g. Galileo E11/E19)."""
     present = set(o['sys'] for o in observations)
+    # x[3] is the reference-system clock.  Inter-system biases (ISBs)
+    # are offsets from that reference.  When GPS is present it's the
+    # reference; when GPS is absent the next-present system becomes
+    # the reference (no ISB for it).  Otherwise the ISB column and the
+    # clock column become degenerate and ls_init silently fails.
     n_params = 4
     gal_col = bds_col = None
-    if 'gal' in present:
+    has_gps = 'gps' in present
+    if 'gal' in present and has_gps:
         gal_col = n_params; n_params += 1
-    if 'bds' in present:
+    if 'bds' in present and (has_gps or 'gal' in present):
         bds_col = n_params; n_params += 1
 
     x = np.zeros(n_params)
