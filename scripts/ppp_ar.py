@@ -84,6 +84,11 @@ class MelbourneWubbenaTracker:
             if frac < self.fix_threshold:
                 s['n_wl'] = round(n_wl_float)
                 s['fixed'] = True
+                # Retain fix-time quality for later diagnostics (PFR unfix
+                # wants to know whether this WL was fixed at a marginal
+                # frac / short epoch count — evidence of premature fix).
+                s['fix_frac'] = float(frac)
+                s['fix_n_epochs'] = int(s['n_epochs'])
                 log.info("WL fixed: %s N_WL=%d (frac=%.3f, %d epochs)",
                          sv, s['n_wl'], frac, s['n_epochs'])
 
@@ -207,7 +212,16 @@ class NarrowLaneResolver:
                 n1_int = round(n1_float)
                 a_if_fixed = lambda_nl * n1_int + alpha2 * lambda_wl * n_wl
                 self._apply_fix(filt, si, a_if_fixed)
-                self._fixed[sv] = {'n1': n1_int, 'a_if_fixed': a_if_fixed}
+                # Store fix-time NL quality alongside the integer so later
+                # diagnostics can correlate PFR unfix events with how
+                # marginal the original NL fix was.
+                self._fixed[sv] = {
+                    'n1': n1_int,
+                    'a_if_fixed': a_if_fixed,
+                    'fix_n1_frac': float(n1_frac),
+                    'fix_sigma_n1': float(sigma_n1),
+                    'fix_method': 'rounding',
+                }
                 newly_fixed[sv] = n1_int
                 log.info("NL fixed (rounding): %s N1=%d (frac=%.3f, "
                          "sigma_N1=%.3f, A_IF: %.4f → %.4f m)",
@@ -312,9 +326,16 @@ class NarrowLaneResolver:
             filt.P = saved_P
             return {}
 
-        # Commit the fixes
+        # Commit the fixes (store fix-time quality for PFR diagnostics)
         for sv, (n1_int, a_if_fixed, si) in newly_fixed.items():
-            self._fixed[sv] = {'n1': n1_int, 'a_if_fixed': a_if_fixed}
+            self._fixed[sv] = {
+                'n1': n1_int,
+                'a_if_fixed': a_if_fixed,
+                'fix_ratio': float(ratio),
+                'fix_success_rate': float(self.last_success_rate),
+                'fix_displacement_m': float(displacement_m),
+                'fix_method': 'lambda',
+            }
             log.info("NL fixed (LAMBDA): %s N1=%d (ratio=%.1f, P=%.4f, "
                      "Δpos=%.1fm, %d/%d fixed, A_IF: %.4f → %.4f m)",
                      sv, n1_int, ratio, self.last_success_rate,

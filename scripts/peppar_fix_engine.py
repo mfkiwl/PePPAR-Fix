@@ -1376,7 +1376,26 @@ class AntPosEstThread(threading.Thread):
             sv = action.get('sv')
             if sv is None:
                 return
-            log.warning("PFR L1: unfixing %s (%s)", sv, reason)
+            # Retrospective: what were the WL and NL fix-time quality for
+            # this SV?  A marginal WL (frac near 0.5, low n_epochs) or a
+            # low LAMBDA ratio would suggest this SV was fixed prematurely
+            # rather than being "bad" in some intrinsic sense.
+            nl_info = nl._fixed.get(sv, {})
+            mw_info = mw._state.get(sv, {})
+            provenance = []
+            if 'fix_ratio' in nl_info:
+                provenance.append(f"NL LAMBDA ratio={nl_info['fix_ratio']:.1f} "
+                                  f"P={nl_info.get('fix_success_rate', 0):.3f}")
+            elif 'fix_n1_frac' in nl_info:
+                provenance.append(
+                    f"NL rounding frac={nl_info['fix_n1_frac']:.3f} "
+                    f"σ={nl_info.get('fix_sigma_n1', 0):.3f}")
+            if 'fix_frac' in mw_info:
+                provenance.append(
+                    f"WL frac={mw_info['fix_frac']:.3f} "
+                    f"n={mw_info.get('fix_n_epochs', 0)}")
+            prov_str = (" {" + "; ".join(provenance) + "}") if provenance else ""
+            log.warning("PFR L1: unfixing %s (%s)%s", sv, reason, prov_str)
             nl.unfix(sv)
             filt.inflate_ambiguity(sv)
             mw.reset(sv)
