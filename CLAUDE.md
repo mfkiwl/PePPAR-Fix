@@ -36,6 +36,37 @@ Beating PPS or PPS+qErr alone is not the goal — those are limited by
 the F9T's measurement resolution, not by what either oscillator can
 actually deliver.
 
+### Cross-host PPS OUT agreement
+
+An equal-weight goal: **any pair of PePPAR Fix clocks must produce
+PPS OUT edges that agree in frequency and phase, ideally sub-ns.**
+Measured by connecting the two PPS OUT signals to two channels of a
+shared-reference TICC (chA and chB on the same unit), so the
+differential TDEV is unaffected by that TICC's own reference noise.
+
+Two stages:
+
+1. **Shared antenna first** — two clocks driven by the same RF via a
+   splitter.  Eliminates atmospheric, multipath, and orbit/clock
+   correction variability as sources of disagreement.  What remains
+   is the discipline loop's own contribution to phase noise plus any
+   per-receiver biases or per-filter integer-resolution errors.  This
+   is the cleanest test bed for servo design and for catching
+   ambiguity-resolution bugs.
+
+2. **Separate antennas next** — the real-world goal.  Two clocks at
+   independent sites driving independent antennas must agree in
+   phase/frequency after both converge, limited only by per-site
+   atmospheric and multipath differentials.
+
+Cross-host PPS agreement is downstream of cross-host *position*
+agreement: until two PePPAR Fix receivers converge to the same ARP,
+their clock solutions will absorb the position disagreement and
+their PPS edges can't agree either.  So before chasing sub-ns PPS
+alignment, the position solutions must agree to sub-cm on a shared
+antenna (and to within multipath/atmospheric limits on separate
+antennas).
+
 We are searching for:
 
 - The best **servo input** — PPS, PPS+qErr, PPP carrier phase, PPP-AR
