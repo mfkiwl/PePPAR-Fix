@@ -351,6 +351,21 @@ class NarrowLaneResolver:
         """Remove a fix (e.g. after cycle slip detected)."""
         self._fixed.pop(sv, None)
 
+    def unfix_all(self, filt, inflate_sigma_m=100.0):
+        """Unfix every NL-fixed ambiguity and inflate its covariance.
+
+        Used by the post-fix residual monitor for Level 2 recovery —
+        preserves PPPFilter position, clock, ISB, ZTD, and MW tracker
+        history.  The float ambiguity estimate is retained (the state
+        value), but its covariance is inflated so subsequent phase
+        observations can pull it to the correct integer.
+        """
+        svs = list(self._fixed.keys())
+        for sv in svs:
+            filt.inflate_ambiguity(sv, sigma_m=inflate_sigma_m)
+        self._fixed.clear()
+        return svs
+
     def integrality(self, filt, mw_tracker):
         """Compute corrected integrality metric for all satellites.
 

@@ -291,6 +291,23 @@ class PPPFilter:
             if self.sv_to_idx[s] > removed_idx:
                 self.sv_to_idx[s] -= 1
 
+    def inflate_ambiguity(self, sv, sigma_m=100.0):
+        """Inflate an ambiguity's covariance without removing the state.
+
+        Used by the post-fix residual monitor to "soft-unfix" — undoes
+        the tight constraint that NL fix applied, so the filter can
+        re-converge to the correct integer, while preserving sv_to_idx
+        order and the rest of the state.
+        """
+        if sv not in self.sv_to_idx:
+            return
+        si = N_BASE + self.sv_to_idx[sv]
+        if si >= self.P.shape[0]:
+            return
+        self.P[si, :] = 0.0
+        self.P[:, si] = 0.0
+        self.P[si, si] = sigma_m ** 2
+
     def detect_cycle_slips(self, current_obs, prev_obs):
         slipped = set()
         for o in current_obs:
@@ -330,6 +347,7 @@ class PPPFilter:
         H_rows = []
         z_rows = []
         R_diag = []
+        labels = []  # (sv, 'pr' | 'phi') aligned with rows for post-fit residual lookup
         n_used = 0
         sys_counts = defaultdict(int)
         receiver_pos = self.x[:3]
@@ -410,6 +428,7 @@ class PPPFilter:
             H_rows.append(h_pr)
             z_rows.append(dz_pr)
             R_diag.append((SIGMA_P_IF / w) ** 2)
+            labels.append((sv, 'pr'))
 
             # --- IF Carrier phase ---
             if sv in self.sv_to_idx:
@@ -427,6 +446,7 @@ class PPPFilter:
                 H_rows.append(h_phi)
                 z_rows.append(dz_phi)
                 R_diag.append((SIGMA_PHI_IF / w) ** 2)
+                labels.append((sv, 'phi'))
 
             n_used += 1
             sys_counts[obs['sys']] += 1
@@ -453,6 +473,10 @@ class PPPFilter:
         self.P = 0.5 * (self.P + self.P.T)
 
         post_resid = z - H @ (K @ z)
+        # Store per-measurement (sv, type) labels aligned with post_resid so
+        # callers can map residuals back to their satellites — used by the
+        # post-fix residual monitor to detect wrong integer fixes.
+        self.last_residual_labels = labels
         return n_used, post_resid, dict(sys_counts)
 
 
