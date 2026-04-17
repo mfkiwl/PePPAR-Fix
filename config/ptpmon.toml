@@ -3,10 +3,16 @@
 # RAWX is rate-limited by the I2C bus to ~0.5 Hz.  No TICC on this host.
 # Position-only use for now (--no-do on CLI) — different antenna than the
 # shared-antenna pair; does not agree with TimeHat/MadHat/clkPoC3.
+#
+# Receiver is first-gen ZED-F9T (fw TIM 2.20) with the L1/L2C band-2
+# plan.  Not the -20B variant — its band-2 correlator is L2C-only, so
+# every L5 signal enable NAKs at the hardware level.  Use the L2
+# profile; PPP-AR falls back to CNES code-based biases which are less
+# precise than the L5Q phase biases we use on the other hosts.
 serial = "/dev/gnss0"
 baud = 9600
 ubx_port = "I2C"
-receiver = "f9t-l5"
+receiver = "f9t"
 ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
 ssr_ntrip_conf = "ntrip-cnes.conf"
