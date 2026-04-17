@@ -875,7 +875,9 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
                 init_clk = x_ls[3]
                 log.info(f"LS init: {n_sv} SVs, pos error ~km-level")
 
-            filt.initialize(init_pos, init_clk)
+            systems_set = (set(args.systems.split(',')) if args.systems
+                           else None)
+            filt.initialize(init_pos, init_clk, systems=systems_set)
             filt_initialized = True
             prev_t = gps_time
             log.info("PPPFilter initialized, starting convergence")
@@ -1200,7 +1202,7 @@ class AntPosEstThread(threading.Thread):
                  bootstrap_result=None, position_callback=None,
                  resolved_decimation=10, resolve_threshold=4,
                  nav2_store=None, nav2_tension_threshold=5.0,
-                 nav2_alarm_count=3):
+                 nav2_alarm_count=3, systems=None):
         super().__init__(daemon=True, name="AntPosEst")
         self.obs_queue = queue.Queue(maxsize=50)
         self._corrections = corrections
@@ -1212,6 +1214,7 @@ class AntPosEstThread(threading.Thread):
         self._nav2_store = nav2_store
         self._nav2_tension_threshold = nav2_tension_threshold
         self._nav2_alarm_count = nav2_alarm_count  # consecutive checks before reset
+        self._systems = systems  # {'gps','gal','bds'} subset — for ISB pinning
 
         # Initialize from bootstrap result or create fresh filter
         if bootstrap_result is not None and bootstrap_result.ppp_filter is not None:
@@ -1222,7 +1225,7 @@ class AntPosEstThread(threading.Thread):
                      "(amb=%d, %s)", len(self._filt.sv_to_idx), self._mw.summary())
         else:
             self._filt = PPPFilter()
-            self._filt.initialize(known_ecef, 0.0)
+            self._filt.initialize(known_ecef, 0.0, systems=self._systems)
             self._mw = MelbourneWubbenaTracker()
             self._nl = NarrowLaneResolver()
             log.info("AntPosEstThread: fresh PPPFilter at known position (warm start)")
@@ -1322,7 +1325,7 @@ class AntPosEstThread(threading.Thread):
                 for sv in list(nl._fixed.keys()):
                     nl.unfix(sv)
                 # Reset PPPFilter to NAV2 position
-                filt.initialize(nav2_ecef, 0.0)
+                filt.initialize(nav2_ecef, 0.0, systems=self._systems)
                 self._prev_t = None
                 self._best_sigma = 999.0
                 self._nav2_tension_streak = 0
@@ -1388,7 +1391,7 @@ class AntPosEstThread(threading.Thread):
                 nl.unfix(sv)
             for sv in list(mw._state.keys()):
                 mw.reset(sv)
-            filt.initialize(pos_ecef, 0.0)
+            filt.initialize(pos_ecef, 0.0, systems=self._systems)
             self._prev_t = None
             self._best_sigma = 999.0
             if self._ape_sm.state == AntPosEstState.RESOLVED:
@@ -4793,6 +4796,7 @@ def run(args):
             bootstrap_result=bootstrap_result,
             position_callback=_position_improved,
             nav2_store=nav2_store,
+            systems=set(args.systems.split(',')) if args.systems else None,
         )
         ape_thread.start()
 

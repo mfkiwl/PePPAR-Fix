@@ -227,7 +227,20 @@ class PPPFilter:
         self.prev_obs = {}
         self.initialized = False
 
-    def initialize(self, pos_ecef, clock_m, isb_gal=0.0, isb_bds=0.0):
+    def initialize(self, pos_ecef, clock_m, isb_gal=0.0, isb_bds=0.0,
+                   systems=None):
+        """Initialize filter state.
+
+        systems: optional iterable of constellations that will feed
+        observations ('gps', 'gal', 'bds').  Used to pin inter-system
+        biases that would otherwise be rank-1 degenerate with IDX_CLK.
+        If GPS is absent, GAL ISB is pinned to zero (IDX_CLK absorbs the
+        GAL clock).  If both GPS and GAL are absent (BDS-only), BDS ISB
+        is also pinned.  Without this, GAL-only or BDS-only runs can
+        settle anywhere along the rank-1 ridge (filter reports tight σ
+        on positions tens to hundreds of metres off the truth — see
+        2026-04-17 overnight investigation).
+        """
         self.x = np.zeros(N_BASE)
         self.x[:3] = pos_ecef
         self.x[IDX_CLK] = clock_m
@@ -241,6 +254,23 @@ class PPPFilter:
             1e6,
             0.5**2,  # ZTD residual: 0.5m initial sigma
         ])
+        # Pin ISBs whose reference system isn't present.  Priority order:
+        # GPS > GAL > BDS — the highest-priority present system is the
+        # reference and its x[IDX_CLK] absorbs the clock.
+        self._pinned_isbs = set()
+        if systems is not None:
+            sys_set = set(systems)
+            has_gps = 'gps' in sys_set
+            if not has_gps and 'gal' in sys_set:
+                # GAL is the reference — pin its ISB to 0
+                self._pinned_isbs.add(IDX_ISB_GAL)
+                self.x[IDX_ISB_GAL] = 0.0
+                self.P[IDX_ISB_GAL, IDX_ISB_GAL] = 1e-6
+            if not has_gps and 'gal' not in sys_set and 'bds' in sys_set:
+                # BDS is the reference — pin its ISB to 0
+                self._pinned_isbs.add(IDX_ISB_BDS)
+                self.x[IDX_ISB_BDS] = 0.0
+                self.P[IDX_ISB_BDS, IDX_ISB_BDS] = 1e-6
         self.sv_to_idx = {}
         self.prev_obs = {}
         self.initialized = True
@@ -264,8 +294,13 @@ class PPPFilter:
         for i in range(3):
             Q[i, i] = q_pos * dt
         Q[IDX_CLK, IDX_CLK] = 1e6 * dt
-        Q[IDX_ISB_GAL, IDX_ISB_GAL] = 1.0 * dt
-        Q[IDX_ISB_BDS, IDX_ISB_BDS] = 1.0 * dt
+        # Pinned ISBs (single-constellation runs) get no process noise so
+        # they stay fixed at zero; IDX_CLK absorbs the reference system clock.
+        pinned = getattr(self, '_pinned_isbs', set())
+        if IDX_ISB_GAL not in pinned:
+            Q[IDX_ISB_GAL, IDX_ISB_GAL] = 1.0 * dt
+        if IDX_ISB_BDS not in pinned:
+            Q[IDX_ISB_BDS, IDX_ISB_BDS] = 1.0 * dt
         Q[IDX_ZTD, IDX_ZTD] = (5e-5)**2 * dt  # ~5 cm/hour RMS (IGS standard)
         self.P = self.P + Q
 

@@ -218,7 +218,9 @@ def run_find_position(args):
                              f"BDS={init_isb_bds/C*1e9:+.1f}ns")
 
                 filt.initialize(init_pos, init_clk,
-                                isb_gal=init_isb_gal, isb_bds=init_isb_bds)
+                                isb_gal=init_isb_gal, isb_bds=init_isb_bds,
+                                systems=(set(args.systems.split(','))
+                                         if args.systems else None))
                 filt_initialized = True
                 prev_t = gps_time
                 log.info("PPPFilter initialized, starting convergence")
