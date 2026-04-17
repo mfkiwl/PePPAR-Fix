@@ -570,6 +570,39 @@ def send_cfg(ser, ubr, key_values, description="", layers=7):
     return ack
 
 
+def send_cfg_per_key(ser, ubr, key_values, description="", layers=7):
+    """Send each key individually, wait for ACK between.
+
+    Prefer this over send_cfg(dict) when we care about which specific
+    key(s) NAK — a bundled VALSET ACKs/NAKs atomically, so a NAK loses
+    the identity of the failing key.  Per-key sends are slower
+    (~3s/key worst-case) but tell us exactly what the receiver rejects.
+
+    Used on signal configuration where any single unsupported key can
+    blanket-NAK a 15-key bundle and block startup.  2026-04-17 ptpmon:
+    L5 signal enable NAK'd as a bundle — we couldn't tell which key
+    (the F9T rejected) without this diagnostic.
+
+    Returns:
+        (ok_keys, nak_keys): sets of key names that ACK'd vs NAK'd.
+    """
+    _ensure_imports()
+    ok_keys = set()
+    nak_keys = set()
+    if description:
+        log.info(f"{description} (per-key, {len(key_values)} keys):")
+    for key, value in key_values.items():
+        msg = _UBXMessage.config_set(layers, 0, [(key, value)])
+        ser.write(msg.serialize())
+        if wait_ack(ubr, "CFG", "VALSET", timeout=3.0):
+            log.info(f"  {key}={value}  OK")
+            ok_keys.add(key)
+        else:
+            log.warning(f"  {key}={value}  NAK")
+            nak_keys.add(key)
+    return ok_keys, nak_keys
+
+
 # ── Receiver commands ──────────────────────────────────────────────────────── #
 
 def factory_reset(ser, ubr):
@@ -629,14 +662,29 @@ def _driver_band_summary(driver):
 
 
 def configure_signals(ser, ubr, driver=None):
-    """Enable dual-frequency signals for the selected receiver profile."""
+    """Enable dual-frequency signals for the selected receiver profile.
+
+    Sends each signal key individually, waits for an ACK/NAK per key.
+    Historically we sent all 15 signal keys in one bundled VALSET for
+    speed, but when any single unsupported key NAK'd, the whole bundle
+    NAK'd and we couldn't tell which key was at fault — left us
+    blocked without diagnostic context.  2026-04-17 ptpmon session:
+    this per-key rewrite is how we identified which L5-enable key the
+    F9T was rejecting.
+
+    Returns True if all keys ACK'd, False if any NAK'd.
+    """
     driver = driver or get_driver("f9t")
-    return send_cfg(
-        ser,
-        ubr,
-        driver.signal_config,
-        f"Signals: {_driver_band_summary(driver)}",
+    log.info(f"  Signals: {_driver_band_summary(driver)}")
+    ok_keys, nak_keys = send_cfg_per_key(
+        ser, ubr, driver.signal_config,
+        description=f"Signal config ({driver.name})",
     )
+    if nak_keys:
+        log.warning("  %d signal key(s) NAK'd: %s",
+                    len(nak_keys), sorted(nak_keys))
+        return False
+    return True
 
 
 def configure_gps_l5_health(ser, ubr):
@@ -883,14 +931,19 @@ def full_configure(port, baud=9600, port_type="USB", rate_hz=1,
         ser.close()
         ser, ubr = reopen_after_reset(port, wait_s=5)
 
-    configure_signals(ser, ubr, driver=driver)
-    l5_ok = configure_gps_l5_health(ser, ubr)
+    # L5 health override goes BEFORE the signal-enable VALSET: GPS L5 is
+    # marked unhealthy by default on some firmware states (ptpmon TIM 2.20
+    # 2026-04-17), which causes CFG_SIGNAL_GPS_L5_ENA to NAK.  Order here
+    # mirrors full_configure().
+    if getattr(driver, "supports_l5_health_override", False):
+        configure_gps_l5_health(ser, ubr)
 
-    if l5_ok:
-        log.info("  Warm restart for L5 health override...")
-        warm_restart(ser)
-        ser.close()
-        ser, ubr = reopen_after_reset(port, wait_s=10)
+    configure_signals(ser, ubr, driver=driver)
+
+    log.info("  Warm restart after signal config...")
+    warm_restart(ser)
+    ser.close()
+    ser, ubr = reopen_after_reset(port, wait_s=10)
 
     configure_rate(ser, ubr, rate_hz)
     configure_messages(ser, ubr, port_id)
@@ -1094,19 +1147,19 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
         port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4, "I2C": 0}
         pid = port_id.get(port_type, 3)
         ser, ubr = open_receiver(port, baud)
+        # Apply L5 health override FIRST (see full_configure() for rationale).
+        if isinstance(forced_driver, F9TL5Driver):
+            configure_gps_l5_health(ser, ubr)
         ok = configure_signals(ser, ubr, driver=forced_driver)
         if not ok:
             log.error("Signal configuration for %s NAK'd", forced_driver.name)
             ser.close()
             return None, identity
-        # L5 health override if applicable
         if isinstance(forced_driver, F9TL5Driver):
-            l5_ok = configure_gps_l5_health(ser, ubr)
-            if l5_ok:
-                log.info("GPS L5 health override applied — warm restarting")
-                warm_restart(ser)
-                ser.close()
-                ser, ubr = reopen_after_reset(port, wait_s=10)
+            log.info("L5 signal config applied — warm restarting")
+            warm_restart(ser)
+            ser.close()
+            ser, ubr = reopen_after_reset(port, wait_s=10)
         configure_rate_ms(ser, ubr, measurement_rate_ms)
         configure_messages(ser, ubr, pid, sfrbx_rate=sfrbx_rate)
         configure_nmea_off(ser, ubr, pid)
@@ -1150,18 +1203,25 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
     # (TIM 2.25) accept L5.  L2C is only available on TIM 2.20; the
     # -20B NAKs it.  See docs/f9t-firmware-capabilities.md.
     #
-    # configure_signals() sends all signal keys in a single VALSET,
-    # so the receiver applies them atomically.  Do NOT set L2C and L5
-    # keys individually — the receiver has ordering constraints when
-    # switching bands via individual key changes.
+    # Order matters: send the GPS L5 health override FIRST on L5-capable
+    # drivers.  Some firmware states (observed on ptpmon 2026-04-17)
+    # reject CFG_SIGNAL_GPS_L5_ENA=1 until the L5 health override is
+    # in place, because the default config marks GPS L5 unhealthy and
+    # refuses to enable an unhealthy signal.  Doing the override first
+    # saves us from a spurious NAK on the signal config that looks like
+    # a firmware incompatibility but is really a dependency-order issue.
     _ensure_imports()
     port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4, "I2C": 0}
     pid = port_id.get(port_type, 3)
 
     ser, ubr = open_receiver(port, baud)
 
-    # L5 first (preferred for PPP-AR — see rationale above)
+    # L5 first (preferred for PPP-AR — see rationale above).  Apply the
+    # L5 health override BEFORE enabling L5 signals, on drivers that
+    # support it.
     driver = F9TL5Driver()
+    if getattr(driver, "supports_l5_health_override", False):
+        configure_gps_l5_health(ser, ubr)  # NAK here is OK — some FW don't need it
     ok = configure_signals(ser, ubr, driver=driver)
     if not ok:
         # L5 NAK'd — fall back to L2C (only possible on TIM 2.20)
@@ -1182,16 +1242,14 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
             ser.close()
             return None, identity
 
-    # GPS L5 health override — only needed for L5 drivers
+    # GPS L5 health override is now applied BEFORE signal config (see
+    # above).  After a successful L5 signal enable, warm-restart so the
+    # receiver re-initializes acquisition with L5 actually turned on.
     if isinstance(driver, F9TL5Driver):
-        l5_ok = configure_gps_l5_health(ser, ubr)
-        if l5_ok:
-            log.info("GPS L5 health override applied — warm restarting")
-            warm_restart(ser)
-            ser.close()
-            ser, ubr = reopen_after_reset(port, wait_s=10)
-        else:
-            log.info("GPS L5 health override not supported by this firmware")
+        log.info("L5 signal config applied — warm restarting")
+        warm_restart(ser)
+        ser.close()
+        ser, ubr = reopen_after_reset(port, wait_s=10)
     else:
         log.info("L2C driver — no L5 health override needed")
 
