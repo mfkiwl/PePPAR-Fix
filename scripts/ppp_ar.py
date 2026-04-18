@@ -43,10 +43,15 @@ class MelbourneWubbenaTracker:
     _RESID_WIN = 60
     # Minimum samples before detect_jump will return an opinion.
     _MIN_EPOCHS_FOR_JUMP = 20
-    # Floor on residual sigma (cycles) — MW at steady state rarely sits
-    # below ~0.15 cyc.  Prevents the jump detector from flagging normal
-    # noise as a slip once the running std happens to be tiny.
-    _SIGMA_FLOOR_CYC = 0.20
+    # Floor on residual sigma (cycles).  MW single-epoch noise is
+    # dominated by pseudorange code noise (~0.5 m RMS → ~0.67 cyc at
+    # lambda_WL ≈ 0.75 m).  A too-tight floor triggers on PR noise and
+    # SSR code-bias updates — not real carrier slips.  0.5 × 5σ gives a
+    # 2.5 cyc threshold that only catches multi-cycle WL-only slips;
+    # single-cycle carrier slips fall out of the GF detector anyway
+    # because any realistic small integer change (Δ₁ or Δ₂ < ~100)
+    # that moves WL also moves GF by >1 cm.
+    _SIGMA_FLOOR_CYC = 0.50
 
     def __init__(self, tau_s=60.0, fix_threshold=0.15, min_epochs=60):
         self.tau_s = tau_s              # exponential averaging time constant

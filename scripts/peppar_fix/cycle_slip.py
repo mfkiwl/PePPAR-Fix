@@ -79,7 +79,10 @@ _LAMBDA_L1 = _C_LIGHT / _F_L1                           # ~0.190 m
 LOCKTIME_DROP_MS = 500.0
 ARC_GAP_MAX_S = 1.5                                     # ~1 epoch at 1 Hz
 GF_JUMP_THRESHOLD_M = _LAMBDA_L1 / 4.0                  # ~4.76 cm
-MW_JUMP_N_SIGMA = 3.0
+MW_JUMP_N_SIGMA = 5.0   # combined with a 0.5-cyc sigma floor in
+                         # MelbourneWubbenaTracker; threshold ≥ 2.5 cyc
+                         # keeps MW a multi-cycle backstop while GF
+                         # handles single-cycle slips.
 UBX_LOCKTIME_CAP_MS = 64_000.0                          # u-blox capping band
 
 
@@ -224,7 +227,8 @@ class CycleSlipMonitor:
             #    history kept by this monitor; MWTracker holds its own.
             if self._mw_tracker is not None:
                 try:
-                    mw_info = self._mw_tracker.detect_jump(obs)
+                    mw_info = self._mw_tracker.detect_jump(
+                        obs, n_sigma=MW_JUMP_N_SIGMA)
                 except AttributeError:
                     mw_info = None
                 if mw_info is not None:

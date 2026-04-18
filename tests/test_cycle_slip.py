@@ -178,17 +178,29 @@ class TestMwJump(unittest.TestCase):
         self.assertIsNotNone(info)
         self.assertFalse(info['is_slip'])
 
-    def test_l1_cycle_jump_triggers_mw(self):
+    def test_multi_cycle_L1_slip_triggers_mw(self):
         mw = MelbourneWubbenaTracker()
         self._warm_mw(mw)
-        # +1 cycle on L1 only — MW jumps by ~λ_WL/λ_NL cycles, well past
-        # the sigma floor.
-        obs = make_obs(phi1_cyc=self.PHI1 + 1.0, phi2_cyc=self.PHI2,
+        # +3 cycle L1 slip → MW jump ≈ 3 cyc of lambda_WL, well past
+        # the 5σ × 0.5 cyc = 2.5 cyc multi-cycle threshold.  A 1-cyc
+        # slip would NOT trigger MW by design — it's caught by GF.
+        obs = make_obs(phi1_cyc=self.PHI1 + 3.0, phi2_cyc=self.PHI2,
                        pr1_m=self.PR1, pr2_m=self.PR2)
-        info = mw.detect_jump(obs)
+        info = mw.detect_jump(obs, n_sigma=MW_JUMP_N_SIGMA)
         self.assertIsNotNone(info)
         self.assertTrue(info['is_slip'])
-        self.assertGreater(abs(info['delta_cyc']), MW_JUMP_N_SIGMA * 0.2)
+        self.assertGreater(abs(info['delta_cyc']), MW_JUMP_N_SIGMA * 0.5)
+
+    def test_single_cycle_slip_does_not_trigger_mw(self):
+        """Single-cycle slips must NOT fire MW (GF handles them).  MW
+        fires only on multi-cycle WL-only events that GF would miss."""
+        mw = MelbourneWubbenaTracker()
+        self._warm_mw(mw)
+        obs = make_obs(phi1_cyc=self.PHI1 + 1.0, phi2_cyc=self.PHI2,
+                       pr1_m=self.PR1, pr2_m=self.PR2)
+        info = mw.detect_jump(obs, n_sigma=MW_JUMP_N_SIGMA)
+        self.assertIsNotNone(info)
+        self.assertFalse(info['is_slip'])
 
     def test_monitor_reports_mw_jump(self):
         mw = MelbourneWubbenaTracker()
@@ -201,10 +213,17 @@ class TestMwJump(unittest.TestCase):
                       pr1_m=self.PR1, pr2_m=self.PR2)],
             1000.0, 0)
         self.assertEqual(events, [])
-        # Second epoch — inject L1 slip.
+        # Second epoch — inject a dual-frequency slip that keeps GF=0
+        # (Δphi2 = Δphi1 · λ1/λ2) but makes WL jump.  The geometric
+        # coupling means ΔMW_cyc = Δphi1·(λ2−λ1)/λ2 ≈ 0.24·Δphi1, so
+        # crossing the 5σ·0.5cyc=2.5cyc floor needs Δphi1 ≥ 11 cyc.
+        # 20 cyc comfortably clears it.
+        dL1 = 20.0
+        dL2 = dL1 * (_WL_L1 / _WL_L5)
         events = mon.check(
             [make_obs(lock_ms=30_500,
-                      phi1_cyc=self.PHI1 + 1.0, phi2_cyc=self.PHI2,
+                      phi1_cyc=self.PHI1 + dL1,
+                      phi2_cyc=self.PHI2 + dL2,
                       pr1_m=self.PR1, pr2_m=self.PR2)],
             1001.0, 1)
         self.assertEqual(len(events), 1)
