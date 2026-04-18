@@ -19,6 +19,7 @@ the existing float ambiguity states.
 
 import logging
 import math
+from collections import deque
 
 import numpy as np
 
@@ -38,11 +39,36 @@ class MelbourneWubbenaTracker:
     After averaging, N_WL = round(MW_avg / lambda_WL).
     """
 
+    # Rolling residual window length for the slip-jump detector.
+    _RESID_WIN = 60
+    # Minimum samples before detect_jump will return an opinion.
+    _MIN_EPOCHS_FOR_JUMP = 20
+    # Floor on residual sigma (cycles) — MW at steady state rarely sits
+    # below ~0.15 cyc.  Prevents the jump detector from flagging normal
+    # noise as a slip once the running std happens to be tiny.
+    _SIGMA_FLOOR_CYC = 0.20
+
     def __init__(self, tau_s=60.0, fix_threshold=0.15, min_epochs=60):
         self.tau_s = tau_s              # exponential averaging time constant
         self.fix_threshold = fix_threshold  # |frac| < this to fix
         self.min_epochs = min_epochs    # minimum epochs before fixing
-        self._state = {}   # sv -> {mw_avg, n_epochs, n_wl, fixed, f1, f2}
+        self._state = {}   # sv -> {mw_avg, n_epochs, n_wl, fixed, f1, f2, ...}
+
+    @staticmethod
+    def _mw_meters(phi1_cyc, phi2_cyc, pr1_m, pr2_m, f1, f2):
+        """Melbourne-Wubbena combination, meters."""
+        return (
+            (f1 * phi1_cyc * (C / f1) - f2 * phi2_cyc * (C / f2)) / (f1 - f2)
+            - (f1 * pr1_m + f2 * pr2_m) / (f1 + f2)
+        )
+
+    @staticmethod
+    def _freqs_from_obs(obs):
+        """(f1, f2) in Hz from an observation dict with wl_f1/wl_f2."""
+        wl1, wl2 = obs.get('wl_f1'), obs.get('wl_f2')
+        if not wl1 or not wl2:
+            return None
+        return C / wl1, C / wl2
 
     def update(self, sv, phi1_cyc, phi2_cyc, pr1_m, pr2_m, f1, f2):
         """Update MW average for one satellite.
@@ -53,10 +79,7 @@ class MelbourneWubbenaTracker:
             f1, f2: frequencies in Hz
         """
         lambda_wl = C / (f1 - f2)
-
-        # MW combination (meters)
-        mw = (f1 * phi1_cyc * (C / f1) - f2 * phi2_cyc * (C / f2)) / (f1 - f2) \
-           - (f1 * pr1_m + f2 * pr2_m) / (f1 + f2)
+        mw = self._mw_meters(phi1_cyc, phi2_cyc, pr1_m, pr2_m, f1, f2)
 
         if sv not in self._state:
             self._state[sv] = {
@@ -66,10 +89,22 @@ class MelbourneWubbenaTracker:
                 'fixed': False,
                 'f1': f1,
                 'f2': f2,
+                'resid_deque': deque(maxlen=self._RESID_WIN),
+                'resid_std_cyc': None,
             }
             return
 
         s = self._state[sv]
+        # Track residual from the *pre-update* average so jump detection
+        # can read a sigma that hasn't absorbed the current sample yet.
+        residual_cyc = (mw - s['mw_avg']) / lambda_wl
+        rd = s.setdefault('resid_deque', deque(maxlen=self._RESID_WIN))
+        rd.append(residual_cyc)
+        if len(rd) >= 8:
+            mean = sum(rd) / len(rd)
+            var = sum((x - mean) ** 2 for x in rd) / len(rd)
+            s['resid_std_cyc'] = math.sqrt(var)
+
         # Exponential moving average
         alpha = 1.0 / max(1.0, min(s['n_epochs'] + 1, self.tau_s))
         s['mw_avg'] = (1.0 - alpha) * s['mw_avg'] + alpha * mw
@@ -109,6 +144,45 @@ class MelbourneWubbenaTracker:
     def reset(self, sv):
         """Reset state for a satellite (e.g. after cycle slip)."""
         self._state.pop(sv, None)
+
+    def detect_jump(self, obs, n_sigma=3.0):
+        """Non-mutating slip check for one observation.
+
+        Computes MW for the current observation and compares it to the
+        running average.  A jump exceeding n_sigma·σ of recent residuals
+        (with a floor of _SIGMA_FLOOR_CYC so a quiet window can't make
+        the threshold arbitrarily tight) is reported as a slip.
+
+        Returns dict {is_slip, delta_cyc, sigma_cyc} or None if there
+        isn't yet enough history to compare against.  The caller — the
+        CycleSlipMonitor — uses this as one of four independent
+        detectors; it does not mutate tracker state.
+        """
+        sv = obs['sv']
+        s = self._state.get(sv)
+        if s is None or s['n_epochs'] < self._MIN_EPOCHS_FOR_JUMP:
+            return None
+
+        freqs = self._freqs_from_obs(obs)
+        if freqs is None:
+            return None
+        f1, f2 = freqs
+        lambda_wl = C / (f1 - f2)
+
+        phi1, phi2 = obs.get('phi1_cyc'), obs.get('phi2_cyc')
+        pr1, pr2 = obs.get('pr1_m'), obs.get('pr2_m')
+        if None in (phi1, phi2, pr1, pr2):
+            return None
+
+        mw = self._mw_meters(phi1, phi2, pr1, pr2, f1, f2)
+        delta_cyc = (mw - s['mw_avg']) / lambda_wl
+        sigma_cyc = max(s.get('resid_std_cyc') or 0.0, self._SIGMA_FLOOR_CYC)
+        is_slip = abs(delta_cyc) > n_sigma * sigma_cyc
+        return {
+            'is_slip': is_slip,
+            'delta_cyc': delta_cyc,
+            'sigma_cyc': sigma_cyc,
+        }
 
     @property
     def n_fixed(self):

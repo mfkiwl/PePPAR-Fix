@@ -815,6 +815,12 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         'pr2_m': pr_f2,
                         'wl_f1': wl_f1,
                         'wl_f2': wl_f2,
+                        # Per-signal lock duration (CycleSlipMonitor attributes
+                        # an SV-wide slip to the signal with the lower lock).
+                        'f1_lock_ms': f1['lock_ms'],
+                        'f2_lock_ms': f2['lock_ms'],
+                        'f1_sig_name': f1['sig_name'],
+                        'f2_sig_name': f2['sig_name'],
                     })
 
                 # Diagnostic dump (first 3 epochs, then every 60)

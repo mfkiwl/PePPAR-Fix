@@ -48,6 +48,32 @@ from solve_ppp import PPPFilter, FixedPosFilter, ls_init
 from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections
 from ppp_ar import MelbourneWubbenaTracker, NarrowLaneResolver
+from peppar_fix.cycle_slip import CycleSlipMonitor, SlipEvent, flush_sv_phase
+
+
+# Cycle-slip CSV sink, shared between Phase-1 (run_bootstrap) and Phase-2
+# (AntPosEstThread).  Opened in main() if --slip-log is set; both the
+# bootstrap and steady-state monitors write to the same file since the
+# phases run in series.
+_SLIP_CSV_FILE = None
+_SLIP_CSV_WRITER = None
+
+
+def _open_slip_csv(path):
+    """Open the slip CSV file (header written once); return the csv.writer."""
+    global _SLIP_CSV_FILE, _SLIP_CSV_WRITER
+    if _SLIP_CSV_WRITER is not None:
+        return _SLIP_CSV_WRITER
+    _SLIP_CSV_FILE = open(path, 'w', newline='')
+    _SLIP_CSV_WRITER = csv.writer(_SLIP_CSV_FILE)
+    _SLIP_CSV_WRITER.writerow(SlipEvent.csv_header())
+    _SLIP_CSV_FILE.flush()
+    return _SLIP_CSV_WRITER
+
+
+def _slip_csv_writer():
+    """Return the slip CSV writer, or None if --slip-log was not set."""
+    return _SLIP_CSV_WRITER
 from ntrip_client import NtripStream
 from realtime_ppp import serial_reader, ntrip_reader, QErrStore, Nav2PositionStore
 from ticc import Ticc
@@ -810,6 +836,8 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
     # PPP-AR: Melbourne-Wubbena wide-lane + narrow-lane resolver
     mw_tracker = MelbourneWubbenaTracker()
     nl_resolver = NarrowLaneResolver()
+    slip_monitor = CycleSlipMonitor(
+        mw_tracker=mw_tracker, csv_writer=_slip_csv_writer())
 
     prev_t = None
     prev_pos_ecef = None
@@ -892,14 +920,23 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
         filt.predict(dt)
         prev_t = gps_time
 
-        # Manage ambiguities
+        # Manage ambiguities — flush per-SV phase state on any detected
+        # cycle slip, retaining per-SV and shared frequency-like state.
         current_svs = {o['sv'] for o in observations}
-        if filt.prev_obs:
-            slipped = filt.detect_cycle_slips(observations, filt.prev_obs)
-            for sv in slipped:
-                filt.remove_ambiguity(sv)
-                mw_tracker.reset(sv)
-                nl_resolver.unfix(sv)
+        slip_events = slip_monitor.check(
+            observations, gps_time.timestamp(), n_epochs)
+        for ev in slip_events:
+            flush_sv_phase(
+                ev.sv, filt=filt, mw_tracker=mw_tracker,
+                nl_resolver=nl_resolver, slip_monitor=slip_monitor,
+                reason="|".join(ev.reasons), epoch=n_epochs)
+            log.info("slip: sv=%s reasons=%s conf=%s lock=%.0fms cno=%.1f"
+                     " gap=%s gf=%s mw=%s",
+                     ev.sv, ",".join(ev.reasons), ev.confidence,
+                     ev.lock_ms, ev.cno,
+                     f"{ev.gap_s:.2f}s" if ev.gap_s is not None else "-",
+                     f"{ev.gf_jump_m*100:.1f}cm" if ev.gf_jump_m is not None else "-",
+                     f"{ev.mw_jump_cyc:.2f}c" if ev.mw_jump_cyc is not None else "-")
 
         for obs in observations:
             sv = obs['sv']
@@ -1277,6 +1314,8 @@ class AntPosEstThread(threading.Thread):
         self._nav2_tension_streak = 0  # consecutive high-tension checks
         self._nav2_cooldown_until = 0  # epoch number: skip checks until this
         self._pfr_monitor = PostFixResidualMonitor()
+        self._slip_monitor = CycleSlipMonitor(
+            mw_tracker=self._mw, csv_writer=_slip_csv_writer())
 
     @property
     def decimation(self):
@@ -1527,14 +1566,27 @@ class AntPosEstThread(threading.Thread):
                 filt.predict(dt)
             self._prev_t = gps_time
 
-            # Manage ambiguities
+            # Manage ambiguities — slip detector runs all four checks
+            # (UBX locktime, arc gap, geometry-free jump, MW residual
+            # jump) and flushes every per-SV phase-like state on any
+            # detected slip.  Shared clock/ISB/ZTD and receiver TCXO
+            # state are intentionally untouched.
             current_svs = {o['sv'] for o in observations}
-            if filt.prev_obs:
-                slipped = filt.detect_cycle_slips(observations, filt.prev_obs)
-                for sv in slipped:
-                    filt.remove_ambiguity(sv)
-                    mw.reset(sv)
-                    nl.unfix(sv)
+            slip_events = self._slip_monitor.check(
+                observations, gps_time.timestamp(), self._n_epochs)
+            for ev in slip_events:
+                flush_sv_phase(
+                    ev.sv, filt=filt, mw_tracker=mw,
+                    nl_resolver=nl, pfr_monitor=self._pfr_monitor,
+                    slip_monitor=self._slip_monitor,
+                    reason="|".join(ev.reasons), epoch=self._n_epochs)
+                log.info("slip: sv=%s reasons=%s conf=%s lock=%.0fms"
+                         " cno=%.1f gap=%s gf=%s mw=%s",
+                         ev.sv, ",".join(ev.reasons), ev.confidence,
+                         ev.lock_ms, ev.cno,
+                         f"{ev.gap_s:.2f}s" if ev.gap_s is not None else "-",
+                         f"{ev.gf_jump_m*100:.1f}cm" if ev.gf_jump_m is not None else "-",
+                         f"{ev.mw_jump_cyc:.2f}c" if ev.mw_jump_cyc is not None else "-")
 
             for obs in observations:
                 sv = obs['sv']
@@ -3305,6 +3357,10 @@ def _setup_servo(args, known_ecef, qerr_store, ptp=None):
     else:
         t_extts = None
         log.info("No PPS correlation source available (no TICC, no EXTTS)")
+
+    if args.slip_log:
+        _open_slip_csv(args.slip_log)
+        log.info("cycle-slip CSV → %s", args.slip_log)
 
     if args.ticc_port:
         ticc_tracker = TiccPairTracker(args.ticc_phc_channel, args.ticc_ref_channel)
@@ -5301,6 +5357,13 @@ Two-phase operation:
                            "ref_ps/channel.  Pair with --qerr-log to do "
                            "post-hoc qErr correction by index-matching on "
                            "CLOCK_MONOTONIC.")
+    ticc.add_argument("--slip-log", default=None,
+                      help="Optional cycle-slip CSV log.  One row per "
+                           "SlipEvent captures epoch, sv, reasons "
+                           "(ubx_locktime_drop|arc_gap|gf_jump|mw_jump), "
+                           "confidence, lock_ms, cno, elev, gap_s, and "
+                           "per-detector magnitudes.  Used for post-hoc "
+                           "antenna/mount quality reporting.")
     ticc.add_argument("--qerr-log", default=None,
                       help="Optional raw qErr CSV log path.  Each row "
                            "captures one TIM-TP message from the F9T with "
