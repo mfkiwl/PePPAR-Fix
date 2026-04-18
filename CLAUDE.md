@@ -500,6 +500,7 @@ here before changing anything in the areas they cover.
 | [igc-kernel-patches.md](docs/igc-kernel-patches.md) | **Read before driver work on i226 hosts.** Inventory of igc patches (ppsfix + adjfine), per-host deployment status, verification checklist, incident history. v3 adjfine patch reduces but does not eliminate TX timeout cascade — EXTTS wedges after ~44 min MTBF. |
 | [lambda-ar-plan.md](docs/lambda-ar-plan.md) | LAMBDA integer least-squares AR: decorrelation, search, ratio test, partial AR. Replaces per-satellite rounding — handles ZTD-ambiguity correlation, faster TTFF, stronger validation. ~150 lines. |
 | [lab-operations.md](docs/lab-operations.md) | **Read before running on any lab host.** Deployment procedure, pre-flight checklist, stumble analysis, standard host layout, future automation work. |
+| [position-bootstrap-reliability-plan.md](docs/position-bootstrap-reliability-plan.md) | Implementation plan to make cold-start Phase-1 trustworthy so lab runs no longer need `--known-pos`. Residual-consistency gate, NAV2 cross-check, harder abort, σ tightening, state persistence. 6 work items, W1–W5 core, W6 fallback. |
 
 ## Lab Documentation Pointers
 
