@@ -1064,7 +1064,8 @@ class PostFixResidualMonitor:
 
         # Per-SV deque of recent |PR post-fit residual| values.
         from collections import deque
-        self._per_sv = {}  # sv -> deque of floats
+        self._per_sv = {}      # sv -> deque of |PR resid| m (drives escalation)
+        self._per_sv_phi = {}  # sv -> deque of |phi resid| m (NL-fix diagnostic)
         self._deque_factory = lambda: deque(maxlen=window)
 
         # RMS history (same cadence as eval).
@@ -1095,16 +1096,21 @@ class PostFixResidualMonitor:
             return lab[0], lab[1], None
         for lab, r in zip(labels, resid):
             sv, kind, elev = _unpack(lab)
-            if kind != 'pr':
-                continue
             if sv not in nl_fixed:
                 continue
-            dq = self._per_sv.setdefault(sv, self._deque_factory())
-            dq.append(abs(float(r)))
-            # Track latest elevation per SV so the L1 unfix log can include it.
-            self._per_sv_last_elev = getattr(self, '_per_sv_last_elev', {})
-            if elev is not None:
-                self._per_sv_last_elev[sv] = float(elev)
+            if kind == 'pr':
+                dq = self._per_sv.setdefault(sv, self._deque_factory())
+                dq.append(abs(float(r)))
+                # Track latest elevation per SV so the L1 unfix log can include it.
+                self._per_sv_last_elev = getattr(self, '_per_sv_last_elev', {})
+                if elev is not None:
+                    self._per_sv_last_elev[sv] = float(elev)
+            elif kind == 'phi':
+                # NL-fix diagnostic: a correct NL fix produces near-zero
+                # phi residual (cm-level); a wrong-integer fix shows a
+                # fractional cycle that's stable and per-satellite.
+                dqp = self._per_sv_phi.setdefault(sv, self._deque_factory())
+                dqp.append(abs(float(r)))
         # Overall PR RMS across all fixed SVs (latest epoch only).
         fixed_resids = [abs(float(r))
                         for lab, r in zip(labels, resid)
@@ -1192,6 +1198,30 @@ class PostFixResidualMonitor:
             rms = sum(self._rms_hist) / len(self._rms_hist)
             return f"PFR level={self._level} n={n_tracked} rms={rms:.2f}m"
         return f"PFR level={self._level} n={n_tracked} (warming)"
+
+    def per_sv_breakdown(self):
+        """Per-SV residual summary for offline analysis of NL fix quality.
+
+        Distinguishes two failure modes:
+          - fractional-cycle phi bias (L5I/L5Q or similar sub-cycle mismatch)
+            → phi |resid| near a consistent sub-cm value per satellite.
+          - multi-cycle phi bias (wrong NL integer, e.g., TGD/ISC or
+            code-bias-derived)
+            → phi |resid| at integer multiples of λ_NL / 2.
+
+        Returns a list of (sv, pr_mean_m, phi_mean_m, elev_deg).
+        """
+        elev_map = getattr(self, '_per_sv_last_elev', {})
+        rows = []
+        svs = set(self._per_sv.keys()) | set(self._per_sv_phi.keys())
+        for sv in sorted(svs):
+            pr_dq = self._per_sv.get(sv)
+            phi_dq = self._per_sv_phi.get(sv)
+            pr_mean = sum(pr_dq) / len(pr_dq) if pr_dq else float('nan')
+            phi_mean = sum(phi_dq) / len(phi_dq) if phi_dq else float('nan')
+            elev = elev_map.get(sv, float('nan'))
+            rows.append((sv, pr_mean, phi_mean, elev))
+        return rows
 
 
 # ── AntPosEst background thread ─────────────────────────────────────── #
@@ -1615,6 +1645,19 @@ class AntPosEstThread(threading.Thread):
                     n_used, len(filt.sv_to_idx),
                     mw.summary(), nl.summary(), nav2_tag,
                 )
+
+            # Per-SV residual breakdown every 60 epochs — diagnostic for
+            # distinguishing fractional-cycle (L5I/L5Q) from multi-cycle
+            # (code-bias / TGD / ISC) wrong-integer mechanisms.
+            if self._n_epochs % 60 == 0 and self._n_epochs > 0:
+                rows = self._pfr_monitor.per_sv_breakdown()
+                if rows:
+                    parts = [
+                        f"{sv}:PR={pr:.2f}m,phi={phi*100:.1f}cm@elev{elev:.0f}°"
+                        for sv, pr, phi, elev in rows
+                    ]
+                    log.info("  NL residuals @%d: %s",
+                             self._n_epochs, " ".join(parts))
 
         log.info("AntPosEstThread stopped after %d epochs", self._n_epochs)
 
