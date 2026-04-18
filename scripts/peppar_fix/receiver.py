@@ -931,12 +931,20 @@ def full_configure(port, baud=9600, port_type="USB", rate_hz=1,
         ser.close()
         ser, ubr = reopen_after_reset(port, wait_s=5)
 
-    # L5 health override goes BEFORE the signal-enable VALSET: GPS L5 is
-    # marked unhealthy by default on some firmware states (ptpmon TIM 2.20
-    # 2026-04-17), which causes CFG_SIGNAL_GPS_L5_ENA to NAK.  Order here
-    # mirrors full_configure().
+    # L5 health override goes BEFORE the signal-enable VALSET and must be
+    # followed by a warm restart so the receiver re-evaluates signal
+    # health tables before we try to enable L5.  Without the restart,
+    # CFG_SIGNAL_GPS_L5_ENA=1 NAKs because the live state still shows
+    # L5 unhealthy even though the override is in flash.  Observed on
+    # ptpmon 2026-04-17; same firmware (TIM 2.20) works on TimeHat
+    # because TimeHat's flash has already persisted an L5-enabled config
+    # from an earlier initialization.
     if getattr(driver, "supports_l5_health_override", False):
         configure_gps_l5_health(ser, ubr)
+        log.info("  Warm restart for L5 health override...")
+        warm_restart(ser)
+        ser.close()
+        ser, ubr = reopen_after_reset(port, wait_s=10)
 
     configure_signals(ser, ubr, driver=driver)
 
@@ -1147,9 +1155,16 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
         port_id = {"UART": 1, "UART2": 2, "USB": 3, "SPI": 4, "I2C": 0}
         pid = port_id.get(port_type, 3)
         ser, ubr = open_receiver(port, baud)
-        # Apply L5 health override FIRST (see full_configure() for rationale).
+        # Health override THEN warm-restart THEN signal config — the live
+        # signal-health table isn't re-read until restart, so sending
+        # GPS_L5_ENA=1 without the intervening restart NAKs even when
+        # the override is in flash.  See full_configure() for the full story.
         if isinstance(forced_driver, F9TL5Driver):
             configure_gps_l5_health(ser, ubr)
+            log.info("Warm restart for L5 health override...")
+            warm_restart(ser)
+            ser.close()
+            ser, ubr = reopen_after_reset(port, wait_s=10)
         ok = configure_signals(ser, ubr, driver=forced_driver)
         if not ok:
             log.error("Signal configuration for %s NAK'd", forced_driver.name)
@@ -1217,11 +1232,17 @@ def ensure_receiver_ready(port, baud, port_type="USB", systems=None,
     ser, ubr = open_receiver(port, baud)
 
     # L5 first (preferred for PPP-AR — see rationale above).  Apply the
-    # L5 health override BEFORE enabling L5 signals, on drivers that
-    # support it.
+    # L5 health override BEFORE enabling L5 signals, and warm-restart
+    # between them so the receiver re-reads the signal-health table
+    # before the enable VALSET lands.  See full_configure() for the
+    # rationale.
     driver = F9TL5Driver()
     if getattr(driver, "supports_l5_health_override", False):
         configure_gps_l5_health(ser, ubr)  # NAK here is OK — some FW don't need it
+        log.info("Warm restart for L5 health override...")
+        warm_restart(ser)
+        ser.close()
+        ser, ubr = reopen_after_reset(port, wait_s=10)
     ok = configure_signals(ser, ubr, driver=driver)
     if not ok:
         # L5 NAK'd — fall back to L2C (only possible on TIM 2.20)
