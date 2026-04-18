@@ -79,13 +79,17 @@ def _slip_csv_writer():
     return _SLIP_CSV_WRITER
 
 
-def _compute_elevations_for_slip(filt, corrections, observations, gps_time):
-    """Per-SV elevation in degrees for slip-diagnostics tagging.
+def _compute_sv_elevations(filt, corrections, observations, gps_time):
+    """Per-SV elevation in degrees from the filter's current position.
+
+    Used by CycleSlipMonitor for slip-event tagging and by
+    NarrowLaneResolver for the AR elevation mask.
 
     Returns {} if the filter has no position yet or corrections can't
-    provide satellite positions.  This is diagnostic-only — missing
-    elevations don't change detection behavior, just make log output
-    less informative.
+    provide satellite positions.  Missing elevations don't change slip
+    detection or AR gating behavior — they just mean log output is
+    less informative and the AR elev mask is inactive for SVs lacking
+    a sat-position lookup.
     """
     if filt is None or not hasattr(filt, 'x') or len(filt.x) < 3:
         return {}
@@ -860,7 +864,7 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
 
     # PPP-AR: Melbourne-Wubbena wide-lane + narrow-lane resolver
     mw_tracker = MelbourneWubbenaTracker()
-    nl_resolver = NarrowLaneResolver()
+    nl_resolver = NarrowLaneResolver(ar_elev_mask_deg=args.ar_elev_mask)
     slip_monitor = CycleSlipMonitor(
         mw_tracker=mw_tracker, csv_writer=_slip_csv_writer())
 
@@ -953,7 +957,7 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
         # Manage ambiguities — flush per-SV phase state on any detected
         # cycle slip, retaining per-SV and shared frequency-like state.
         current_svs = {o['sv'] for o in observations}
-        elevations = _compute_elevations_for_slip(filt, corrections,
+        elevations = _compute_sv_elevations(filt, corrections,
                                                   observations, gps_time)
         slip_events = slip_monitor.check(
             observations, gps_time.timestamp(), n_epochs,
@@ -1025,9 +1029,12 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
                 f2_hz = C / wl2
                 mw_tracker.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
 
-        # PPP-AR: narrow-lane resolution attempt (every epoch after warmup)
+        # PPP-AR: narrow-lane resolution attempt (every epoch after warmup).
+        # `elevations` was computed above for the cycle-slip monitor;
+        # reuse it so the AR elevation mask excludes low-elev SVs from
+        # integer fixing without recomputing sat positions.
         if n_epochs >= 30:
-            nl_resolver.attempt(filt, mw_tracker)
+            nl_resolver.attempt(filt, mw_tracker, elevations=elevations)
 
         if n_epochs % 5 == 0:
             log.info(
@@ -1375,6 +1382,7 @@ class AntPosEstThread(threading.Thread):
     def __init__(self, known_ecef, corrections, stop_event, ape_sm,
                  bootstrap_result=None, position_callback=None,
                  resolved_decimation=10, resolve_threshold=4,
+                 ar_elev_mask_deg=20.0,
                  nav2_store=None, nav2_tension_threshold=5.0,
                  nav2_alarm_count=3, systems=None):
         super().__init__(daemon=True, name="AntPosEst")
@@ -1394,14 +1402,15 @@ class AntPosEstThread(threading.Thread):
         if bootstrap_result is not None and bootstrap_result.ppp_filter is not None:
             self._filt = bootstrap_result.ppp_filter
             self._mw = bootstrap_result.mw_tracker or MelbourneWubbenaTracker()
-            self._nl = bootstrap_result.nl_resolver or NarrowLaneResolver()
+            self._nl = (bootstrap_result.nl_resolver
+                        or NarrowLaneResolver(ar_elev_mask_deg=ar_elev_mask_deg))
             log.info("AntPosEstThread: continuing from bootstrap PPPFilter "
                      "(amb=%d, %s)", len(self._filt.sv_to_idx), self._mw.summary())
         else:
             self._filt = PPPFilter()
             self._filt.initialize(known_ecef, 0.0, systems=self._systems)
             self._mw = MelbourneWubbenaTracker()
-            self._nl = NarrowLaneResolver()
+            self._nl = NarrowLaneResolver(ar_elev_mask_deg=ar_elev_mask_deg)
             log.info("AntPosEstThread: fresh PPPFilter at known position (warm start)")
 
         self._n_epochs = 0
@@ -1693,7 +1702,7 @@ class AntPosEstThread(threading.Thread):
             # detected slip.  Shared clock/ISB/ZTD and receiver TCXO
             # state are intentionally untouched.
             current_svs = {o['sv'] for o in observations}
-            elevations = _compute_elevations_for_slip(
+            elevations = _compute_sv_elevations(
                 filt, corrections, observations, gps_time)
             slip_events = self._slip_monitor.check(
                 observations, gps_time.timestamp(), self._n_epochs,
@@ -1748,10 +1757,12 @@ class AntPosEstThread(threading.Thread):
                     f2_hz = C / wl2
                     mw.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
 
-            # NL resolution attempt (after warmup)
+            # NL resolution attempt (after warmup).  Reuse elevations
+            # computed earlier this epoch for the slip monitor so the
+            # AR elevation mask can gate candidates.
             nl.tick()  # advance blacklist expiry
             if self._n_epochs >= 5:
-                nl.attempt(filt, mw)
+                nl.attempt(filt, mw, elevations=elevations)
 
             # Post-fix residual monitor: watch for wrong integer fixes
             # showing up as sustained post-fit residual growth on
@@ -5052,6 +5063,7 @@ def run(args):
             position_callback=_position_improved,
             nav2_store=nav2_store,
             systems=set(args.systems.split(',')) if args.systems else None,
+            ar_elev_mask_deg=args.ar_elev_mask,
         )
         ape_thread.start()
 
@@ -5243,6 +5255,14 @@ Two-phase operation:
     pos.add_argument("--bootstrap-max-retries", type=int, default=3,
                      help="On W1 or W2 abort, scrub the filter and retry this "
                           "many times before giving up.  Default 3.")
+    pos.add_argument("--ar-elev-mask", type=float, default=20.0,
+                     help="Elevation mask for integer-ambiguity resolution, "
+                          "in degrees.  Separate from the measurement "
+                          "ELEV_MASK — SVs below this stay in the float "
+                          "filter but don't attempt NL fixing.  Default "
+                          "20° (RTKLIB arelmask analogue, matches PRIDE "
+                          "PPP-AR partial-AR practice).  Set to 0 to "
+                          "disable and let every WL-fixed SV attempt NL.")
     pos.add_argument("--timeout", type=int, default=3600,
                      help="Bootstrap timeout in seconds (default: 3600)")
     pos.add_argument("--watchdog-threshold", type=float, default=0.5,

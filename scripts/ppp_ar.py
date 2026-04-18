@@ -207,9 +207,20 @@ class NarrowLaneResolver:
     """
 
     def __init__(self, frac_threshold=0.10, sigma_threshold=0.12,
-                 corner_margin_sum=1.6, blacklist_epochs=60):
+                 corner_margin_sum=1.6, blacklist_epochs=60,
+                 ar_elev_mask_deg=20.0):
         self.frac_threshold = frac_threshold    # |N1_frac| < this to fix
         self.sigma_threshold = sigma_threshold  # sigma_N1 < this to fix
+        # AR-specific elevation mask.  Separate from the PPP measurement
+        # mask (ELEV_MASK, 10°) — low-elev SVs still contribute
+        # pseudorange/phase to the float filter but are excluded from
+        # integer-ambiguity resolution.  RTKLIB calls this `arelmask`
+        # and recommends it as the primary defense against wrong-
+        # integer poisoning by multipath-prone low-elev satellites.
+        # 20° matches PRIDE-PPPAR's published partial-AR cutoff and
+        # is the most-cited value in the PAR literature (see
+        # doi:10.3390/rs15133319, doi:10.1007/s10291-015-0473-1).
+        self.ar_elev_mask_deg = ar_elev_mask_deg
         # Corner-margin gate on the rounding path: reject when
         # (frac/frac_cap) + (sigma/sigma_cap) ≥ corner_margin_sum.
         # 2.0 = top-right corner of the rectangle (= fully marginal).
@@ -253,7 +264,7 @@ class NarrowLaneResolver:
             return False
         return True
 
-    def attempt(self, filt, mw_tracker):
+    def attempt(self, filt, mw_tracker, elevations=None):
         """Try to fix ambiguities in the PPPFilter.
 
         Also re-constrains already-fixed ambiguities every epoch to prevent
@@ -262,13 +273,22 @@ class NarrowLaneResolver:
         Args:
             filt: PPPFilter instance with .x, .P, .sv_to_idx
             mw_tracker: MelbourneWubbenaTracker with fixed N_WL values
+            elevations: optional dict {sv: elev_deg}.  SVs below
+                self.ar_elev_mask_deg are excluded from NL-fix
+                candidacy (they remain in the float filter for
+                pseudorange/phase observations).  If None, the gate
+                is skipped — same as ar_elev_mask_deg=0.
 
         Returns:
             dict of newly fixed satellites: {sv: n1_int}
         """
         newly_fixed = {}
+        elevations = elevations or {}
 
-        # Re-constrain already-fixed ambiguities every epoch
+        # Re-constrain already-fixed ambiguities every epoch.  Note:
+        # the elevation gate intentionally does NOT apply here — a
+        # fix that was made at high elevation stays valid as the SV
+        # sets.  It can still be unfixed by cycle-slip flush or PFR.
         for sv, fix_info in list(self._fixed.items()):
             amb_idx = filt.sv_to_idx.get(sv)
             if amb_idx is None:
@@ -278,11 +298,18 @@ class NarrowLaneResolver:
                 self._apply_fix(filt, si, fix_info['a_if_fixed'])
 
         # Collect WL-fixed, not-yet-NL-fixed, not-blacklisted candidates
+        # above the AR elevation mask.
         cands = []  # list of (sv, amb_idx, si, f1, f2, n_wl, lambda_wl, lambda_nl, alpha2)
+        skipped_by_elev = 0
         for sv, amb_idx in list(filt.sv_to_idx.items()):
             if sv in self._fixed:
                 continue
             if self.is_blacklisted(sv):
+                continue
+            elev = elevations.get(sv)
+            if (self.ar_elev_mask_deg > 0 and elev is not None
+                    and elev < self.ar_elev_mask_deg):
+                skipped_by_elev += 1
                 continue
             n_wl = mw_tracker.get_wl(sv)
             if n_wl is None:
@@ -299,6 +326,8 @@ class NarrowLaneResolver:
                 continue
             cands.append((sv, amb_idx, si, f1, f2, n_wl,
                           lambda_wl, lambda_nl, alpha2))
+        if skipped_by_elev > 0:
+            self.last_skipped_by_elev = skipped_by_elev
 
         # Pre-screen: loose reject for obviously unconverged ambiguities
         screened = []
