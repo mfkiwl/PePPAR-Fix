@@ -1366,13 +1366,39 @@ class AntPosEstThread(threading.Thread):
             pass
 
     def _check_nav2(self, filt, mw, nl, pos_ecef, sigma_3d, n_nl_fixed):
-        """Compare AntPosEst position against NAV2 and reset if they disagree.
+        """Horizontal-movement watchdog against NAV2's independent fix.
 
-        Computes tension = displacement / combined_uncertainty.  If tension
-        exceeds the threshold for several consecutive checks, unfix all NL
-        ambiguities and reset the PPPFilter to the NAV2 position.
+        Role: detect if the physical antenna has moved enough that our
+        fixed-position assumption (whether warm-started from
+        --known-pos or bootstrapped from Phase 1) is wrong.  A moved
+        antenna silently corrupts the clock solution by absorbing the
+        position error into dt_rx, so we need an independent sanity
+        check.  NAV2 is that check: a parallel single-epoch code-only
+        fix on the same F9T, unaffected by the PPP filter's state.
 
-        See docs/position-confidence.md for the confidence framework design.
+        Key design choices (see session logs 2026-04-18):
+
+        1. HORIZONTAL only.  Altitude disagreement is dominated by GNSS
+           vertical DOP (~3× horizontal) and by PPP filter drift that
+           isn't an antenna-moved signal.  On clkPoC3 a 5 m PPP vertical
+           wander triggered 22 cascaded RESETs in ~3 hours even though
+           horizontal was steady.  Physical antenna moves are almost
+           always horizontal, so ignoring vertical loses little.
+
+        2. RESET preserves altitude.  When we do reset, we seed lat/lon
+           from NAV2 but keep the filter's current altitude — NAV2
+           altitude is even noisier than NAV2 horizontal, and a vertical
+           jump to a noisy value loses information.
+
+        3. n_nl_fixed == 0 does not auto-reset.  With no NL fixes active
+           there's nothing to "unfix" — the filter is still float, and
+           a reset just throws away float convergence progress.  The
+           only NL=0 case that warrants a reset is a large enough
+           horizontal jump (≥20 m) to plausibly be an antenna move.
+
+        4. Wrong-integer safety net (NL>0, disp ≥ 10 m horizontal) is
+           retained — a fixed integer that has gone rogue puts PPP
+           meters off; NAV2 will spot it.
         """
         opinion = self._nav2_store.get_opinion(max_age_s=30.0)
         if opinion is None:
@@ -1380,77 +1406,102 @@ class AntPosEstThread(threading.Thread):
 
         nav2_ecef = opinion['ecef']
         nav2_h_acc = opinion['h_acc_m'] or 5.0  # default 5m if missing
-        displacement = float(np.linalg.norm(pos_ecef - nav2_ecef))
 
-        # Combined uncertainty: AntPosEst sigma + NAV2 hAcc in quadrature
+        # Project the ECEF displacement onto the local tangent plane so
+        # "horizontal" is the distance along Earth's surface between
+        # PPP and NAV2.  For small offsets (~meters) this is equivalent
+        # to great-circle distance and much simpler than LLA math.
+        diff_ecef = pos_ecef - nav2_ecef
+        up_hat = pos_ecef / np.linalg.norm(pos_ecef)
+        vertical = float(np.dot(diff_ecef, up_hat))
+        horiz_vec = diff_ecef - vertical * up_hat
+        disp_h = float(np.linalg.norm(horiz_vec))
+        disp_v = abs(vertical)
+        disp_3d = float(np.linalg.norm(diff_ecef))   # diagnostic only
+
+        # Combined horizontal uncertainty: filter σ_3d is a loose over-
+        # estimate of horizontal σ (adequately conservative).  Pair with
+        # NAV2 hAcc which is specifically horizontal.
         combined_unc = math.sqrt(sigma_3d ** 2 + nav2_h_acc ** 2)
-        tension = displacement / max(combined_unc, 0.1)
+        tension = disp_h / max(combined_unc, 0.1)
 
-        if tension > self._nav2_tension_threshold:
-            self._nav2_tension_streak += 1
-            log.warning(
-                "NAV2 tension: %.1f (displacement=%.1fm, σ=%.2fm, "
-                "hAcc=%.1fm, streak=%d/%d) NAV2=(%.6f,%.6f,%.1f) "
-                "pDOP=%.1f sv=%d",
-                tension, displacement, sigma_3d, nav2_h_acc,
-                self._nav2_tension_streak, self._nav2_alarm_count,
-                opinion['lat'], opinion['lon'], opinion['alt_m'],
-                opinion.get('pdop') or 0, opinion.get('num_sv') or 0,
-            )
-            if self._nav2_tension_streak >= self._nav2_alarm_count:
-                # Require both high tension AND high displacement to reset.
-                # Tension alone is unreliable: a host whose F9T reports
-                # tight hAcc (0.7 m vs 0.9 m) crosses the 5.0 tension
-                # threshold on the same ~4 m systematic NAV2↔PPP-AR offset
-                # that leaves other hosts at 3.9.  The observed NAV2 bias
-                # is shared across hosts on the same antenna, so it isn't
-                # a wrong-integer signal — wrong integers produce >=6 m
-                # shifts in float, ≥10 m once NL is fixed.
-                disp_floor = 10.0 if n_nl_fixed > 0 else 6.0
-                if displacement < disp_floor:
-                    guard = (f"{n_nl_fixed} NL fixes active"
-                             if n_nl_fixed > 0 else "float (NL=0)")
-                    log.info("NAV2 tension %.1f but displacement %.1fm < %.0fm "
-                             "(%s) — position trusted over NAV2",
-                             tension, displacement, disp_floor, guard)
-                    self._nav2_tension_streak = 0
-                    return
-                lat, lon, alt = ecef_to_lla(
-                    pos_ecef[0], pos_ecef[1], pos_ecef[2])
-                nav2_lat = opinion['lat']
-                nav2_lon = opinion['lon']
-                log.warning(
-                    "NAV2 RESET: AntPosEst (%.6f,%.6f) disagrees with "
-                    "NAV2 (%.6f,%.6f) by %.1fm for %d consecutive checks. "
-                    "Unfixing all NL and resetting filter to NAV2 position.",
-                    lat, lon, nav2_lat, nav2_lon,
-                    displacement, self._nav2_tension_streak,
-                )
-                # Unfix all NL ambiguities
-                for sv in list(nl._fixed.keys()):
-                    nl.unfix(sv)
-                # Reset PPPFilter to NAV2 position
-                filt.initialize(nav2_ecef, 0.0, systems=self._systems)
-                self._prev_t = None
-                self._best_sigma = 999.0
-                self._nav2_tension_streak = 0
-                # Cooldown: let the filter converge before checking again.
-                # 120 epochs ≈ 2 min — enough for float to settle and WL
-                # to re-accumulate before comparing against NAV2.
-                self._nav2_cooldown_until = self._n_epochs + 120
-                log.info("NAV2 check cooldown until epoch %d",
-                         self._nav2_cooldown_until)
-                # Transition back to CONVERGING
-                if self._ape_sm.state == AntPosEstState.RESOLVED:
-                    self._ape_sm.transition(
-                        AntPosEstState.CONVERGING,
-                        f"NAV2 disagreement ({displacement:.0f}m)",
-                    )
-        else:
+        if tension <= self._nav2_tension_threshold:
             if self._nav2_tension_streak > 0:
-                log.info("NAV2 tension resolved: %.1f (displacement=%.1fm)",
-                         tension, displacement)
+                log.info(
+                    "NAV2 horizontal tension resolved: %.1f "
+                    "(disp_h=%.1fm disp_v=%.1fm)",
+                    tension, disp_h, disp_v)
             self._nav2_tension_streak = 0
+            return
+
+        self._nav2_tension_streak += 1
+        log.warning(
+            "NAV2 horizontal tension: %.1f "
+            "(disp_h=%.1fm disp_v=%.1fm disp_3d=%.1fm σ=%.2fm hAcc=%.1fm "
+            "streak=%d/%d) NAV2=(%.6f,%.6f,%.1f) pDOP=%.1f sv=%d",
+            tension, disp_h, disp_v, disp_3d, sigma_3d, nav2_h_acc,
+            self._nav2_tension_streak, self._nav2_alarm_count,
+            opinion['lat'], opinion['lon'], opinion['alt_m'],
+            opinion.get('pdop') or 0, opinion.get('num_sv') or 0,
+        )
+
+        if self._nav2_tension_streak < self._nav2_alarm_count:
+            return
+
+        # Streak threshold met — decide if a reset is warranted.  Three
+        # independent reasons, each with its own horizontal-displacement
+        # floor.  Order matters: the antenna-moved gate is widest and
+        # last-resort, so we check wrong-integer first.
+        wrong_integer_gate = (n_nl_fixed > 0 and disp_h >= 10.0)
+        antenna_moved_gate = (disp_h >= 20.0)   # huge horizontal move
+
+        if not (wrong_integer_gate or antenna_moved_gate):
+            if n_nl_fixed == 0:
+                why = "float (NL=0), waiting for convergence"
+            else:
+                why = f"{n_nl_fixed} NL fixes active, horiz {disp_h:.1f}m < 10m"
+            log.info(
+                "NAV2 horizontal tension %.1f but %s — position trusted "
+                "over NAV2",
+                tension, why)
+            self._nav2_tension_streak = 0
+            return
+
+        # Reset path — preserve altitude (keep filter's, not NAV2's).
+        _, _, alt_ppp = ecef_to_lla(
+            pos_ecef[0], pos_ecef[1], pos_ecef[2])
+        nav2_lat = opinion['lat']
+        nav2_lon = opinion['lon']
+        reset_ecef = np.array(
+            lla_to_ecef(nav2_lat, nav2_lon, alt_ppp), dtype=float)
+
+        cause = "wrong integer" if wrong_integer_gate else "antenna moved"
+        log.warning(
+            "NAV2 RESET (%s): AntPosEst horizontal offset %.1fm from "
+            "NAV2 (%.6f,%.6f) for %d consecutive checks. Unfixing all "
+            "NL; reseeding filter to NAV2 lat/lon at PPP altitude %.1fm "
+            "(preserving vertical).",
+            cause, disp_h, nav2_lat, nav2_lon,
+            self._nav2_tension_streak, alt_ppp,
+        )
+
+        for sv in list(nl._fixed.keys()):
+            nl.unfix(sv)
+        filt.initialize(reset_ecef, 0.0, systems=self._systems)
+        self._prev_t = None
+        self._best_sigma = 999.0
+        self._nav2_tension_streak = 0
+        # Cooldown: let the filter converge before checking again.
+        # 120 epochs ≈ 2 min — enough for float to settle and WL
+        # to re-accumulate before comparing against NAV2.
+        self._nav2_cooldown_until = self._n_epochs + 120
+        log.info("NAV2 check cooldown until epoch %d",
+                 self._nav2_cooldown_until)
+        if self._ape_sm.state == AntPosEstState.RESOLVED:
+            self._ape_sm.transition(
+                AntPosEstState.CONVERGING,
+                f"NAV2 {cause} (horiz={disp_h:.0f}m)",
+            )
 
     def _apply_pfr_action(self, filt, mw, nl, action):
         """Execute a PostFixResidualMonitor escalation step.
