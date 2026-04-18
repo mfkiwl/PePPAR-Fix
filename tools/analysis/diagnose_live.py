@@ -64,8 +64,9 @@ def main():
     print("Waiting for serial observations (5s)...")
     time.sleep(5)
 
-    # Known position
-    known_ecef = lla_to_ecef(41.8430626, -88.1037190, 201.671)
+    # Known position — loaded from env/timelab, never hardcoded.
+    from peppar_fix.lab_position import load_lab_position
+    known_ecef = lla_to_ecef(*load_lab_position())
 
     # Grab 3 epochs
     for epoch_n in range(3):

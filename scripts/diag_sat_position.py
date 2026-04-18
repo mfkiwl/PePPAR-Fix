@@ -18,7 +18,7 @@ sat_clock().
 
 Usage:
     python diag_sat_position.py --serial /dev/gnss-top --baud 9600 \
-        --known-pos "41.8430560,-88.1037140,201.671" \
+        --known-pos "LAT,LON,ALT" \
         --ntrip-conf ntrip.conf --eph-mount BCEP00BKG0
 
 Runs on a lab host with access to the GNSS receiver and NTRIP.
@@ -103,7 +103,6 @@ def run_diagnostic(args):
     user = ntrip_cfg.get(section, 'user', fallback='')
     passwd = ntrip_cfg.get(section, 'password', fallback='')
 
-    from pyrtcm import RTCMReader
     import serial as pyserial
 
     eph_stream = NtripStream(caster, port, args.eph_mount, user, passwd, tls=(port == 443))
@@ -114,20 +113,15 @@ def run_diagnostic(args):
     log.info("Collecting broadcast ephemeris (15s)...")
     deadline = time.monotonic() + 15
     eph_count = 0
-    while time.monotonic() < deadline:
-        data = eph_stream.read(4096, timeout=2.0)
-        if not data:
-            continue
-        try:
-            for msg in RTCMReader.parse(data):
-                if hasattr(msg, 'identity'):
-                    mt = msg.identity.split('(')[0].strip()
-                    if mt in ('1019', '1042', '1045', '1046'):
-                        beph.update_from_rtcm(msg)
-                        eph_count += 1
-        except Exception:
-            pass
-    eph_stream.close()
+    for msg in eph_stream.messages():
+        if time.monotonic() > deadline:
+            break
+        if hasattr(msg, 'identity'):
+            mt = msg.identity.split('(')[0].strip()
+            if mt in ('1019', '1042', '1045', '1046'):
+                beph.update_from_rtcm(msg)
+                eph_count += 1
+    eph_stream.disconnect()
     log.info("Collected %d ephemeris messages: %s", eph_count, beph.summary())
 
     # Open GNSS receiver and get one RAWX epoch
@@ -169,8 +163,8 @@ def run_diagnostic(args):
     log.info("RAWX epoch: week=%d tow=%.3f (%s UTC) leapS=%d numMeas=%d",
              week, gps_tow, t_rx.strftime('%H:%M:%S'), leapS, numMeas)
 
-    # Collect L1 pseudoranges (single-frequency for simplicity)
-    obs = {}
+    # Collect all pseudoranges by SV and signal
+    raw_pr = defaultdict(dict)  # sv → {sig_name: pr}
     for i in range(1, numMeas + 1):
         i2 = f"{i:02d}"
         gnss_id = getattr(rawx, f'gnssId_{i2}', None)
@@ -188,13 +182,47 @@ def run_diagnostic(args):
         if sig_name is None:
             continue
 
-        # Use L1/E1 pseudoranges for this diagnostic (no IF needed)
-        if sig_name in ('GPS-L1CA', 'GAL-E1C'):
-            prefix = 'G' if gnss_id == 0 else 'E'
-            sv = f"{prefix}{int(sv_id):02d}"
-            obs[sv] = {'pr': pr, 'sig': sig_name, 'cno': cno}
+        prefix = 'G' if gnss_id == 0 else 'E'
+        sv = f"{prefix}{int(sv_id):02d}"
+        raw_pr[sv][sig_name] = {'pr': pr, 'cno': cno}
+
+    # Build observation dict: L1 single-freq + IF where dual-freq available
+    # IF coefficients: P_IF = α1*P_L1 - α2*P_f2
+    ALPHA_L1_L5 = F_L1**2 / (F_L1**2 - F_L5**2)    # ≈ 2.261
+    ALPHA_L5    = F_L5**2 / (F_L1**2 - F_L5**2)     # ≈ 1.261
+    ALPHA_L1_L2 = F_L1**2 / (F_L1**2 - F_L2**2)     # ≈ 2.546
+    ALPHA_L2x   = F_L2**2 / (F_L1**2 - F_L2**2)     # ≈ 1.546
+
+    obs = {}
+    for sv, sigs in raw_pr.items():
+        # L1 pseudorange
+        l1_sig = 'GPS-L1CA' if sv[0] == 'G' else 'GAL-E1C'
+        if l1_sig not in sigs:
+            continue
+        pr_l1 = sigs[l1_sig]['pr']
+        cno = sigs[l1_sig]['cno']
+
+        # Try to form IF combination
+        pr_if = None
+        if_type = None
+        if sv[0] == 'G':
+            if 'GPS-L5Q' in sigs:
+                pr_if = ALPHA_L1_L5 * pr_l1 - ALPHA_L5 * sigs['GPS-L5Q']['pr']
+                if_type = 'L1/L5'
+            elif 'GPS-L2CL' in sigs:
+                pr_if = ALPHA_L1_L2 * pr_l1 - ALPHA_L2x * sigs['GPS-L2CL']['pr']
+                if_type = 'L1/L2'
+        elif sv[0] == 'E':
+            if 'GAL-E5aQ' in sigs:
+                pr_if = ALPHA_L1_L5 * pr_l1 - ALPHA_L5 * sigs['GAL-E5aQ']['pr']
+                if_type = 'E1/E5a'
+
+        obs[sv] = {'pr': pr_l1, 'sig': l1_sig, 'cno': cno,
+                   'pr_if': pr_if, 'if_type': if_type}
 
     log.info("L1 pseudoranges: %d SVs: %s", len(obs), ' '.join(sorted(obs.keys())))
+    n_if = sum(1 for o in obs.values() if o['pr_if'] is not None)
+    log.info("IF pseudoranges: %d SVs", n_if)
 
     if len(obs) < 4:
         log.error("Not enough observations")
@@ -203,7 +231,15 @@ def run_diagnostic(args):
     # Compute satellite positions and expected pseudoranges
     results = []
     for sv, o in sorted(obs.items()):
-        pos, clk = beph.sat_position(sv, t_rx)
+        # Compute satellite position at TRANSMISSION time, not reception time.
+        # Signal travel time ≈ pseudorange / C ≈ 77 ms.  In that time the
+        # satellite moves ~300m along its orbit.  Computing at t_rx instead
+        # of t_tx introduces a per-satellite range error that depends on
+        # radial velocity (±800 m/s → ±62m range error), creating the
+        # observed 50-100m pseudorange residual spread.
+        tau_approx = o['pr'] / C  # approximate signal travel time
+        t_tx = t_rx - timedelta(seconds=tau_approx)
+        pos, clk = beph.sat_position(sv, t_tx)
         if pos is None:
             log.warning("%s: no ephemeris", sv)
             continue
@@ -239,6 +275,8 @@ def run_diagnostic(args):
             'clk_m': clk * C, 'elev': elev, 'tropo': tropo,
             'cno': o['cno'],
             'sat_ecef': sat_rot,
+            'pr_if': o.get('pr_if'),
+            'if_type': o.get('if_type'),
         })
 
     if not results:
@@ -248,9 +286,17 @@ def run_diagnostic(args):
     # Remove mean residual (= receiver clock + constant biases)
     residuals = [r['residual'] for r in results]
     mean_res = sum(residuals) / len(residuals)
+
+    # Also compute IF residuals for dual-freq satellites
+    if_results = []
+    for r in results:
+        if r.get('pr_if') is not None:
+            if_res = r['pr_if'] - r['expected']
+            if_results.append({**r, 'if_residual': if_res})
+
     log.info("")
     log.info("=" * 80)
-    log.info("SATELLITE POSITION DIAGNOSTIC")
+    log.info("SATELLITE POSITION DIAGNOSTIC (L1 single-frequency)")
     log.info("=" * 80)
     log.info("Mean residual (≈ receiver clock): %.3f m (%.3f ns)",
              mean_res, mean_res / C * 1e9)
@@ -283,20 +329,41 @@ def run_diagnostic(args):
 
     devs = [r['residual'] - mean_res for r in results]
     log.info("-" * 80)
-    log.info("Deviation stats: min=%.1f max=%.1f spread=%.1f RMS=%.1f m",
+    log.info("L1 deviation stats: min=%.1f max=%.1f spread=%.1f RMS=%.1f m",
              min(devs), max(devs), max(devs)-min(devs),
              math.sqrt(sum(d*d for d in devs) / len(devs)))
-    log.info("")
 
-    spread = max(devs) - min(devs)
-    if spread > 50:
-        log.warning("LARGE per-satellite spread (%.0fm) — likely satellite "
-                    "position or clock computation error", spread)
-    elif spread > 15:
-        log.info("Moderate per-satellite spread (%.0fm) — could be "
-                 "code multipath or marginal orbit accuracy", spread)
-    else:
-        log.info("Per-satellite spread (%.0fm) looks healthy", spread)
+    # IF combination residuals — ionosphere removed
+    if if_results:
+        if_mean = sum(r['if_residual'] for r in if_results) / len(if_results)
+        log.info("")
+        log.info("=" * 80)
+        log.info("IF COMBINATION RESIDUALS (iono-free)")
+        log.info("=" * 80)
+        log.info("Mean IF residual (≈ receiver clock): %.3f m", if_mean)
+        log.info("")
+        log.info("%-5s %8s %7s %12s %8s %s" % (
+            "SV", "elev", "C/N0", "IF_residual", "IF_dev", "IF_type"))
+        log.info("-" * 70)
+        for r in sorted(if_results, key=lambda x: x['sv']):
+            if_dev = r['if_residual'] - if_mean
+            log.info("%-5s %7.1f° %5.1f  %+12.1f %+8.1f  %s",
+                     r['sv'], r['elev'], r['cno'],
+                     r['if_residual'], if_dev, r.get('if_type', '?'))
+        if_devs = [r['if_residual'] - if_mean for r in if_results]
+        log.info("-" * 70)
+        log.info("IF deviation stats: min=%.1f max=%.1f spread=%.1f RMS=%.1f m",
+                 min(if_devs), max(if_devs), max(if_devs)-min(if_devs),
+                 math.sqrt(sum(d*d for d in if_devs) / len(if_devs)))
+
+        if_spread = max(if_devs) - min(if_devs)
+        if if_spread > 50:
+            log.warning("LARGE IF spread (%.0fm) — satellite position or "
+                        "clock computation error (NOT ionosphere)", if_spread)
+        elif if_spread > 15:
+            log.info("Moderate IF spread (%.0fm) — code noise + orbit error", if_spread)
+        else:
+            log.info("IF spread (%.0fm) looks healthy", if_spread)
 
     # Also print raw satellite positions for manual cross-check
     log.info("")

@@ -17,7 +17,7 @@ Architecture:
 
 Usage:
     python realtime_ppp.py --serial /dev/gnss-bot --baud 115200 \\
-        --known-pos "41.8430626,-88.1037190,201.671" \\
+        --known-pos "LAT,LON,ALT" \\
         --caster products.igs-ip.net --port 2101 \\
         --eph-mount BCEP00BKG0 --ssr-mount SSRA00CNE0 \\
         --user myuser --password mypass \\
@@ -25,7 +25,7 @@ Usage:
 
     # Ephemeris-only mode (no SSR, broadcast-quality corrections):
     python realtime_ppp.py --serial /dev/gnss-bot --baud 115200 \\
-        --known-pos "41.8430626,-88.1037190,201.671" \\
+        --known-pos "LAT,LON,ALT" \\
         --caster products.igs-ip.net --port 2101 \\
         --eph-mount BCEP00BKG0 \\
         --duration 3600
@@ -34,7 +34,7 @@ Usage:
     python realtime_ppp.py --replay data/rawx_1h_top_20260303.csv \\
         --sp3 data/gfz_mgx_062.sp3 --clk data/GFZ0MGXRAP_062_30S.CLK \\
         --osb data/GFZ0MGXRAP_062_OSB.BIA \\
-        --known-pos "41.8430626,-88.1037190,201.671"
+        --known-pos "LAT,LON,ALT"
 """
 
 import argparse
@@ -1226,7 +1226,7 @@ def main():
 
     # Position
     ap.add_argument("--known-pos", required=True,
-                    help="Known position as lat,lon,alt (e.g. '41.843,-88.104,201.7')")
+                    help="Known position as lat,lon,alt (e.g. 'LAT,LON,ALT' — decimal degrees and meters)")
     ap.add_argument("--leap", type=int, default=18,
                     help="UTC-GPS leap seconds (default: 18)")
     ap.add_argument("--systems", default="gps,gal,bds",

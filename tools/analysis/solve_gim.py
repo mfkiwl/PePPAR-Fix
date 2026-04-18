@@ -20,7 +20,7 @@ State vector (EKF):
 Usage:
     python solve_gim.py data/rawx_1h_top_20260303.csv data/gfz_mgx_062.sp3 \\
         data/COD0OPSRAP_062.INX \\
-        --known-pos "41.8430626,-88.1037190,201.671" --out data/pos_gim.csv
+        --known-pos "LAT,LON,ALT" --out data/pos_gim.csv
 """
 
 import argparse

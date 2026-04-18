@@ -29,8 +29,8 @@ Port defaults to 2102.
 | `mount` | `PEPPAR` | Mountpoint name |
 | `systems` | `gps,gal,bds` | GNSS constellations available |
 | `format` | `rtcm3-msm4` | Correction format |
-| `lat` | `41.843` | Approximate station latitude (for proximity selection) |
-| `lon` | `-88.104` | Approximate station longitude |
+| `lat` | `LAT` | Approximate station latitude, decimal degrees (for proximity selection) |
+| `lon` | `LON` | Approximate station longitude, decimal degrees |
 | `accuracy` | `0.03` | Position sigma in meters (lower = more converged) |
 | `station_id` | `0` | RTCM station ID |
 | `version` | `peppar-fix/0.1` | Software identifier |

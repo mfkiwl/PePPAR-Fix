@@ -515,9 +515,13 @@ The `timelab/` directory at the town root has authoritative lab state:
 | `timelab/calibration.md` | TICC calibration procedures |
 | `timelab/99-timelab.rules` | Universal udev rules (deployed to all Pis) |
 | `timelab/scripts/` | Lab utility scripts (ticc_read.py, calibration_capture.py, etc.) |
+| `timelab/antPos.json` | Surveyed antenna positions (UFO1 and any others).  Gitignored at both ends — coords stay out of the public PePPAR-Fix repo.  Read this when you need the lab ARP (e.g., to seed `--known-pos` for a dev/test run, or to validate a cold-start convergence against a reference). |
 
 If you need to know what's physically connected where, start with
 `topology.md`. If you need device specs, start with `gear.md`.
+Operational positions are **not** hardcoded in PePPAR-Fix — they're
+loaded from `state/receivers/<uid>.json` at runtime (written by
+Phase 1 bootstrap) and verified against `timelab/antPos.json`.
 
 ## Acceptance Criteria for Beads
 

@@ -56,10 +56,10 @@ PX1125T) cannot be auto-indexed and must be manually labeled.
     "updated": "2026-04-14T01:22:00Z"
   },
   "last_known_position": {
-    "lat": 41.8430626,
-    "lon": -88.103719,
-    "alt_m": 201.671,
-    "ecef_m": [157469.988, -4756189.199, 4232768.421],
+    "lat": "LAT",
+    "lon": "LON",
+    "alt_m": "ALT",
+    "ecef_m": ["ECEF_X", "ECEF_Y", "ECEF_Z"],
     "sigma_m": 0.020,
     "updated": "2026-04-14T01:22:00Z",
     "source": "ppp_bootstrap"

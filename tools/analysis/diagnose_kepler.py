@@ -40,7 +40,8 @@ def main():
     t1.start()
     time.sleep(15)
 
-    known = lla_to_ecef(41.8430626, -88.1037190, 201.671)
+    from peppar_fix.lab_position import load_lab_position
+    known = lla_to_ecef(*load_lab_position())
     now = datetime.now(timezone.utc)
     week, sow = beph._gps_seconds_of_week(now)
 

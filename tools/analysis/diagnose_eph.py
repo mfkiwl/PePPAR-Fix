@@ -45,7 +45,8 @@ def main():
     print(f"GPS week: {week}, SOW: {sow:.3f}")
     print()
 
-    known = lla_to_ecef(41.8430626, -88.1037190, 201.671)
+    from peppar_fix.lab_position import load_lab_position
+    known = lla_to_ecef(*load_lab_position())
 
     for sv in ['G01', 'G06', 'G11', 'G19', 'E30', 'C21']:
         eph = beph._ephs.get(sv)

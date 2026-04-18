@@ -354,7 +354,7 @@ source venv/bin/activate
 # 2. Real-time mode (live F9T + NTRIP corrections):
 python scripts/realtime_ppp.py \
     --serial /dev/gnss-top --baud 9600 \
-    --known-pos "41.8430626,-88.1037190,201.671" \
+    --known-pos "LAT,LON,ALT" \
     --ntrip-conf ntrip.conf --eph-mount BCEP00BKG0 \
     --systems gps,gal --duration 3600 --out data/realtime_1h.csv
 
@@ -364,7 +364,7 @@ python scripts/realtime_ppp.py \
     --sp3 data/gfz_mgx_062.sp3 \
     --clk data/GFZ0MGXRAP_062_30S.CLK \
     --osb data/GFZ0MGXRAP_062_OSB.BIA \
-    --known-pos "41.8430626,-88.1037190,201.671" \
+    --known-pos "LAT,LON,ALT" \
     --systems gal --out data/replay_test.csv
 ```
 
@@ -381,7 +381,7 @@ python scripts/configure_f9t.py /dev/gnss-top --port-type USB
 sudo chmod 666 /dev/ptp0   # or add udev rule for ptp group
 python scripts/phc_servo.py \
     --serial /dev/gnss-top --baud 9600 \
-    --known-pos "41.8430626,-88.1037190,201.671" \
+    --known-pos "LAT,LON,ALT" \
     --ntrip-conf ntrip.conf --eph-mount BCEP00BKG0 \
     --ptp-dev /dev/ptp0 --extts-pin 1 \
     --systems gps,gal --duration 3600 \

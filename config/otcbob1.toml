@@ -7,5 +7,8 @@ ptp_profile = "otcBob1"
 ptp_dev = "/dev/ptp0"
 ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
-known_pos = "41.8430626,-88.1037190,201.671"
+# known_pos is NOT committed.  Position is loaded from
+# state/receivers/<uid>.json at runtime (written by Phase 1 bootstrap
+# or the --known-pos CLI flag on first run).  See timelab/antPos.json
+# for authoritative lab ARP references.
 systems = "gps,gal"

@@ -24,7 +24,7 @@ def main():
     ap.add_argument("--serial", required=True, help="F9T serial port")
     ap.add_argument("--baud", type=int, default=9600)
     ap.add_argument("--duration", type=int, default=60)
-    ap.add_argument("--known-pos", default="41.8430626,-88.1037190,201.671")
+    ap.add_argument("--known-pos", default="LAT,LON,ALT")
     ap.add_argument("--ntrip-conf", default=None)
     ap.add_argument("--caster", default="ntrip.data.gnss.ga.gov.au")
     ap.add_argument("--port", type=int, default=443)

@@ -16,7 +16,7 @@ at the cost of amplified noise (~3x for L1+L5).
 Usage:
     python solve_dualfreq.py data/rawx_1h_top_20260303.csv data/igs_rap_062.sp3
     python solve_dualfreq.py data/rawx_1h_top_20260303.csv data/igs_rap_062.sp3 \
-        --known-pos "41.8430626,-88.1037190,201.671" --out data/pos_if.csv
+        --known-pos "LAT,LON,ALT" --out data/pos_if.csv
 """
 
 import argparse

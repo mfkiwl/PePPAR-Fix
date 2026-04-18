@@ -25,10 +25,9 @@ ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
 ssr_mount = "SSRA01CAS1"
 
-# Approximate antenna position from a live LS fix on 2026-04-08 after
-# the antenna was recabled.  Refine to a converged PPP fix once the
-# bring-up is fully verified — the engine will save the refined value
-# to state/receivers/<unique_id>.json automatically.
-known_pos = "41.8437,-88.1036,141"
+# known_pos is NOT committed.  Position is loaded from
+# state/receivers/<uid>.json at runtime (written by Phase 1 bootstrap
+# or the --known-pos CLI flag on first run).  See timelab/antPos.json
+# for authoritative lab ARP references.
 
 systems = "gps,gal"

@@ -7,9 +7,20 @@ data/
 state/**/*.json
 state/**/*.tmp
 
-# Credentials
-ntrip.conf
+# Credentials — any ntrip*.conf variant (ntrip-cnes.conf,
+# ntrip-whu.conf, …) is gitignored; the *.example templates are
+# re-included explicitly.
+ntrip*.conf
+!ntrip*.conf.example
 *.secrets
+
+# Antenna positions — never commit surveyed coords.  Authoritative
+# positions live in the (private) timelab repo at timelab/antPos.json;
+# runtime positions live in state/receivers/<uid>.json (covered
+# above).  This belt-and-suspenders entry catches antPos.json if it
+# ever ends up inside this tree by accident.
+antPos.json
+*-pos.json
 
 # Python
 __pycache__/

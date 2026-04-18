@@ -77,7 +77,7 @@ GNSS receiver requirements:
 
 Usage:
     python phc_servo.py --serial /dev/gnss-top --baud 9600 \\
-        --known-pos '41.8430626,-88.1037190,201.671' \\
+        --known-pos 'LAT,LON,ALT' \\
         --ntrip-conf ntrip.conf --eph-mount BCEP00BKG0 --ssr-mount SSRA00BKG0 \\
         --systems gps,gal --duration 3600 \\
         --ptp-dev /dev/ptp0 --extts-pin 1 \\
@@ -85,7 +85,7 @@ Usage:
 
     # Without NTRIP (broadcast ephemeris only, ~25m RMS floor):
     python phc_servo.py --serial /dev/gnss-top --baud 9600 \\
-        --known-pos '41.8430626,-88.1037190,201.671' \\
+        --known-pos 'LAT,LON,ALT' \\
         --caster products.igs-ip.net --port 2101 \\
         --eph-mount BCEP00BKG0 \\
         --systems gps,gal --duration 3600 \\

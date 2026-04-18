@@ -15,7 +15,7 @@ BDS-2 GEO/IGSO satellites (PRN < 19) are excluded due to poor SP3 orbits.
 
 Usage:
     python solve_ppp.py data/rawx_1h_top_20260303.csv data/gfz_mgx_062.sp3 \\
-        --known-pos "41.8430626,-88.1037190,201.671" --out data/pos_ppp_mgx.csv
+        --known-pos "LAT,LON,ALT" --out data/pos_ppp_mgx.csv
 """
 
 import argparse

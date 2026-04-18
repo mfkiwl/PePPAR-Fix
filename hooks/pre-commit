@@ -1,41 +1,68 @@
 #!/bin/bash
-# Pre-commit hook: reject commits containing likely credentials.
+# Pre-commit hook: reject commits containing likely secrets.
 #
 # Install: cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 # Or:      cd .git/hooks && ln -sf ../../hooks/pre-commit
 
 set -euo pipefail
 
-# Patterns that should never appear in committed files.
-# Each is a grep -E regex tested against staged file content.
+# Two classes of secret we defend against:
+#
+#   1. Caster credentials — passwords live in gitignored ntrip*.conf
+#      on each lab host, never in the tree.
+#
+#   2. Surveyed antenna positions — coordinates identify a physical
+#      location we'd rather not publish.  Authoritative positions
+#      live in the (private) timelab repo at timelab/antPos.json;
+#      runtime positions live in state/receivers/<uid>.json.  In
+#      committed documentation, use the placeholders LAT/LON/ALT.
+#
+# Coordinate patterns are deliberately context-gated (require a
+# config key or CLI flag nearby) so ordinary floats don't false-
+# positive.  Literal lab coordinates are also listed because the
+# cost of a false positive on those strings is effectively zero.
 PATTERNS=(
-    'password\s*=\s*[A-Za-z0-9!@#$%^&*]{6,}'   # password = <real value>
-    'maHxyc'                                      # known NTRIP password
+    'password\s*=\s*[A-Za-z0-9!@#$%^&*]{6,}'              # password = <real value>
+    'maHxyc'                                               # known NTRIP password
+    '--known-pos[= ]+["'"'"']?-?[0-9]+\.[0-9]{3,}'         # --known-pos 41.843...
+    'known_pos\s*=\s*["'"'"'][^"'"'"']*[0-9]+\.[0-9]{3,}'  # known_pos = "41.843,..."
+    '41\.843[0-9]'                                         # literal UFO1 latitude
+    '-88\.10[23][0-9]'                                     # literal UFO1 longitude
+    '201\.671'                                             # literal UFO1 altitude
 )
 
-# Files exempt from scanning (templates, docs about credential handling).
-EXEMPT='ntrip.conf.example|hooks/pre-commit'
+# Files exempt from scanning (matched against path).  Templates and
+# this hook itself document the patterns they guard against.
+EXEMPT_FILES='^ntrip[^/]*\.conf\.example$|^hooks/pre-commit$|^\.git/hooks/pre-commit$'
 
 FOUND=0
-for pattern in "${PATTERNS[@]}"; do
-    # Scan only staged (added/modified) file content
-    matches=$(git diff --cached --diff-filter=ACMR -U0 \
-        | grep -E "^\+" \
-        | grep -v "^+++" \
-        | grep -Ev "$EXEMPT" \
-        | grep -Ei "$pattern" || true)
-    if [[ -n "$matches" ]]; then
-        echo "ERROR: Credential pattern detected in staged changes:"
-        echo "  Pattern: $pattern"
-        echo "$matches" | head -5 | sed 's/^/  /'
-        FOUND=1
+# Iterate per-file so the EXEMPT regex applies to paths, not content.
+while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    if echo "$file" | grep -Eq -- "$EXEMPT_FILES"; then
+        continue
     fi
-done
+    file_diff=$(git diff --cached --diff-filter=ACMR -U0 -- "$file" \
+        | grep -E -- "^\+" \
+        | grep -v -- "^+++" || true)
+    for pattern in "${PATTERNS[@]}"; do
+        matches=$(echo "$file_diff" | grep -Ei -- "$pattern" || true)
+        if [[ -n "$matches" ]]; then
+            echo "ERROR: Secret pattern in $file:"
+            echo "  Pattern: $pattern"
+            echo "$matches" | head -5 | sed 's/^/  /'
+            FOUND=1
+        fi
+    done
+done < <(git diff --cached --name-only --diff-filter=ACMR)
 
 if [[ $FOUND -eq 1 ]]; then
     echo ""
-    echo "Credentials must not be committed to the repo."
-    echo "Store them in ntrip.conf (gitignored) or deploy via scp."
+    echo "Credentials must not be committed (store in ntrip*.conf,"
+    echo "gitignored, distribute via scp)."
+    echo "Antenna coordinates must not be committed (keep in"
+    echo "timelab/antPos.json or state/receivers/<uid>.json, both"
+    echo "gitignored; use LAT/LON/ALT placeholders in docs)."
     echo "To bypass (if this is a false positive): git commit --no-verify"
     exit 1
 fi
