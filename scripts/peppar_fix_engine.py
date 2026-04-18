@@ -44,7 +44,10 @@ from datetime import datetime, timezone, timedelta
 import numpy as np
 
 from solve_pseudorange import C, ecef_to_lla, lla_to_ecef
-from solve_ppp import PPPFilter, FixedPosFilter, ls_init
+from solve_ppp import PPPFilter, FixedPosFilter, ls_init, N_BASE, SIGMA_P_IF
+from peppar_fix.bootstrap_gate import (
+    residuals_consistent, nav2_agrees, scrub_for_retry,
+)
 from broadcast_eph import BroadcastEphemeris
 from ssr_corrections import SSRState, RealtimeCorrections
 from ppp_ar import MelbourneWubbenaTracker, NarrowLaneResolver
@@ -834,7 +837,8 @@ def wait_for_ephemeris(beph, stop_event, systems=None, timeout_s=120):
 
 # ── Phase 1: Bootstrap ─────────────────────────────────────────────────── #
 
-def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
+def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
+                  nav2_store=None):
     """Run PPPFilter to estimate position from scratch.
 
     Returns:
@@ -866,6 +870,11 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
     n_empty = 0
     converged_at = None
     start_time = time.time()
+    # W1/W2/W3: retry accounting for the convergence gate.  Each abort
+    # (residual inconsistency or NAV2 horizontal mismatch) triggers a
+    # scrub and the filter tries again.  Bounded by --bootstrap-max-retries.
+    gate_retries = 0
+    last_gate_reason = None
 
     while not stop_event.is_set():
         elapsed = time.time() - start_time
@@ -1052,7 +1061,11 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
                             log.info(f"      {sv}: N1_frac={frac:+.3f} "
                                      f"σ_N1={sigma:.3f} {tag}")
 
-        # Convergence check
+        # Convergence check — σ and pos_stable are necessary but not
+        # sufficient.  Before declaring CONVERGED we also require the
+        # residual distribution to match our noise model (W1) and NAV2
+        # to agree horizontally (W2) — see
+        # docs/position-bootstrap-reliability-plan.md.
         pos_stable = True
         if prev_pos_ecef is not None:
             pos_delta = np.linalg.norm(pos_ecef - prev_pos_ecef)
@@ -1063,16 +1076,74 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
             if converged_at is None:
                 converged_at = n_epochs
             if n_epochs - converged_at >= 30:
-                log.info(f"CONVERGED at epoch {n_epochs} "
-                         f"(σ={sigma_3d:.4f}m, rms={rms:.3f}m)")
-                run_bootstrap.last_correction_gate_stats = correction_gate.stats.as_dict()
-                return BootstrapResult(
-                    ecef=pos_ecef,
-                    sigma_m=float(sigma_3d),
-                    ppp_filter=filt,
-                    mw_tracker=mw_tracker,
-                    nl_resolver=nl_resolver,
-                )
+                # W1: residual-consistency gate.
+                w1_ok, w1 = residuals_consistent(
+                    filt, resid, SIGMA_P_IF,
+                    pr_rms_k=args.bootstrap_rms_k)
+                # W2: NAV2 horizontal cross-check.  Disabled when
+                # --bootstrap-nav2-horiz-m is ≤ 0.
+                nav2_opinion = None
+                if (nav2_store is not None
+                        and args.bootstrap_nav2_horiz_m > 0):
+                    nav2_opinion = nav2_store.get_opinion(max_age_s=30.0)
+                w2_ok, w2 = nav2_agrees(
+                    pos_ecef, nav2_opinion,
+                    horiz_m=args.bootstrap_nav2_horiz_m)
+
+                if w1_ok and w2_ok:
+                    log.info(
+                        "CONVERGED at epoch %d (σ=%.4fm, rms=%.3fm, "
+                        "pr_rms=%.2fm max=%.2fm, nav2_h=%.1fm%s, "
+                        "retries=%d)",
+                        n_epochs, sigma_3d, rms,
+                        w1['rms_pr'], w1['max_pr'],
+                        w2['disp_h_m'],
+                        "" if w2['available'] else " (no NAV2)",
+                        gate_retries,
+                    )
+                    run_bootstrap.last_correction_gate_stats = \
+                        correction_gate.stats.as_dict()
+                    return BootstrapResult(
+                        ecef=pos_ecef,
+                        sigma_m=float(sigma_3d),
+                        ppp_filter=filt,
+                        mw_tracker=mw_tracker,
+                        nl_resolver=nl_resolver,
+                    )
+
+                # One of the extra gates rejected this candidate.
+                reasons = [d['reason'] for d, ok in
+                           ((w1, w1_ok), (w2, w2_ok)) if not ok]
+                last_gate_reason = "; ".join(reasons)
+                if gate_retries >= args.bootstrap_max_retries:
+                    log.error(
+                        "Phase-1 gate aborted after %d retries; giving "
+                        "up. Last reasons: %s",
+                        gate_retries, last_gate_reason)
+                    run_bootstrap.last_correction_gate_stats = \
+                        correction_gate.stats.as_dict()
+                    return None
+
+                # W3: scrub and retry.  Reseed from NAV2 if available
+                # (we know PPP is horizontally off, NAV2 is coarser but
+                # independent); otherwise keep position but inflate
+                # covariance so observations pull it.
+                reseed = None
+                if (not w2_ok) and nav2_opinion is not None:
+                    reseed = nav2_opinion['ecef']
+                log.warning(
+                    "Phase-1 gate REJECTED convergence candidate at "
+                    "epoch %d: %s — scrubbing and retrying (attempt %d/%d)",
+                    n_epochs, last_gate_reason,
+                    gate_retries + 1, args.bootstrap_max_retries)
+                scrub_for_retry(filt, N_BASE, reseed_ecef=reseed)
+                # Also reset the AR state — NL fixes built on the
+                # rejected position must not carry over.
+                for sv in list(nl_resolver._fixed.keys()):
+                    nl_resolver.unfix(sv)
+                converged_at = None
+                prev_pos_ecef = None
+                gate_retries += 1
         else:
             converged_at = None
 
@@ -4864,7 +4935,7 @@ def run(args):
         if known_ecef is None:
             # Phase 1: Bootstrap
             result = run_bootstrap(args, obs_queue, corrections, stop_event,
-                                   out_w=out_w)
+                                   out_w=out_w, nav2_store=nav2_store)
             if result is None:
                 log.error("Bootstrap failed — no converged position")
                 return 1
@@ -5156,8 +5227,22 @@ Two-phase operation:
                      help="Known position as lat,lon,alt (skips bootstrap)")
     pos.add_argument("--seed-pos",
                      help="Seed position for bootstrap (speeds convergence)")
-    pos.add_argument("--sigma", type=float, default=0.1,
-                     help="Bootstrap convergence threshold in meters (default: 0.1)")
+    pos.add_argument("--sigma", type=float, default=0.02,
+                     help="Bootstrap convergence threshold in meters (default: "
+                          "0.02 — tight enough to push into the regime where "
+                          "carrier-phase ambiguities force the right geometry)")
+    pos.add_argument("--bootstrap-nav2-horiz-m", type=float, default=5.0,
+                     help="Phase-1 convergence aborts if NAV2 horizontal "
+                          "disagreement exceeds this, even when the EKF "
+                          "reports σ < --sigma.  Set to 0 to disable the "
+                          "NAV2 cross-check (not recommended).")
+    pos.add_argument("--bootstrap-rms-k", type=float, default=2.0,
+                     help="Phase-1 convergence requires PR-residual RMS < "
+                          "k × SIGMA_P_IF.  Catches locally-consistent but "
+                          "wrong states where outliers have been downweighted.")
+    pos.add_argument("--bootstrap-max-retries", type=int, default=3,
+                     help="On W1 or W2 abort, scrub the filter and retry this "
+                          "many times before giving up.  Default 3.")
     pos.add_argument("--timeout", type=int, default=3600,
                      help="Bootstrap timeout in seconds (default: 3600)")
     pos.add_argument("--watchdog-threshold", type=float, default=0.5,

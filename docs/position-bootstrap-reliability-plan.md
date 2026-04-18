@@ -1,7 +1,8 @@
 # Position Bootstrap Reliability — Implementation Plan
 
 **Date**: 2026-04-18
-**Status**: Proposed
+**Status**: W1–W4 implemented; W5 partial (save/load exists, NAV2
+startup cross-check outstanding); W6 deferred.
 **Prerequisite**: None — parallel to post-bootstrap (steady-state) work
 **Related**: `project_phase1_convergence_threshold` (memory),
 `docs/position-convergence.md` (theory),
@@ -48,7 +49,7 @@ of the EKF alone is not enough.
 
 ## Proposed work (parallel to steady-state work, gated only on lab access)
 
-### W1. Residual-consistency check in convergence gate
+### W1. Residual-consistency check in convergence gate — DONE
 
 **Problem**: `σ_3d < 0.1 m` by itself is a state-covariance claim,
 not an accuracy claim.  The filter can reach that while PR residuals
@@ -74,7 +75,7 @@ least 2 of 3 land within 2 m of truth (measured against LS fit from
 the same epoch's observations, which is the independent reference
 available in cold-start mode).
 
-### W2. NAV2 cross-check at convergence gate
+### W2. NAV2 cross-check at convergence gate — DONE
 
 **Problem**: even with W1, it is possible for the filter to converge
 to a locally-consistent minimum that is geometrically wrong (e.g.,
@@ -95,7 +96,7 @@ roughly the right spot on Earth?" backstop.
 **Success measure**: after W2, all three hosts land within 2 m on
 cold start, i.e., the MadHat 40 m failure mode is eliminated.
 
-### W3. Harder reset on gate abort
+### W3. Harder reset on gate abort — DONE
 
 **Problem**: if W1 or W2 aborts a convergence attempt, simply
 extending the iteration may not escape the wrong local minimum.  The
@@ -114,7 +115,7 @@ enough to break out of a locked-in wrong state.
 **Success measure**: abort-and-retry converges on the second attempt
 ≥ 90% of the time in the lab (easy to measure by forcing aborts).
 
-### W4. Tighten default `σ_target` to 0.02 m
+### W4. Tighten default `σ_target` to 0.02 m — DONE
 
 **Problem**: the current default `--sigma 0.1 m` gates convergence
 at exactly the range where self-consistency reports tightly but
@@ -135,7 +136,18 @@ preventing it.
 **Success measure**: Phase-1 TTFF on cold start stays under 20
 minutes (from the current ~10) and accuracy improves to ≤ 1 m.
 
-### W5. State persistence for warm re-start
+### W5. State persistence for warm re-start — PARTIAL
+
+Receiver-state persistence is already in place via
+`peppar_fix.receiver_state.save_position_to_receiver` /
+`load_position_detail_from_receiver`, keyed by F9T unique ID.
+With W1+W2 now gating what can be saved, the persisted position is
+now a trusted one.
+
+**Outstanding**: NAV2-signature cross-check on warm restart — if live
+NAV2 at startup disagrees with the cached position by > 5 m
+horizontal, force a Phase-1 re-run rather than trusting the cache.
+This is a follow-up commit.
 
 **Problem**: if Phase 1 completes successfully once, throwing away
 the converged state on every start is wasteful.  Every subsequent
