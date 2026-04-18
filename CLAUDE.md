@@ -477,6 +477,7 @@ here before changing anything in the areas they cover.
 | [phc-bootstrap.md](docs/phc-bootstrap.md) | PHC bootstrap design: cold/warm start, optimal stopping, glide slope, characterization method, drift file, how the servo starts with bounded error. |
 | [pps-ppp-error-source.md](docs/pps-ppp-error-source.md) | PPS+PPP servo error source: using carrier-phase dt_rx to replace TIM-TP qErr via 125 MHz tick model. Experiment results, calibration procedure, formula. |
 | [correction-sources.md](docs/correction-sources.md) | How to get SSR corrections: registration, caster options, which streams for float PPP vs PPP-AR, why AR requires a single analysis center. |
+| [ssr-mount-survey.md](docs/ssr-mount-survey.md) | F9T-focused survey of SSR mounts for PPP-AR.  Ranks WHU OSBC00WHU1, MADOCA-PPP, Galileo HAS, CAS phase-2, CNES by F9T-L5Q suitability.  Corrects our earlier "L5I bias can't be used on L5Q" premise. |
 | [galileo-has-research.md](docs/galileo-has-research.md) | Galileo HAS: free PPP-AR corrections via E6-B signal. |
 | [peer-bootstrap-sketch.md](docs/peer-bootstrap-sketch.md) | NTRIP caster mode for peer-to-peer bootstrap. |
 | [caster-ephemeris.md](docs/caster-ephemeris.md) | Spec + implementation plan: encode F9T RXM-SFRBX as RTCM 1019/1042/1046 so the local caster serves broadcast ephemeris alongside observations. Removes external NTRIP dependency for peer bootstrap. |
