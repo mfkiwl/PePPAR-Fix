@@ -1375,7 +1375,6 @@ class AntPosEstThread(threading.Thread):
     def __init__(self, known_ecef, corrections, stop_event, ape_sm,
                  bootstrap_result=None, position_callback=None,
                  resolved_decimation=10, resolve_threshold=4,
-                 resolve_exit_hysteresis=2,
                  nav2_store=None, nav2_tension_threshold=5.0,
                  nav2_alarm_count=3, systems=None):
         super().__init__(daemon=True, name="AntPosEst")
@@ -1385,17 +1384,7 @@ class AntPosEstThread(threading.Thread):
         self._ape_sm = ape_sm
         self._position_callback = position_callback
         self._resolved_decimation = resolved_decimation
-        # RESOLVED enter/exit thresholds with hysteresis.  Enter at
-        # n_nl_fixed >= resolve_threshold; exit only when it falls to
-        # resolve_threshold - resolve_exit_hysteresis OR lower.  The
-        # gap prevents flap: a single cycle-slip flush drops NL by 1,
-        # which otherwise instantly kicks the host out of RESOLVED
-        # even though the surviving fixes are still a valid
-        # cm-level solution (observed day0418e: 6–9 RESOLVED↔CONVERGING
-        # flips per host over ~5 h, virtually all from "dropped to 3").
-        self._resolve_threshold = resolve_threshold
-        self._resolve_exit_threshold = max(
-            0, resolve_threshold - resolve_exit_hysteresis)
+        self._resolve_threshold = resolve_threshold  # min NL-fixed SVs for RESOLVED
         self._nav2_store = nav2_store
         self._nav2_tension_threshold = nav2_tension_threshold
         self._nav2_alarm_count = nav2_alarm_count  # consecutive checks before reset
@@ -1638,11 +1627,8 @@ class AntPosEstThread(threading.Thread):
         self._pfr_monitor.record_action(self._n_epochs, action)
 
     def run(self):
-        log.info(
-            "AntPosEstThread started (resolved_decimation=%d, "
-            "resolve_threshold=%d enter, %d exit)",
-            self._resolved_decimation, self._resolve_threshold,
-            self._resolve_exit_threshold)
+        log.info("AntPosEstThread started (resolved_decimation=%d, resolve_threshold=%d)",
+                 self._resolved_decimation, self._resolve_threshold)
         try:
             self._run_inner()
         except Exception:
@@ -1792,7 +1778,7 @@ class AntPosEstThread(threading.Thread):
                 n_sv=len(filt.sv_to_idx),
             )
 
-            # State transitions with hysteresis on NL fix count.
+            # State transitions
             if (self._ape_sm.state == AntPosEstState.CONVERGING
                     and n_nl_fixed >= self._resolve_threshold):
                 self._ape_sm.transition(
@@ -1800,11 +1786,10 @@ class AntPosEstThread(threading.Thread):
                     f"{n_nl_fixed} NL fixed, σ={sigma_3d:.3f}m",
                 )
             elif (self._ape_sm.state == AntPosEstState.RESOLVED
-                    and n_nl_fixed <= self._resolve_exit_threshold):
+                    and n_nl_fixed < self._resolve_threshold):
                 self._ape_sm.transition(
                     AntPosEstState.CONVERGING,
-                    f"NL fixes dropped to {n_nl_fixed} "
-                    f"(≤ exit threshold {self._resolve_exit_threshold})",
+                    f"NL fixes dropped to {n_nl_fixed}",
                 )
 
             # NAV2 position sanity check (every 10 epochs ≈ 10s)
