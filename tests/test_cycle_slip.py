@@ -100,14 +100,28 @@ class TestArcGap(unittest.TestCase):
         events = mon.check([make_obs(lock_ms=11_000)], 1001.0, 1)
         self.assertEqual(events, [])
 
-    def test_multi_epoch_gap_triggers(self):
+    def test_gap_with_fresh_lock_triggers(self):
+        """SV reappears after a gap with a small locktime — the tracking
+        arc restarted, ambiguity must be flushed."""
         mon = CycleSlipMonitor()
         mon.check([make_obs(lock_ms=10_000)], 1000.0, 0)
-        # Skip two epochs — gap > ARC_GAP_MAX_S.
-        events = mon.check([make_obs(lock_ms=11_000)],
-                           1000.0 + ARC_GAP_MAX_S + 1.0, 1)
+        events = mon.check([make_obs(lock_ms=500)],
+                           1000.0 + ARC_GAP_MAX_S + 2.0, 1)
         self.assertEqual(len(events), 1)
         self.assertIn('arc_gap', events[0].reasons)
+
+    def test_gap_with_sustained_lock_no_slip(self):
+        """SV observation missing for several epochs but locktime_ms
+        shows the carrier was locked through the gap — upstream filtering
+        churn (half_cyc transient, missing SSR bias), not a real arc
+        restart.  This is the pattern seen on day0418 where 273/273
+        slips had lock_ms=64500 despite multi-second gaps."""
+        mon = CycleSlipMonitor()
+        mon.check([make_obs(lock_ms=60_000)], 1000.0, 0)
+        events = mon.check([make_obs(lock_ms=64_000)],
+                           1000.0 + ARC_GAP_MAX_S + 3.0, 1)
+        if events:
+            self.assertNotIn('arc_gap', events[0].reasons)
 
 
 class TestGeometryFreeJump(unittest.TestCase):

@@ -190,10 +190,20 @@ class CycleSlipMonitor:
                         and (prev.lock_ms - lock_ms) > LOCKTIME_DROP_MS):
                     reasons.append("ubx_locktime_drop")
 
-                # 2. Arc continuity — any gap larger than one epoch
-                #    restarts the carrier tracking arc.
+                # 2. Arc continuity — any gap larger than one epoch may
+                #    indicate a broken tracking arc.  But the receiver
+                #    can hold carrier lock through observation gaps that
+                #    happen upstream (half-cycle transients, SSR bias
+                #    lookup misses, constellation filter churn).  Only
+                #    flag when the receiver's own locktime says the arc
+                #    was actually re-acquired — i.e., current locktime
+                #    does NOT span the gap with margin.  If lock_ms
+                #    substantially exceeds gap, the SV was locked the
+                #    whole time and this is a false-positive gap.
                 if gap_s > ARC_GAP_MAX_S:
-                    reasons.append("arc_gap")
+                    gap_ms = gap_s * 1000.0
+                    if lock_ms < gap_ms + LOCKTIME_DROP_MS:
+                        reasons.append("arc_gap")
 
                 # 3. Geometry-free phase jump between consecutive epochs.
                 phi1, phi2 = obs.get('phi1_cyc'), obs.get('phi2_cyc')

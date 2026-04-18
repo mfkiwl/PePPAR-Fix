@@ -74,6 +74,27 @@ def _open_slip_csv(path):
 def _slip_csv_writer():
     """Return the slip CSV writer, or None if --slip-log was not set."""
     return _SLIP_CSV_WRITER
+
+
+def _compute_elevations_for_slip(filt, corrections, observations, gps_time):
+    """Per-SV elevation in degrees for slip-diagnostics tagging.
+
+    Returns {} if the filter has no position yet or corrections can't
+    provide satellite positions.  This is diagnostic-only — missing
+    elevations don't change detection behavior, just make log output
+    less informative.
+    """
+    if filt is None or not hasattr(filt, 'x') or len(filt.x) < 3:
+        return {}
+    pos = filt.x[:3]
+    out = {}
+    for obs in observations:
+        sv = obs['sv']
+        sat_pos, _ = corrections.sat_position(sv, gps_time)
+        if sat_pos is None:
+            continue
+        out[sv] = filt.compute_elevation(pos, sat_pos)
+    return out
 from ntrip_client import NtripStream
 from realtime_ppp import serial_reader, ntrip_reader, QErrStore, Nav2PositionStore
 from ticc import Ticc
@@ -923,17 +944,21 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None):
         # Manage ambiguities — flush per-SV phase state on any detected
         # cycle slip, retaining per-SV and shared frequency-like state.
         current_svs = {o['sv'] for o in observations}
+        elevations = _compute_elevations_for_slip(filt, corrections,
+                                                  observations, gps_time)
         slip_events = slip_monitor.check(
-            observations, gps_time.timestamp(), n_epochs)
+            observations, gps_time.timestamp(), n_epochs,
+            elevations=elevations)
         for ev in slip_events:
             flush_sv_phase(
                 ev.sv, filt=filt, mw_tracker=mw_tracker,
                 nl_resolver=nl_resolver, slip_monitor=slip_monitor,
                 reason="|".join(ev.reasons), epoch=n_epochs)
             log.info("slip: sv=%s reasons=%s conf=%s lock=%.0fms cno=%.1f"
-                     " gap=%s gf=%s mw=%s",
+                     " elev=%s gap=%s gf=%s mw=%s",
                      ev.sv, ",".join(ev.reasons), ev.confidence,
                      ev.lock_ms, ev.cno,
+                     f"{ev.elevation_deg:.0f}°" if ev.elevation_deg is not None else "?",
                      f"{ev.gap_s:.2f}s" if ev.gap_s is not None else "-",
                      f"{ev.gf_jump_m*100:.1f}cm" if ev.gf_jump_m is not None else "-",
                      f"{ev.mw_jump_cyc:.2f}c" if ev.mw_jump_cyc is not None else "-")
@@ -1572,8 +1597,11 @@ class AntPosEstThread(threading.Thread):
             # detected slip.  Shared clock/ISB/ZTD and receiver TCXO
             # state are intentionally untouched.
             current_svs = {o['sv'] for o in observations}
+            elevations = _compute_elevations_for_slip(
+                filt, corrections, observations, gps_time)
             slip_events = self._slip_monitor.check(
-                observations, gps_time.timestamp(), self._n_epochs)
+                observations, gps_time.timestamp(), self._n_epochs,
+                elevations=elevations)
             for ev in slip_events:
                 flush_sv_phase(
                     ev.sv, filt=filt, mw_tracker=mw,
@@ -1581,9 +1609,10 @@ class AntPosEstThread(threading.Thread):
                     slip_monitor=self._slip_monitor,
                     reason="|".join(ev.reasons), epoch=self._n_epochs)
                 log.info("slip: sv=%s reasons=%s conf=%s lock=%.0fms"
-                         " cno=%.1f gap=%s gf=%s mw=%s",
+                         " cno=%.1f elev=%s gap=%s gf=%s mw=%s",
                          ev.sv, ",".join(ev.reasons), ev.confidence,
                          ev.lock_ms, ev.cno,
+                         f"{ev.elevation_deg:.0f}°" if ev.elevation_deg is not None else "?",
                          f"{ev.gap_s:.2f}s" if ev.gap_s is not None else "-",
                          f"{ev.gf_jump_m*100:.1f}cm" if ev.gf_jump_m is not None else "-",
                          f"{ev.mw_jump_cyc:.2f}c" if ev.mw_jump_cyc is not None else "-")
