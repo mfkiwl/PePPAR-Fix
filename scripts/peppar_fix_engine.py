@@ -1366,66 +1366,63 @@ class AntPosEstThread(threading.Thread):
             pass
 
     def _check_nav2(self, filt, mw, nl, pos_ecef, sigma_3d, n_nl_fixed):
-        """Horizontal-movement watchdog against NAV2's independent fix.
+        """Horizontal antenna-movement watchdog using NAV2 as second opinion.
 
-        Role: detect if the physical antenna has moved enough that our
-        fixed-position assumption (whether warm-started from
-        --known-pos or bootstrapped from Phase 1) is wrong.  A moved
-        antenna silently corrupts the clock solution by absorbing the
-        position error into dt_rx, so we need an independent sanity
-        check.  NAV2 is that check: a parallel single-epoch code-only
-        fix on the same F9T, unaffected by the PPP filter's state.
+        NAV2's unique value is independence from our PPP filter — an
+        in-receiver single-epoch code-only fix, unaffected by our float
+        state, integer fixes, or discipline loop.  If the antenna
+        physically moves, NAV2 notices right away while our fixed-pos
+        PPP keeps reporting the old location and silently lets dt_rx
+        absorb the position error as a clock bias.
 
-        Key design choices (see session logs 2026-04-18):
+        Scope deliberately narrowed (see session 2026-04-18):
 
-        1. HORIZONTAL only.  Altitude disagreement is dominated by GNSS
-           vertical DOP (~3× horizontal) and by PPP filter drift that
-           isn't an antenna-moved signal.  On clkPoC3 a 5 m PPP vertical
-           wander triggered 22 cascaded RESETs in ~3 hours even though
-           horizontal was steady.  Physical antenna moves are almost
-           always horizontal, so ignoring vertical loses little.
+        - NOT a wrong-integer detector — LAMBDA ratio/success-rate,
+          corner-margin, anti-lock-in blacklist, PFR L1/L2/L3 and the
+          CycleSlipMonitor form an internal defense-in-depth stack
+          that's finer-grained and faster than a 30 s NAV2 streak.
+        - NOT a bootstrap validator — Phase 1 has its own convergence
+          checks.  A 20 m horizontal disagreement is still catchable
+          here as an antenna-moved event even when NL=0, but there's
+          no lower threshold just for bootstrap-sanity purposes.
+        - NOT altitude-aware — vertical DOP is ~3× horizontal; PPP
+          vertical wander isn't an antenna-moved signature.  Physical
+          antenna moves are dominantly horizontal.  On clkPoC3,
+          altitude-based RESET cascaded 22 times over 3 h destroying
+          convergence repeatedly.
 
-        2. RESET preserves altitude.  When we do reset, we seed lat/lon
-           from NAV2 but keep the filter's current altitude — NAV2
-           altitude is even noisier than NAV2 horizontal, and a vertical
-           jump to a noisy value loses information.
-
-        3. n_nl_fixed == 0 does not auto-reset.  With no NL fixes active
-           there's nothing to "unfix" — the filter is still float, and
-           a reset just throws away float convergence progress.  The
-           only NL=0 case that warrants a reset is a large enough
-           horizontal jump (≥20 m) to plausibly be an antenna move.
-
-        4. Wrong-integer safety net (NL>0, disp ≥ 10 m horizontal) is
-           retained — a fixed integer that has gone rogue puts PPP
-           meters off; NAV2 will spot it.
+        Single gate: disp_h ≥ 10 m sustained for alarm_count consecutive
+        checks.  On reset, reseed lat/lon from NAV2, keep the filter's
+        altitude (NAV2 altitude is noisier than NAV2 horizontal).
         """
         opinion = self._nav2_store.get_opinion(max_age_s=30.0)
         if opinion is None:
             return
 
         nav2_ecef = opinion['ecef']
-        nav2_h_acc = opinion['h_acc_m'] or 5.0  # default 5m if missing
+        nav2_h_acc = opinion['h_acc_m'] or 5.0
 
-        # Project the ECEF displacement onto the local tangent plane so
-        # "horizontal" is the distance along Earth's surface between
-        # PPP and NAV2.  For small offsets (~meters) this is equivalent
-        # to great-circle distance and much simpler than LLA math.
+        # Project ECEF displacement onto the local tangent plane —
+        # horizontal is the component perpendicular to "up" at our
+        # position.  For small offsets this is great-circle distance.
         diff_ecef = pos_ecef - nav2_ecef
         up_hat = pos_ecef / np.linalg.norm(pos_ecef)
         vertical = float(np.dot(diff_ecef, up_hat))
         horiz_vec = diff_ecef - vertical * up_hat
         disp_h = float(np.linalg.norm(horiz_vec))
         disp_v = abs(vertical)
-        disp_3d = float(np.linalg.norm(diff_ecef))   # diagnostic only
 
-        # Combined horizontal uncertainty: filter σ_3d is a loose over-
-        # estimate of horizontal σ (adequately conservative).  Pair with
-        # NAV2 hAcc which is specifically horizontal.
+        # Tension uses horizontal quantities end-to-end.
         combined_unc = math.sqrt(sigma_3d ** 2 + nav2_h_acc ** 2)
         tension = disp_h / max(combined_unc, 0.1)
 
-        if tension <= self._nav2_tension_threshold:
+        # Single displacement gate.  Real antenna moves manifest as a
+        # step, so requiring the streak filters out NAV2 transients.
+        ANTENNA_MOVED_HORIZ_M = 10.0
+
+        below_threshold = (tension <= self._nav2_tension_threshold or
+                           disp_h < ANTENNA_MOVED_HORIZ_M)
+        if below_threshold:
             if self._nav2_tension_streak > 0:
                 log.info(
                     "NAV2 horizontal tension resolved: %.1f "
@@ -1436,10 +1433,10 @@ class AntPosEstThread(threading.Thread):
 
         self._nav2_tension_streak += 1
         log.warning(
-            "NAV2 horizontal tension: %.1f "
-            "(disp_h=%.1fm disp_v=%.1fm disp_3d=%.1fm σ=%.2fm hAcc=%.1fm "
-            "streak=%d/%d) NAV2=(%.6f,%.6f,%.1f) pDOP=%.1f sv=%d",
-            tension, disp_h, disp_v, disp_3d, sigma_3d, nav2_h_acc,
+            "NAV2 horizontal watchdog: tension=%.1f disp_h=%.1fm "
+            "disp_v=%.1fm σ=%.2fm hAcc=%.1fm streak=%d/%d "
+            "NAV2=(%.6f,%.6f,%.1f) pDOP=%.1f sv=%d",
+            tension, disp_h, disp_v, sigma_3d, nav2_h_acc,
             self._nav2_tension_streak, self._nav2_alarm_count,
             opinion['lat'], opinion['lon'], opinion['alt_m'],
             opinion.get('pdop') or 0, opinion.get('num_sv') or 0,
@@ -1448,26 +1445,7 @@ class AntPosEstThread(threading.Thread):
         if self._nav2_tension_streak < self._nav2_alarm_count:
             return
 
-        # Streak threshold met — decide if a reset is warranted.  Three
-        # independent reasons, each with its own horizontal-displacement
-        # floor.  Order matters: the antenna-moved gate is widest and
-        # last-resort, so we check wrong-integer first.
-        wrong_integer_gate = (n_nl_fixed > 0 and disp_h >= 10.0)
-        antenna_moved_gate = (disp_h >= 20.0)   # huge horizontal move
-
-        if not (wrong_integer_gate or antenna_moved_gate):
-            if n_nl_fixed == 0:
-                why = "float (NL=0), waiting for convergence"
-            else:
-                why = f"{n_nl_fixed} NL fixes active, horiz {disp_h:.1f}m < 10m"
-            log.info(
-                "NAV2 horizontal tension %.1f but %s — position trusted "
-                "over NAV2",
-                tension, why)
-            self._nav2_tension_streak = 0
-            return
-
-        # Reset path — preserve altitude (keep filter's, not NAV2's).
+        # Antenna-moved RESET — preserve altitude.
         _, _, alt_ppp = ecef_to_lla(
             pos_ecef[0], pos_ecef[1], pos_ecef[2])
         nav2_lat = opinion['lat']
@@ -1475,14 +1453,13 @@ class AntPosEstThread(threading.Thread):
         reset_ecef = np.array(
             lla_to_ecef(nav2_lat, nav2_lon, alt_ppp), dtype=float)
 
-        cause = "wrong integer" if wrong_integer_gate else "antenna moved"
         log.warning(
-            "NAV2 RESET (%s): AntPosEst horizontal offset %.1fm from "
-            "NAV2 (%.6f,%.6f) for %d consecutive checks. Unfixing all "
-            "NL; reseeding filter to NAV2 lat/lon at PPP altitude %.1fm "
-            "(preserving vertical).",
-            cause, disp_h, nav2_lat, nav2_lon,
-            self._nav2_tension_streak, alt_ppp,
+            "NAV2 antenna-moved RESET: AntPosEst horiz offset %.1fm "
+            "from NAV2 (%.6f,%.6f) for %d consecutive checks. "
+            "Reseeding lat/lon from NAV2 at PPP altitude %.1fm; "
+            "unfixing %d NL.",
+            disp_h, nav2_lat, nav2_lon,
+            self._nav2_tension_streak, alt_ppp, len(nl._fixed),
         )
 
         for sv in list(nl._fixed.keys()):
@@ -1491,16 +1468,13 @@ class AntPosEstThread(threading.Thread):
         self._prev_t = None
         self._best_sigma = 999.0
         self._nav2_tension_streak = 0
-        # Cooldown: let the filter converge before checking again.
-        # 120 epochs ≈ 2 min — enough for float to settle and WL
-        # to re-accumulate before comparing against NAV2.
         self._nav2_cooldown_until = self._n_epochs + 120
         log.info("NAV2 check cooldown until epoch %d",
                  self._nav2_cooldown_until)
         if self._ape_sm.state == AntPosEstState.RESOLVED:
             self._ape_sm.transition(
                 AntPosEstState.CONVERGING,
-                f"NAV2 {cause} (horiz={disp_h:.0f}m)",
+                f"antenna moved (horiz={disp_h:.0f}m)",
             )
 
     def _apply_pfr_action(self, filt, mw, nl, action):
