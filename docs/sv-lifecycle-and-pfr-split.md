@@ -6,6 +6,16 @@ still useful as it sets?" (Job B).  Supplements, does not replace,
 the host-level `AntPosEstState` machine documented in
 `docs/state-machine-refactor-plan.md`.*
 
+> **Data update 2026-04-19 evening** — analysis of day0419c/d
+> PFR events (see `project_pfr_event_analysis_20260419.md`)
+> changed the priority ordering.  **Job A (wrong-integer
+> detection) dominates, not Job B.**  62% of observed L1 events
+> are recent-fix high-elev, only 31% are low-elev setting SVs.
+> Also uncovered a level-persistence bug causing L3 to re-fire
+> without fresh L1 precursors (0/16 L3 events had an L1 within
+> 10 min).  **Beads 1 and 2 should ship together — Bead 1 alone
+> doesn't help.**  Revised bead plan at the end of this doc.
+
 ## Why this exists
 
 Two clean observations from day0419c/d test runs drove this:
@@ -274,42 +284,96 @@ This design is validated when a 24 h run shows:
 Compare against today's ~2 PFR L3/hr with ~35% time resolved (see
 day0419d 2 h data, 2026-04-19 ~11:30-13:30).
 
-## Implementation plan (bead-sized)
+## Implementation plan (bead-sized, revised 2026-04-19 evening)
 
-### Bead 1 — SvAmbState class and plumbing
-- `scripts/peppar_fix/sv_state.py`: `SvAmbState` enum, `SvStateTracker` class
-- Hook into `ppp_ar.py` to transition on MW convergence, LAMBDA fix
-- Emit `[SV_STATE]` structured log events on every transition
-- Unit tests
+Revision summary: beads 1 and 2 should ship together because Bead 1
+alone doesn't address the dominant failure mode (Job-A-shaped wrong
+integers on high-elev recent fixes).  Bead 3 (elev-weighted
+thresholds) remains valuable but second-order — the data shows
+only 31% of L1 events are Job-B-shaped.  Bead 2 also explicitly
+removes the level-persistence bug: Job A and Job B monitors must
+be **stateless** (per-SV transitions, not an escalation ladder on
+the host).
 
-### Bead 2 — Job A / Job B split in PFR
-- Replace `PostFixResidualMonitor` with two monitors: `ProvisionalFixValidator`
-  (Job A) and `RetirementGate` (Job B)
-- Both consult `SvStateTracker`; neither has an escalation ladder
-- Host-level monitor becomes a separate `HostRmsAlarm` with a much
-  higher threshold
+### Bead 1+2 (shipped together) — per-SV states + split monitors
 
-### Bead 3 — Elevation-weighted thresholds
-- Add `pr_threshold_zenith_m` to host TOML
-- Implement `threshold(elev)` helper
-- Update both Job A and Job B to use it
+`scripts/peppar_fix/sv_state.py`:
+- `SvAmbState` enum with FLOAT, WL_FIXED, NL_PROVISIONAL,
+  NL_VALIDATED, RETIRING, BLACKLISTED
+- `SvStateTracker` class, consulted by AR monitors
+
+Hooks in `scripts/ppp_ar.py`:
+- `MelbourneWubbenaTracker.commit_wl_fix` → transition to WL_FIXED
+- `NarrowLaneResolver.attempt()` success → transition to NL_PROVISIONAL
+- `CycleSlipMonitor` HIGH-conf → BLACKLISTED; LOW-conf → FLOAT
+- Cycle slip frequency-retained per
+  `feedback_slip_retain_freq_flush_phase` — MW state survives
+  slip-induced FLOAT transition
+
+New `scripts/peppar_fix/provisional_validator.py` (Job A):
+- Monitors PR residuals per NL_PROVISIONAL SV
+- Threshold: tighter than current PFR (2.0 m zenith, elev-weighted)
+- Action: transition SV back to FLOAT (not host-level escalation)
+- No escalation ladder, no persistent level state
+
+New `scripts/peppar_fix/retirement_gate.py` (Job B):
+- Monitors PR residuals per NL_VALIDATED SV
+- Threshold: `base / sin(elev)` with clamp at 45°
+- Action: transition SV to RETIRING
+- No escalation ladder
+
+New `scripts/peppar_fix/host_rms_alarm.py`:
+- Fires only when host PR RMS > 5 m sustained AND neither Job A
+  nor Job B has fired recently
+- Stateless: evaluates current conditions, decides, acts
+- Action: re-init filter at known_ecef (L3-equivalent, rare)
+
+Structured log: `[SV_STATE] G17: FLOAT → WL_FIXED (epoch=1234,
+az=147°)` one line per transition.
+
+Target validation: L1-equivalent rate (Job A + Job B transitions)
+should match observed 4-9/hr on day0419c/d; host-RMS alarm rate
+should drop to < 1/day in good conditions, vs today's 2-4/hr.
+
+Unit tests for every legal transition, one of each illegal.
+
+### Bead 3 — Elevation-weighted base thresholds (already needed in Bead 2)
+
+Add `pr_threshold_zenith_m` and `rms_threshold_m` to host TOML.
+Defaults: 1.5 m zenith per-SV, 5 m host RMS.  Elev weighting
+per the formula above.
+
+(Moved into the Bead 1+2 scope rather than separate bead;
+makes no sense to ship Job A without elev-weighting.)
 
 ### Bead 4 — Provisional → Validated promotion
+
 - Track first-fix epoch per SV, starting az
-- Check az delta each eval, promote when ≥15° accumulated
+- Check az delta each eval, promote when ≥ 15° accumulated
 - Host RESOLVED recomputed from NL_VALIDATED count
 
-### Bead 5 — Migration and backwards-compat
-- Default parameters chosen so existing host configs work unchanged
-- Log format change: `[STATE] AntPosEst` lines unchanged; new
-  `[SV_STATE]` lines added
-- `scripts/peppar_fix/pfr_monitor.py` symlink or shim until all
-  callers migrate
+Deferrable.  Without Bead 4, NL_VALIDATED is indistinguishable
+from NL_PROVISIONAL in the state machine — which is fine for
+initial deployment (Job A still fires on recent fixes either way).
 
-Each bead is independent and testable — no big-bang rewrite.  If
-we want to stop partway (e.g., after Bead 3 we may already see
-L3 rates drop enough to declare victory), beads 4 and 5 can be
-deferred.
+### Bead 5 — Migration and backwards-compat
+
+- Default parameters preserve existing behavior where possible
+- Old PFR L1/L2/L3 log format deprecated, replaced with
+  `[SV_STATE]` and `[HOST_ALARM]`
+- No shim layer — old `PostFixResidualMonitor` deleted entirely
+  when Bead 1+2 merges.  Tests updated.
+
+## Stop points
+
+1. After **Bead 1+2+3** (minimum viable): Job A and Job B working
+   per-SV, elev-weighted, no cascade.  Expected outcome:
+   L3-equivalent rate < 1/day on steady-state runs.  If that
+   target is met, Bead 4 is optional.
+2. After **Bead 4**: full NL_VALIDATED gating on host RESOLVED.
+   Host stops flipping CONVERGING↔RESOLVED on routine sky motion.
+3. After **Bead 5**: old code and log format gone.  Only then is
+   the refactor complete.
 
 ## Open questions
 
