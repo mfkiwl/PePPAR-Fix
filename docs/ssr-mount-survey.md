@@ -86,6 +86,75 @@ landed 2026-04-17:
    a per-satellite *integer* (multi-cycle) bias, it's code-bias or
    ISC/TGD.
 
+## Status as of 2026-04-18 evening
+
+- **Dual-mount CNES (orbit/clock/code-bias/GAL phase) + WHU
+  (observable-specific code+phase biases for GPS/BDS) landed** as
+  commit `7ae1392`.  CLI: `--ssr-bias-mount OSBC00WHU1
+  --ssr-bias-ntrip-conf ntrip-whu.conf`.
+- First-deploy diagnosis: the initial *phase-bias-only* filter
+  blocked WHU's code biases — CNES had no C5Q code bias and F9T's
+  L5Q pseudoranges ran uncorrected, producing ~30 m vertical drift.
+  Fix was to pass code+phase (not just phase) through the bias
+  mount.
+- The L5I/L5Q phase-bias premise in "*The premise we had — partly
+  wrong*" is itself only partly right.  Literature claims *within-AC*
+  L5I = L5Q; that's true but doesn't help us when CNES and WHU use
+  mutually inconsistent datum conventions (see
+  `docs/l5i-l5q-phase-bias-empirical.md` — 19 GPS SVs, mean Δ = −0.73 m,
+  SD 1.46 m).  Cross-AC substitution never works for RTCM-published
+  biases; dual-mount from one AC or matched-datum fusion is the
+  right path.
+
+## Diagnostic method: cross-AC bias comparison
+
+Whenever a new AC-vs-AC pairing is considered (e.g., investigating
+ptpmon's L2-profile drift, or evaluating MADOCA vs CNES for a future
+GPS AR path), the fastest empirical answer is **run both streams
+simultaneously and compare the published bias values per satellite**.
+Both values land in `SSRState._phase_bias` (or `_code_bias`) keyed
+by RINEX observable code; if the two ACs use different code labels
+for the "same" observable (as CNES does for GPS L5I while WHU uses
+L5Q), the dict keeps them separate automatically.
+
+Recipe:
+
+1. Run the engine with both SSR mounts active (primary + bias).
+2. Grep the engine log for the periodic `Phase bias: <sv> <code> =
+   <value>` dump emitted at startup for each new AC's first batch
+   (source file `ssr_corrections.py`; the dump happens inside
+   `_store_phase_bias` when the `_phase_bias[sv][code]` entry is
+   first created).
+3. Build a side-by-side table — one row per satellite, one column
+   per (AC, code) pair.  Compute differences where the same SV is
+   published by both ACs for either the same observable or two
+   observables the literature claims are interchangeable.
+
+Interpret:
+
+- **Δ < 5 cm per SV across the constellation** — ACs are datum-
+  consistent for this observable; substitution or either-source
+  use is safe.
+- **Δ has mean ≈ 0 with SD 10–50 cm** — small AC-calibration
+  scatter; substitution mostly works; drift rarely visible at the
+  host level but may limit ultimate AR performance.
+- **Δ at meter scale with multi-meter per-SV variance** — ACs are
+  datum-incompatible for this observable; cannot mix freely.  All
+  biases applied to one observable must come from one AC; if only
+  one AC covers the F9T-tracked code, prefer a dual-mount split
+  that respects that constraint.
+
+The L5I-vs-L5Q analysis in
+`docs/l5i-l5q-phase-bias-empirical.md` is the worked example for
+this recipe (GPS case).  The awk one-liner at the bottom of that
+doc is portable to any AC pair — swap the SV prefix (`G`/`E`/`C`)
+and RINEX code accordingly.
+
+Result of running this method should be logged either as a new
+section in `docs/l5i-l5q-phase-bias-empirical.md` (if the topic
+is closely related) or as a sibling `docs/<signal>-phase-bias-
+empirical.md` doc (if the story is its own thing).
+
 ## Sources
 - Banville et al. 2023 (data + pilot bias handling): <https://link.springer.com/article/10.1007/s10291-023-01448-y>
 - Wang et al. 2022 (GNSS OSB all-frequency PPP-AR): <https://link.springer.com/article/10.1007/s00190-022-01602-3>
