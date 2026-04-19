@@ -120,6 +120,23 @@ BIAS_MSG_TYPES = {
 }
 
 
+# u-blox F9T reports BDS-3 modernized-signal cpMes in L1-reference cycles
+# (i.e. the reported cycle count, when scaled by λ_L1, equals the geometric
+# path).  To obtain native-carrier cycles, multiply the reported cpMes by
+# (λ_L1 / λ_native) = F_native/F_L1.  Verified empirically on ZED-F9T
+# TIM 2.25 at MadHat 2026-04-19.  Legacy BDS-2 signals (B1I, B2I, B3I) are
+# unaffected — they are reported in native cycles like GPS and GAL.
+#
+# B2a-I and B2a-Q are confirmed.  B1C is plausibly the same and listed here
+# tentatively so a GF-DIAG on a B1C-tracking receiver will produce clean
+# numbers if the quirk extends to it; drop from the set if diagnostics show
+# B1C in native cycles.
+_LAMBDA_L1 = C / F_L1
+_BDS_L1_REF_CYCLES = {
+    'BDS-B2aI', 'BDS-B2aQ',
+    'BDS-B1C', 'BDS-B1CD', 'BDS-B1CP',  # tentative — not lab-confirmed yet
+}
+
 SIG_WAVELENGTH = {
     'GPS-L1CA': C / F_L1,
     'GPS-L2CL': C / F_L2,
@@ -736,6 +753,25 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     if pr < 1e6 or pr > 4e7:
                         continue
 
+                    # u-blox F9T quirk: BDS-3 modernized signal cpMes is
+                    # reported in L1-reference cycles, not native carrier
+                    # cycles.  Legacy BDS-2 signals (B1I, B2I) are in
+                    # native cycles.  Confirmed 2026-04-19 on MadHat via
+                    # GF-DIAG: cp * λ_native of B2a overshoots the code
+                    # pseudorange by factor F_L1/F_B2a ≈ 1.339, producing
+                    # unphysical 175 m per-epoch GF jumps that cascaded
+                    # into 8.4 km nav2Δ on GAL+BDS runs (see
+                    # memory/project_bds_gf_phase_units_bug.md).
+                    #
+                    # Convert to native cycles so every downstream
+                    # consumer (GF slip detector, MW wide-lane, IF
+                    # ambiguity, integer resolution) sees the physical
+                    # quantity it was designed for.
+                    if cp is not None and cp_valid and sig_name in _BDS_L1_REF_CYCLES:
+                        # cp_native = cp_L1 * (f_native / f_L1)
+                        #           = cp_L1 * λ_L1 / λ_native
+                        cp *= _LAMBDA_L1 / SIG_WAVELENGTH[sig_name]
+
                     raw_obs[sv][role] = {
                         'pr': pr, 'cno': cno,
                         'cp': cp if cp_valid else None,
@@ -847,6 +883,52 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     pr_if = a1 * pr_f1 - a2 * pr_f2
                     phi_if_m = a1 * wl_f1 * cp_f1 - a2 * wl_f2 * cp_f2
 
+                    # Dual-freq raw-obs diagnostic for the BDS GF blow-up
+                    # investigation (2026-04-19).  Logs two consecutive
+                    # epochs of raw cp/pr/wl for the FIRST SV of each
+                    # constellation, plus a manually-computed GF delta,
+                    # so we can see whether the 60–190 m per-epoch GF on
+                    # BDS is a unit/wavelength bug or a receiver-side
+                    # measurement quirk.  One-shot per (sys, sv) pair.
+                    if not hasattr(serial_reader, '_gf_diag'):
+                        serial_reader._gf_diag = {}
+                    diag = serial_reader._gf_diag
+                    key = (sys_name, sv)
+                    if key not in diag:
+                        diag[key] = {'epoch1': None, 'epoch2': None}
+                    slot = diag[key]
+                    cp1_raw = f1['cp']
+                    cp2_raw = f2['cp']
+                    if slot['epoch1'] is None:
+                        slot['epoch1'] = (cp1_raw, cp2_raw, wl_f1, wl_f2,
+                                          pr_f1, pr_f2, f1['sig_name'],
+                                          f2['sig_name'])
+                    elif slot['epoch2'] is None:
+                        slot['epoch2'] = (cp1_raw, cp2_raw, wl_f1, wl_f2,
+                                          pr_f1, pr_f2, f1['sig_name'],
+                                          f2['sig_name'])
+                        e1 = slot['epoch1']
+                        e2 = slot['epoch2']
+                        gf1 = e1[0]*e1[2] - e1[1]*e1[3]
+                        gf2 = e2[0]*e2[2] - e2[1]*e2[3]
+                        d_phi1 = e2[0] - e1[0]
+                        d_phi2 = e2[1] - e1[1]
+                        d_pr1 = e2[4] - e1[4]
+                        d_pr2 = e2[5] - e1[5]
+                        log.info(
+                            "GF-DIAG %s %s f1=%s(%.4fm) f2=%s(%.4fm) "
+                            "cp1=[%.3f→%.3f Δ%.3f cyc] "
+                            "cp2=[%.3f→%.3f Δ%.3f cyc] "
+                            "pr1_Δ=%.2fm pr2_Δ=%.2fm "
+                            "gf1=%.3fm gf2=%.3fm gf_Δ=%.3fm "
+                            "expected_gf_Δ_from_phi=%.3fm",
+                            sys_name, sv,
+                            e1[6], e1[2], e1[7], e1[3],
+                            e1[0], e2[0], d_phi1,
+                            e1[1], e2[1], d_phi2,
+                            d_pr1, d_pr2,
+                            gf1, gf2, gf2 - gf1,
+                            d_phi1*e1[2] - d_phi2*e1[3])
                     observations.append({
                         'sv': sv,
                         'sys': sys_name,
