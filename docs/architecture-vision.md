@@ -380,13 +380,23 @@ VERIFIED    → live LS fix agrees with seed within threshold.
 CONVERGING  → float PPP running, position improving.
                DOFreqEst: running.  clockClass: 6 (once locked).
 
-RESOLVED    → AR fixed, position at cm level.
+RESOLVED    → AR fixed at cm level (≥ N SVs NL_VALIDATED).
                Phase bias < 100 ps.  clockClass: 6.
+               Per-SV churn (new fixes, retirements) happens in
+               the background without flipping host state.
 
 MOVED       → consensus detected antenna displacement.
                DOFreqEst: holdover.  clockClass: 7.
                AntPosEst: re-enters CONVERGING.
 ```
+
+Host-level states describe whether the *receiver's position* is
+trustworthy.  A separate **per-SV state machine** (`SvAmbState`)
+tracks each satellite's ambiguity independently — see
+`docs/sv-lifecycle-and-pfr-split.md`.  The two machines are
+orthogonal; the host stays RESOLVED while individual SVs cycle
+through WL_FIXED → NL_PROVISIONAL → NL_VALIDATED → RETIRING as
+sky geometry evolves.
 
 ### DOFreqEst states
 

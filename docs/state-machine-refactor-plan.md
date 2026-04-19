@@ -1,7 +1,28 @@
 # State Machine Refactor Plan
 
-**Date**: 2026-04-15
-**Status**: Phase 2 in progress
+**Date**: 2026-04-15, updated 2026-04-19 with pointer to per-SV state machine
+**Status**: Phase 2 in progress; **per-SV states added as a separate orthogonal machine** (see `docs/sv-lifecycle-and-pfr-split.md`)
+
+## Scope note
+
+This document covers the **host-level** state machines for
+`AntPosEst` (position) and `DOFreqEst` (clock discipline).  The
+host answers "is *the receiver's* position / clock trustworthy?"
+— one state per scope for the whole host.
+
+A **per-SV ambiguity state machine** (`SvAmbState`: FLOAT →
+WL_FIXED → NL_PROVISIONAL → NL_VALIDATED → RETIRING, plus
+BLACKLISTED) is defined separately in
+`docs/sv-lifecycle-and-pfr-split.md`.  That machine answers "is
+*this specific satellite's* integer trustworthy?" — one state
+per (system, PRN).  The two machines are orthogonal; they
+interact only via the RESOLVED transition (host CONVERGING →
+RESOLVED requires ≥ N SVs in NL_VALIDATED).
+
+Don't confuse them.  Routine sky motion (SVs setting, retiring,
+new SVs rising, validating) does not flip host state.  Host
+transitions are for position/antenna-movement events, not for
+per-satellite bookkeeping.
 
 ## Goal
 
@@ -51,11 +72,15 @@ VERIFIED      Position accepted. DOFreqEst may start.
 
 CONVERGING    Background PPPFilter running with decimated observations.
               MW+NL accumulating. Position refining.
-              → RESOLVED when AR fixes enough SVs and sigma < threshold
+              → RESOLVED when ≥ N SVs reach NL_VALIDATED (per-SV state)
+                and host sigma < threshold
 
 RESOLVED      AR-fixed position at cm level.
               Phase bias to GPS < 100 ps.
-              → CONVERGING if too many SVs lose fix
+              Individual SVs cycle FLOAT ↔ WL_FIXED ↔ NL_PROVISIONAL ↔
+              NL_VALIDATED ↔ RETIRING constantly — that's routine and
+              does not flip host state.
+              → CONVERGING only if NL_VALIDATED count drops below N
               → MOVED if consensus detects displacement
 
 MOVED         Antenna displacement detected (NAV2 consensus).
