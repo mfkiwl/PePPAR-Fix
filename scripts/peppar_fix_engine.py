@@ -5257,6 +5257,7 @@ def _apply_host_config(args):
         "tadd_hold_s":      ("tadd_hold_s",      float),
         "ticc_port":        ("ticc_port",        str),
         "phase_step_bias_ns": ("phase_step_bias_ns", float),
+        "ar_elev_mask_deg": ("ar_elev_mask",         float),
         "pmc_uds":          ("pmc",              str),
         "pmc_domain":       ("pmc_domain",       int),
     }
@@ -5321,14 +5322,15 @@ Two-phase operation:
     pos.add_argument("--bootstrap-max-retries", type=int, default=3,
                      help="On W1 or W2 abort, scrub the filter and retry this "
                           "many times before giving up.  Default 3.")
-    pos.add_argument("--ar-elev-mask", type=float, default=20.0,
+    pos.add_argument("--ar-elev-mask", type=float, default=None,
                      help="Elevation mask for integer-ambiguity resolution, "
                           "in degrees.  Separate from the measurement "
                           "ELEV_MASK — SVs below this stay in the float "
                           "filter but don't attempt NL fixing.  Default "
-                          "20° (RTKLIB arelmask analogue, matches PRIDE "
-                          "PPP-AR partial-AR practice).  Set to 0 to "
-                          "disable and let every WL-fixed SV attempt NL.")
+                          "25° (antenna-dependent; low-multipath antennas "
+                          "can go lower — override via host TOML "
+                          "ar_elev_mask_deg or this CLI flag).  Set to 0 "
+                          "to disable and let every WL-fixed SV attempt NL.")
     pos.add_argument("--timeout", type=int, default=3600,
                      help="Bootstrap timeout in seconds (default: 3600)")
     pos.add_argument("--watchdog-threshold", type=float, default=0.5,
@@ -5657,6 +5659,8 @@ Two-phase operation:
         args.port_type = "USB"
     if args.systems is None:
         args.systems = "gps,gal,bds"
+    if args.ar_elev_mask is None:
+        args.ar_elev_mask = 25.0
     if args.do_type is None:
         args.do_type = "phc"
     if args.dac_bits is None:

@@ -285,30 +285,39 @@ this SSR source alone.
 
 ## Known Broken Things
 
-### BDS ISB 1500 ns — partly fixed 2026-04-19, full validation pending
+### ~~BDS ISB 1500 ns~~ — closed 2026-04-19 (PR #3 + PR #5)
 
-Default is `--systems gps,gal`.  BDS produced ISBs of 1500+ ns
-(should be <200 ns).  Prior attribution to the 14 s BDT/GPST offset
-was wrong — that's already handled correctly in
-`broadcast_eph.py:_bds_seconds_of_week`.  Actual causes identified
-2026-04-19:
+Default is `--systems gps,gal`.  BDS previously produced ISBs of
+1500+ ns (should be <200 ns).  Two root causes identified and
+fixed 2026-04-19:
 
 1. **BDS signal-code map for RTCM 1260 was wrong** (sig_ids 2-11
    mis-labeled or missing).  F9T L5-fleet tracks BDS-3 MEO on
    B1I + B2a-I; sig_id=9 (B2a-I) was stored under the wrong RINEX
    key, so every BDS L5-band code-bias lookup MISSed.  **Fixed in
    PR #3, commit `150c495`.**
-2. **Dual-TGD handling for B3I-referenced broadcast clock still
-   open.**  Broadcast clock references B3I; using IF(B1I, B2a-I)
-   needs TGD1 + TGD2 applied with IF coefficients; current code
-   only applies TGD1.  Per-SV leak at the 10-30 ns level.
+2. **BDS-3 modernized cpMes is L1-reference cycles.**  F9T firmware
+   TIM 2.25 reports B2a-I carrier phase in L1-band cycles, not
+   native.  GF/MW/IF downstream math assumed native cycles,
+   producing ±60-190 m per-epoch GF blow-ups and 1800+ false-positive
+   slips per minute.  **Fixed in PR #5, commit `12a76a3`**
+   (multiply cpMes by λ_L1 / λ_native at ingest).
 
-Validation: single-host GAL+BDS diagnostic should reveal whether
-PR #3 alone drops ISB below 200 ns.  If not, TGD work follows.
+Validation: day0419c on MadHat + clkPoC3 reached BDS AR via LAMBDA+
+rounding on C24/C35/C44 with sub-cm NL residuals matching GAL
+quality.  Cross-host horizontal agreement < 1 cm.  See
+`project_bds_ar_first_success_20260419.md`.
 
+Still open (lower priority — residuals don't demand it):
+
+- Dual-TGD handling for IF(B1I, B2a-I) on B3I-referenced broadcast
+  clock.  Commit `63a4af1` decoded TGD2 (DF514) into `_BDS_MAP` but
+  `_sat_clock` still applies TGD1 only.  SSR phase biases appear to
+  absorb the per-SV TGD variance in practice.
+
+Prior attribution to the 14 s BDT/GPST offset was wrong — that's
+already handled correctly in `broadcast_eph.py:_bds_seconds_of_week`.
 Full research + references: `docs/bds-ppp-integration.md`.
-Memory: `project_bds_isb_research.md`.  Old bead `pf-luu` superseded
-by this writeup.
 
 ### ~~F10T on Onocoy doesn't respond to UBX~~ — Onocoy mothballed 2026-04-08
 
