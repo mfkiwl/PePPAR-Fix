@@ -454,10 +454,15 @@ class SSRState:
           DF379 = num biases, DF380 = signal ID, DF383 = bias (m)
         IGS SSR fields: IDF023/024/025
         """
+        identity = str(getattr(msg, 'identity', ''))
+        _dropped_no_map = 0
+        _stored = 0
+        _sats_seen = 0
         for i in range(1, n_sats + 1):
             sat_id = self._get_sat_id(msg, i)
             if sat_id is None:
                 continue
+            _sats_seen += 1
             prn = f"{sys_prefix}{sat_id:02d}"
 
             # Try IGS then standard
@@ -477,13 +482,30 @@ class SSRState:
                     continue
                 rinex_code = _SSR_SIGNAL_MAP.get((sys_prefix, int(sig_id)))
                 if rinex_code is None:
+                    _dropped_no_map += 1
                     continue
+                _stored += 1
                 self._code_bias[prn][rinex_code] = BiasCorrection(
                     signal_code=rinex_code, bias_m=float(bias_m), is_phase=False,
                     rx_mono=rx_mono,
                     queue_remains=queue_remains,
                     correlation_confidence=correlation_confidence,
                 )
+        # One-shot diagnostic: log a summary the first time any given
+        # (identity, sys_prefix) pair is parsed, to expose the RTCM-vs-IGS
+        # signal-map gap.  Two bad outcomes to catch:
+        #   n_sats=0 / _sats_seen=0  →  pyrtcm didn't decode the message
+        #   _dropped_no_map > 0 with _stored == 0  →  every sig_id was
+        #     unknown in _SSR_SIGNAL_MAP (wrong map for RTCM 10xx/12xx).
+        if not hasattr(self, '_cb_parse_logged'):
+            self._cb_parse_logged = set()
+        lk = (identity, sys_prefix)
+        if lk not in self._cb_parse_logged:
+            log.info("code_bias parse: id=%s sys=%s n_sats=%d sats_seen=%d "
+                     "stored=%d dropped_no_map=%d",
+                     identity, sys_prefix, n_sats, _sats_seen,
+                     _stored, _dropped_no_map)
+            self._cb_parse_logged.add(lk)
 
     def _parse_phase_bias(self, msg, sys_prefix, n_sats,
                           rx_mono=None, queue_remains=None, correlation_confidence=None):
