@@ -97,6 +97,16 @@ for _mt in range(1057, 1069):
 for _mt in range(1240, 1271):  # 1240-1263 (orbit/clock/code) + 1265-1270 (phase bias)
     SSR_MSG_TYPES.add(str(_mt))
 
+# Phase-bias subset — used when pairing two SSR mounts (orbit/clock from one
+# AC, phase biases from another).  Standard RTCM MT: 1265 GPS, 1266 GLO,
+# 1267 GAL, 1268 QZSS, 1269 SBAS, 1270 BDS.  IGS SSR 4076 subtypes: GPS 26,
+# GAL 66, BDS 106 (and the QZSS/SBAS/GLO analogues in each range).
+PHASE_BIAS_MSG_TYPES = {
+    '1065', '1067',                          # GLO legacy phase-bias lanes
+    '1265', '1266', '1267', '1268', '1269', '1270',
+    '4076_026', '4076_066', '4076_106',      # GPS/GAL/BDS phase biases in IGS SSR
+}
+
 
 SIG_WAVELENGTH = {
     'GPS-L1CA': C / F_L1,
@@ -905,13 +915,25 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
 
 # ── NTRIP correction reader ────────────────────────────────────────────────── #
 
-def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP"):
+def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP",
+                 phase_bias_only=False):
     """Read RTCM3 messages from an NtripStream.
 
     Routes broadcast ephemeris messages to BroadcastEphemeris and SSR
     messages to SSRState.
+
+    phase_bias_only: when True, forward ONLY phase-bias messages
+    (PHASE_BIAS_MSG_TYPES) to SSRState, ignoring orbit/clock/code-bias
+    and ephemeris.  This is the dual-mount fusion path: get phase
+    biases from one AC (e.g., WHU OSBC00WHU1 which publishes per-code
+    OSB matched to F9T signals) while orbit/clock come from the
+    primary mount (e.g., CNES SSRA00CNE0).  Mixing ACs this way is
+    safe because phase biases are defined per-observable; the mm-level
+    AC-datum offset is absorbed into the receiver clock estimate.
+    See docs/ssr-mount-survey.md for the design rationale.
     """
     msg_counts = defaultdict(int)
+    n_skipped_non_phase_bias = 0
     n_total = 0
     delay_injector = get_delay_injector()
     mute_controller = get_source_mute_controller()
@@ -945,19 +967,31 @@ def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP"):
             if n_total <= 3 or identity not in msg_counts or msg_counts[identity] <= 1:
                 log.debug(f"[{label}] msg #{n_total}: identity={identity}")
 
-            # Route to appropriate handler
-            if identity in EPH_MSG_TYPES:
+            # Route to appropriate handler.  In phase_bias_only mode,
+            # reject everything except the phase-bias message subset —
+            # the primary mount owns orbit/clock/code-bias/ephemeris.
+            if phase_bias_only:
+                if identity in PHASE_BIAS_MSG_TYPES:
+                    result = ssr.update_from_rtcm(msg_view)
+                    if n_total <= 5:
+                        log.info(f"[{label}] phase bias routed: "
+                                 f"{identity} → {result}")
+                else:
+                    n_skipped_non_phase_bias += 1
+            elif identity in EPH_MSG_TYPES:
                 prn = beph.update_from_rtcm(msg_view)
                 if prn and beph.n_satellites % 10 == 0:
                     log.debug(f"[{label}] {beph.summary()}")
-
             elif identity in SSR_MSG_TYPES or identity.startswith('4076_'):
                 result = ssr.update_from_rtcm(msg_view)
                 if n_total <= 5:
                     log.info(f"[{label}] SSR routed: {identity} → {result}")
 
             if n_total % 100 == 0:
-                log.info(f"[{label}] {n_total} msgs | {beph.summary()} | {ssr.summary()}")
+                suffix = (f" | skipped {n_skipped_non_phase_bias} non-phase-bias"
+                          if phase_bias_only else "")
+                log.info(f"[{label}] {n_total} msgs | {beph.summary()} | "
+                         f"{ssr.summary()}{suffix}")
 
     except Exception as e:
         if not stop_event.is_set():

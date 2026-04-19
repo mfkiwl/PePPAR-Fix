@@ -764,6 +764,33 @@ def load_ntrip_config(args):
             log.info("SSR credentials loaded from %s (caster=%s, mount=%s)",
                      ssr_conf_path, args.ssr_caster, args.ssr_mount)
 
+    # Optional secondary SSR mount that contributes PHASE BIASES ONLY —
+    # pairs with the primary ssr_mount which provides orbit/clock.  The
+    # design enables CNES SSRA00CNE0 (GAL biases correct for F9T) + WHU
+    # OSBC00WHU1 (GPS OSB correct for F9T L5Q) to jointly unlock GPS+GAL
+    # AR without waiting for a single AC that matches every F9T signal.
+    # See docs/ssr-mount-survey.md.
+    ssr_bias_conf_path = getattr(args, 'ssr_bias_ntrip_conf', None)
+    if ssr_bias_conf_path:
+        conf = configparser.ConfigParser()
+        conf.read(ssr_bias_conf_path)
+        if 'ntrip' in conf:
+            s = conf['ntrip']
+            args.ssr_bias_caster = s.get(
+                'caster', getattr(args, 'ssr_bias_caster', None))
+            args.ssr_bias_port = int(s.get('port', 443))
+            args.ssr_bias_user = s.get(
+                'user', getattr(args, 'ssr_bias_user', None))
+            args.ssr_bias_password = s.get(
+                'password', getattr(args, 'ssr_bias_password', None))
+            args.ssr_bias_tls = s.getboolean('tls', True)
+            if not getattr(args, 'ssr_bias_mount', None) and s.get('mount'):
+                args.ssr_bias_mount = s.get('mount')
+            log.info(
+                "SSR bias credentials loaded from %s (caster=%s, mount=%s)",
+                ssr_bias_conf_path,
+                args.ssr_bias_caster, args.ssr_bias_mount)
+
 
 # ── Shared infrastructure setup ──────────────────────────────────────── #
 
@@ -812,6 +839,43 @@ def start_ntrip_threads(args, beph, ssr, stop_event):
         t.start()
         threads.append(t)
         log.info(f"SSR stream: {ssr_host}:{ssr_p}/{args.ssr_mount}")
+
+    # Optional secondary SSR mount that contributes PHASE BIASES ONLY.
+    # Orbit/clock/code-bias/ephemeris all come from the primary mount;
+    # this stream's non-phase-bias messages are discarded in ntrip_reader.
+    ssr_bias_mount = getattr(args, 'ssr_bias_mount', None)
+    if ssr_bias_mount:
+        bias_host = (getattr(args, 'ssr_bias_caster', None)
+                     or getattr(args, 'ssr_caster', None)
+                     or args.ntrip_caster)
+        bias_p = (getattr(args, 'ssr_bias_port', None)
+                  or getattr(args, 'ssr_port', None)
+                  or args.ntrip_port)
+        bias_u = (getattr(args, 'ssr_bias_user', None)
+                  or getattr(args, 'ssr_user', None)
+                  or args.ntrip_user)
+        bias_pw = (getattr(args, 'ssr_bias_password', None)
+                   or getattr(args, 'ssr_password', None)
+                   or args.ntrip_password)
+        bias_tls = getattr(args, 'ssr_bias_tls', None)
+        if bias_tls is None:
+            bias_tls = bias_p == 443
+        bias_stream = NtripStream(
+            caster=bias_host, port=bias_p,
+            mountpoint=ssr_bias_mount,
+            user=bias_u, password=bias_pw,
+            tls=bias_tls,
+        )
+        t = threading.Thread(
+            target=ntrip_reader,
+            args=(bias_stream, beph, ssr, stop_event, "SSR-BIAS"),
+            kwargs={'phase_bias_only': True},
+            daemon=True,
+        )
+        t.start()
+        threads.append(t)
+        log.info(f"SSR bias stream (phase-bias only): "
+                 f"{bias_host}:{bias_p}/{ssr_bias_mount}")
 
     return threads
 
@@ -5174,6 +5238,8 @@ def _apply_host_config(args):
         "eph_mount":        ("eph_mount",        str),
         "ssr_mount":        ("ssr_mount",        str),
         "ssr_ntrip_conf":   ("ssr_ntrip_conf",   str),
+        "ssr_bias_mount":     ("ssr_bias_mount",     str),
+        "ssr_bias_ntrip_conf":("ssr_bias_ntrip_conf",str),
         "known_pos":        ("known_pos",        str),
         "systems":          ("systems",          str),
         "duration":         ("duration",         int),
@@ -5307,6 +5373,20 @@ Two-phase operation:
     ntrip.add_argument("--ssr-port", type=int, help="SSR caster port (default: same as --ntrip-port)")
     ntrip.add_argument("--ssr-user", help="SSR caster username (default: same as --ntrip-user)")
     ntrip.add_argument("--ssr-password", help="SSR caster password (default: same as --ntrip-password)")
+    ntrip.add_argument("--ssr-ntrip-conf", default=None,
+                       help="Optional separate NTRIP credentials file for "
+                            "the primary SSR mount (orbit/clock/biases).")
+    ntrip.add_argument("--ssr-bias-mount", default=None,
+                       help="Optional secondary SSR mountpoint that "
+                            "contributes PHASE BIASES ONLY.  Pair e.g. "
+                            "CNES orbit/clock with WHU OSB phase biases "
+                            "keyed to F9T-tracked signals.  All non-"
+                            "phase-bias messages from this stream are "
+                            "ignored.  See docs/ssr-mount-survey.md.")
+    ntrip.add_argument("--ssr-bias-ntrip-conf", default=None,
+                       help="Credentials file for --ssr-bias-mount (same "
+                            "INI format as --ntrip-conf).  Falls back to "
+                            "the primary SSR credentials if unset.")
     ntrip.add_argument("--ntrip-user", help="NTRIP username")
     ntrip.add_argument("--ntrip-password", help="NTRIP password")
     ntrip.add_argument("--max-broadcast-age-s", type=float, default=None,
