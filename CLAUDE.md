@@ -501,6 +501,7 @@ here before changing anything in the areas they cover.
 | [lambda-ar-plan.md](docs/lambda-ar-plan.md) | LAMBDA integer least-squares AR: decorrelation, search, ratio test, partial AR. Replaces per-satellite rounding — handles ZTD-ambiguity correlation, faster TTFF, stronger validation. ~150 lines. |
 | [lab-operations.md](docs/lab-operations.md) | **Read before running on any lab host.** Deployment procedure, pre-flight checklist, stumble analysis, standard host layout, future automation work. |
 | [position-bootstrap-reliability-plan.md](docs/position-bootstrap-reliability-plan.md) | Implementation plan to make cold-start Phase-1 trustworthy so lab runs no longer need `--known-pos`. Residual-consistency gate, NAV2 cross-check, harder abort, σ tightening, state persistence. 6 work items, W1–W5 core, W6 fallback. |
+| [l5i-l5q-phase-bias-empirical.md](docs/l5i-l5q-phase-bias-empirical.md) | Empirical proof (19 GPS SVs, lab day0418h) that CNES L5I and WHU L5Q phase biases differ by mean −0.73 m with 1.46 m SD — far beyond the λ/4 carrier-phase offset.  RTCM "phase bias" bundles satellite-side delays + AC-datum offsets + reference-receiver I/Q group delays; can't be substituted with a single-cycle correction.  Supports the dual-mount fusion path. |
 
 ## Lab Documentation Pointers
 
