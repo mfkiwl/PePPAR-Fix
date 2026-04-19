@@ -4,11 +4,17 @@
 # Position-only use for now (--no-do on CLI) — different antenna than the
 # shared-antenna pair; does not agree with TimeHat/MadHat/clkPoC3.
 #
-# Same ZED-F9T firmware (TIM 2.20) as F9T-TOP on TimeHat — L5 capable.
+# Reports TIM 2.20 like TimeHat's F9T-TOP, but MON-HW3 vpManager_07=0
+# on this unit (=1 on TimeHat) — the L5 RF front-end is absent.  Factory
+# reset + CFG-SIGNAL-GPS_L5_HEALTH override still NAKs all three 1176.45
+# MHz signals (L5/E5a/B2a).  Locked to L2 profile: GPS L1+L2C, GAL E1+E5a,
+# BDS B1+B2.  GAL dual-band AR still works with CNES (E1C+E5aQ biases
+# match F9T's tracking); GPS AR on L2 needs a phase-bias source with L2L
+# (F9T tracks L2CL, CNES publishes L2W — mismatch).
 serial = "/dev/gnss0"
 baud = 9600
 ubx_port = "I2C"
-receiver = "f9t-l5"
+receiver = "f9t"
 ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
 ssr_ntrip_conf = "ntrip-cnes.conf"
