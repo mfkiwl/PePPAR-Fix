@@ -209,7 +209,17 @@ class CycleSlipMonitor:
                         reasons.append("arc_gap")
 
                 # 3. Geometry-free phase jump between consecutive epochs.
-                phi1, phi2 = obs.get('phi1_cyc'), obs.get('phi2_cyc')
+                #    Uses RAW tracking phase (phi*_raw_cyc) when available,
+                #    falling back to phi*_cyc.  Raw matters because SSR
+                #    phase biases can step by a full wavelength when the
+                #    AC flips its integer-indicator — that is NOT a slip
+                #    in the receiver's tracking loop, but it shows up as
+                #    a 10–65 cm GF jump on the bias-corrected phase.
+                #    Observed on ptpmon 2026-04-19: 7-SV simultaneous
+                #    gf_jump flush at epoch 55, every SV with lock_ms
+                #    stable at 64 s (receiver wasn't slipping).
+                phi1 = obs.get('phi1_raw_cyc', obs.get('phi1_cyc'))
+                phi2 = obs.get('phi2_raw_cyc', obs.get('phi2_cyc'))
                 wl1, wl2 = obs.get('wl_f1'), obs.get('wl_f2')
                 if (phi1 is not None and phi2 is not None and wl1 and wl2
                         and prev.phi1_cyc is not None
@@ -259,11 +269,13 @@ class CycleSlipMonitor:
                     except Exception:
                         log.warning("slip csv write failed", exc_info=True)
 
+            # Store RAW phase for the next epoch's GF comparison — see
+            # detector 3 above for why.
             self._prev[sv] = _PrevObs(
                 t_mono_s=t_mono_s,
                 lock_ms=lock_ms,
-                phi1_cyc=obs.get('phi1_cyc'),
-                phi2_cyc=obs.get('phi2_cyc'),
+                phi1_cyc=obs.get('phi1_raw_cyc', obs.get('phi1_cyc')),
+                phi2_cyc=obs.get('phi2_raw_cyc', obs.get('phi2_cyc')),
                 wl_f1=obs.get('wl_f1'),
                 wl_f2=obs.get('wl_f2'),
             )
