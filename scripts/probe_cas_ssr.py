@@ -48,7 +48,7 @@ def main():
     msg_counts = defaultdict(int)
     start = time.monotonic()
 
-    for parsed in stream.decoded_messages():
+    for parsed in stream.messages():
         ident = str(getattr(parsed, "identity", ""))
         msg_counts[ident] += 1
         try:
