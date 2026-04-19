@@ -14,7 +14,7 @@
 serial = "/dev/gnss0"
 baud = 9600
 ubx_port = "I2C"
-receiver = "f9t"
+receiver = "f9t-l2"
 ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
 ssr_ntrip_conf = "ntrip-cnes.conf"
