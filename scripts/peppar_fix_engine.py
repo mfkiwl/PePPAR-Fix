@@ -869,12 +869,12 @@ def start_ntrip_threads(args, beph, ssr, stop_event):
         t = threading.Thread(
             target=ntrip_reader,
             args=(bias_stream, beph, ssr, stop_event, "SSR-BIAS"),
-            kwargs={'phase_bias_only': True},
+            kwargs={'bias_only': True},
             daemon=True,
         )
         t.start()
         threads.append(t)
-        log.info(f"SSR bias stream (phase-bias only): "
+        log.info(f"SSR bias stream (code+phase bias only): "
                  f"{bias_host}:{bias_p}/{ssr_bias_mount}")
 
     return threads
