@@ -285,12 +285,30 @@ this SSR source alone.
 
 ## Known Broken Things
 
-### BDS is broken with broadcast ephemeris
+### BDS ISB 1500 ns — partly fixed 2026-04-19, full validation pending
 
-Default is `--systems gps,gal`. BDS produces ISBs of 1500+ ns (should
-be <200 ns). Root cause: BDS time system (BDT vs GPST, 14-second offset)
-handling in `broadcast_eph.py` is still wrong despite multiple fix
-attempts. Do NOT enable BDS until this is fixed (see bead `pf-luu`).
+Default is `--systems gps,gal`.  BDS produced ISBs of 1500+ ns
+(should be <200 ns).  Prior attribution to the 14 s BDT/GPST offset
+was wrong — that's already handled correctly in
+`broadcast_eph.py:_bds_seconds_of_week`.  Actual causes identified
+2026-04-19:
+
+1. **BDS signal-code map for RTCM 1260 was wrong** (sig_ids 2-11
+   mis-labeled or missing).  F9T L5-fleet tracks BDS-3 MEO on
+   B1I + B2a-I; sig_id=9 (B2a-I) was stored under the wrong RINEX
+   key, so every BDS L5-band code-bias lookup MISSed.  **Fixed in
+   PR #3, commit `150c495`.**
+2. **Dual-TGD handling for B3I-referenced broadcast clock still
+   open.**  Broadcast clock references B3I; using IF(B1I, B2a-I)
+   needs TGD1 + TGD2 applied with IF coefficients; current code
+   only applies TGD1.  Per-SV leak at the 10-30 ns level.
+
+Validation: single-host GAL+BDS diagnostic should reveal whether
+PR #3 alone drops ISB below 200 ns.  If not, TGD work follows.
+
+Full research + references: `docs/bds-ppp-integration.md`.
+Memory: `project_bds_isb_research.md`.  Old bead `pf-luu` superseded
+by this writeup.
 
 ### ~~F10T on Onocoy doesn't respond to UBX~~ — Onocoy mothballed 2026-04-08
 
@@ -502,6 +520,7 @@ here before changing anything in the areas they cover.
 | [lab-operations.md](docs/lab-operations.md) | **Read before running on any lab host.** Deployment procedure, pre-flight checklist, stumble analysis, standard host layout, future automation work. |
 | [position-bootstrap-reliability-plan.md](docs/position-bootstrap-reliability-plan.md) | Implementation plan to make cold-start Phase-1 trustworthy so lab runs no longer need `--known-pos`. Residual-consistency gate, NAV2 cross-check, harder abort, σ tightening, state persistence. 6 work items, W1–W5 core, W6 fallback. |
 | [l5i-l5q-phase-bias-empirical.md](docs/l5i-l5q-phase-bias-empirical.md) | Empirical proof (19 GPS SVs, lab day0418h) that CNES L5I and WHU L5Q phase biases differ by mean −0.73 m with 1.46 m SD — far beyond the λ/4 carrier-phase offset.  RTCM "phase bias" bundles satellite-side delays + AC-datum offsets + reference-receiver I/Q group delays; can't be substituted with a single-cycle correction.  Supports the dual-mount fusion path. |
+| [bds-ppp-integration.md](docs/bds-ppp-integration.md) | Research notes on BDS PPP integration: the 1500 ns ISB isn't the 14 s BDT/GPST offset (already correct).  Real causes are (1) wrong RTCM 1260 signal-code map — fixed in PR #3, and (2) BDS-3 broadcast clock is B3I-referenced so IF(B1I,B2a-I) needs TGD1+TGD2 not TGD1 alone — still open.  Includes the complete RTCM 3.3 BDS sig-id table and PRIDE/RTKLIB references. |
 
 ## Lab Documentation Pointers
 
