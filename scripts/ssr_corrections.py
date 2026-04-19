@@ -150,13 +150,24 @@ _RTCM_SSR_SIGNAL_MAP = {
     ('R', 1): 'L1P',   # G1 P
     ('R', 2): 'L2C',   # G2 C/A
     ('R', 3): 'L2P',   # G2 P
-    # BeiDou (Table 3.5-105)
+    # BeiDou (RTCM 3.3 Amendment 1 Table 3.5-106, matches RTKLIB
+    # ssr_sig_bds[]).  Prior version had indices 2/3/5/6/9 wrong and
+    # was missing 4/7/8/10/11 — WHU RTCM 1260 (BDS code bias) reported
+    # stored=50, dropped_no_map=46 on ptpmon 2026-04-18 because most
+    # sig_ids landed outside this table.  F9T L2-only hardware tracks
+    # B1I (sig_id=0) + B2I (sig_id=6).
     ('C', 0): 'L2I',   # B1I
     ('C', 1): 'L2Q',   # B1Q
-    ('C', 3): 'L2X',   # B1I+Q
-    ('C', 5): 'L5I',   # B2a I
-    ('C', 6): 'L5Q',   # B2a Q
-    ('C', 9): 'L7I',   # B2b I
+    ('C', 2): 'L2X',   # B1 I+Q
+    ('C', 3): 'L6I',   # B3I
+    ('C', 4): 'L6Q',   # B3Q
+    ('C', 5): 'L6X',   # B3 I+Q
+    ('C', 6): 'L7I',   # B2I (BDS-2 legacy, 1207.14 MHz)
+    ('C', 7): 'L7Q',   # B2Q
+    ('C', 8): 'L7X',   # B2 I+Q
+    ('C', 9): 'L5I',   # B2a I (1176.45 MHz)
+    ('C', 10): 'L5Q',  # B2a Q
+    ('C', 11): 'L5X',  # B2a I+Q
 }
 
 
