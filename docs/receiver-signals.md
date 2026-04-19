@@ -111,29 +111,31 @@ the correct port or observations won't arrive on the host.
 
 ## Hardware variants
 
-Two F9T firmware generations exist in the lab.  The key difference:
-**TIM 2.20 NAKs L5/E5a/B2a signal config keys** — it only accepts L2C/E5b/B2.
-TIM 2.25 (-20B module) accepts both L5 and L2C configs.
+Three F9T variants exist in the lab.  Firmware string alone doesn't
+tell them apart — use **MON-HW3 vpManager_07** to detect L5-capable
+hardware (=1) vs classic L2-only (=0).  See
+`docs/f9t-firmware-capabilities.md` for the full capability matrix.
 
-| | ocxo (E810) | PiPuss | TimeHat |
+| | ptpmon (E810) | TimeHat | MadHat / -20B units |
 |---|---|---|---|
 | **MOD** | ZED-F9T | ZED-F9T | ZED-F9T-20B |
 | **FWVER** | TIM 2.20 | TIM 2.20 | TIM 2.25 |
 | **PROTVER** | 29.20 | 29.20 | 29.25 |
 | **ROM** | 0x118B2060 | 0x118B2060 | 0x3BFC8935 |
-| **Constellations** | GPS;GLO;GAL;BDS | GPS;GLO;GAL;BDS | GPS;GAL;BDS (no GLO) |
-| **Second freq** | L2C, E5b, B2 only | L2C, E5b, B2 only | L5, E5a, B2a (preferred); also L2C |
-| **L5 signal config** | NAK | NAK (assumed) | OK |
+| **vpManager_07** | 0 | 1 | 1 |
+| **Second freq** | L2C, E5b, B2I only | L2C or L5 (not simultaneous) | L5, E5a, B2a (locked; NAKs L2C) |
+| **L5 signal config** | NAK (no RF front-end) | OK | OK |
+| **Driver** | F9TL2E5bDriver | F9TL5Driver (or F9TDriver for diag) | F9TL5Driver |
 | **Transport** | I2C (/dev/gnss0, kernel) | USB serial | USB serial |
-| **Host** | x86 E810-XXVDA4T, OCXO | Raspberry Pi 4 | Raspberry Pi 4, i226 |
+| **Host** | x86 E810-XXVDA4T, OCXO | Raspberry Pi 4, i226 | Raspberry Pi 4 |
 
 ### Auto-detection in peppar-fix
 
-`ensure_receiver_ready()` handles this automatically:
+`ensure_receiver_ready()` handles L5-capable hardware automatically:
 1. Tries L5 signal config (F9TL5Driver)
-2. If NAK'd, falls back to L2C (F9TDriver)
-3. Returns the appropriate driver for the detected signal plan
+2. If NAK'd, falls back to L2C (F9TDriver with E5a)
 
-No profile or manual configuration is needed — the receiver's firmware
-response determines which driver is used.  PROTVER is available in the
-driver object for code that needs to branch on firmware generation.
+This auto-detection does **not** cover the L2-only hardware variant
+(ptpmon) — the fallback F9TDriver expects E5a, which NAKs on L2-only
+hardware.  For those units, set `receiver = "f9t-l2-e5b"` explicitly
+in the host config.

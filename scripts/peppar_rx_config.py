@@ -136,7 +136,7 @@ def run(args):
             ser, ubr = reopen_after_reset(args.serial, wait_s=5)
             # After factory reset, definitely need full configuration
             log.info("Configuring after factory reset...")
-            _do_configure(ser, ubr, args, port_id, driver)
+            _do_configure(ser, ubr, args, port_id, driver, sfrbx_rate=sfrbx_rate)
             ser.close()
             log.info("Factory reset + configure complete")
             return EXIT_OK
@@ -255,15 +255,28 @@ def run(args):
 
 
 def _do_configure(ser, ubr, args, port_id, driver, sfrbx_rate=1):
-    """Apply receiver configuration (signals, messages, rate, tmode, L5)."""
-    configure_signals(ser, ubr, driver=driver)
-    l5_ok = configure_gps_l5_health(ser, ubr)
+    """Apply receiver configuration (signals, messages, rate, tmode, L5).
 
-    if l5_ok:
+    Order mirrors receiver.full_configure(): L5 health override THEN
+    warm-restart THEN signal config.  The receiver's live signal-health
+    table isn't re-read until restart, so CFG_SIGNAL_GPS_L5_ENA=1 NAKs
+    if sent before the override has taken effect — observed on ptpmon
+    2026-04-17 and fixed in 351d6b0 for full_configure; this path
+    (used by --factory-reset) now matches.
+    """
+    if getattr(driver, "supports_l5_health_override", False):
+        configure_gps_l5_health(ser, ubr)
         log.info("  Warm restart for L5 health override...")
         warm_restart(ser)
         ser.close()
         ser, ubr = reopen_after_reset(args.serial, wait_s=10)
+
+    configure_signals(ser, ubr, driver=driver)
+
+    log.info("  Warm restart after signal config...")
+    warm_restart(ser)
+    ser.close()
+    ser, ubr = reopen_after_reset(args.serial, wait_s=10)
 
     configure_rate(ser, ubr, args.rate)
     configure_messages(ser, ubr, port_id, sfrbx_rate=sfrbx_rate)
@@ -316,7 +329,7 @@ Examples:
     )
     ap.add_argument("--target-baud", type=int, default=460800,
                     help="Target UART baud rate (default: 460800, ignored for non-UART ports)")
-    ap.add_argument("--port-type", default="USB", choices=["UART", "UART2", "USB", "SPI"],
+    ap.add_argument("--port-type", default="USB", choices=["UART", "UART2", "USB", "SPI", "I2C"],
                     help="u-blox logical port to configure (default: USB)")
     ap.add_argument("--rate", type=int, default=1,
                     help="Measurement rate in Hz (default: 1)")
