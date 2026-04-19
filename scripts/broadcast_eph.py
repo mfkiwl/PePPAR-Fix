@@ -225,7 +225,14 @@ _BDS_MAP = {
     'Crc':      'DF510',
     'omega':    'DF511',
     'omega_dot': 'DF512',
-    'tgd':      'DF513',    # TGD1
+    'tgd':      'DF513',    # TGD1 — B1I group delay wrt reference
+    'tgd2':     'DF514',    # TGD2 — B2I group delay wrt reference; only
+                            # relevant to BDS-2 B1I+B2I dual-freq.  BDS-3
+                            # MEO doesn't broadcast B2I and the L5-hw
+                            # F9T fleet pairs B1I+B2a (no RTCM 1042 TGD
+                            # for B2a — comes from SSR code bias).
+                            # Still parsed so single-constellation BDS-2
+                            # IF filters can consume it when available.
     'health':   'DF515',
 }
 
