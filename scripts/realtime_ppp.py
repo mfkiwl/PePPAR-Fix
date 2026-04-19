@@ -855,9 +855,19 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         'cno': min(f1['cno'], f2['cno']),
                         'lock_duration_ms': min(f1['lock_ms'], f2['lock_ms']),
                         'half_cyc_ok': True,
-                        # Per-frequency data for MW wide-lane (PPP-AR)
+                        # Per-frequency data for MW wide-lane (PPP-AR).
+                        # phi*_cyc is bias-corrected; MW needs that so the
+                        # wide-lane integer converges to the right value.
                         'phi1_cyc': cp_f1,
                         'phi2_cyc': cp_f2,
+                        # Raw tracking phase BEFORE SSR phase-bias correction.
+                        # CycleSlipMonitor's GF detector uses these — SSR
+                        # phase-bias integer-indicator updates can step by a
+                        # full wavelength, which spoofs gf_jump on bias-
+                        # corrected phase (7-SV false-positive slip burst
+                        # observed on ptpmon 2026-04-19).
+                        'phi1_raw_cyc': f1['cp'],
+                        'phi2_raw_cyc': f2['cp'],
                         'pr1_m': pr_f1,
                         'pr2_m': pr_f2,
                         'wl_f1': wl_f1,
