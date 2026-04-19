@@ -278,6 +278,83 @@ These calibration products enable:
 - Confidence in TDEV measurements (known systematic biases)
 
 
+## Quick Position Check: RTKLIB PPP on a Pi
+
+Experiments 1–3 above are comprehensive calibration campaigns.  For
+a quicker **second-opinion position check** (±5 mm H, ±15 mm V) using
+only the existing F9T and a Raspberry Pi, RTKLIB can do standalone PPP
+post-processing without any reference station or Leica.
+
+### Software
+
+Use the [rtklibexplorer fork](https://github.com/rtklibexplorer/RTKLIB)
+(RTKLIB-EX 2.5.0, successor to "demo5").  It has the best u-blox
+dual-frequency support.
+
+```bash
+git clone https://github.com/rtklibexplorer/RTKLIB.git
+cd RTKLIB/app/convbin/gcc && make        # UBX → RINEX
+cd ../../rnx2rtkp/gcc && make            # post-processing PPP
+```
+
+Both build cleanly on aarch64 Raspberry Pi OS.
+
+### Procedure
+
+1. **Log 2–4 hours of raw observations** from the F9T.  peppar-fix
+   already captures RXM-RAWX; alternatively use `str2str` or a simple
+   UBX logger.  Longer is better — 24h gives mm-level, 2h gives ~1 cm.
+
+2. **Convert to RINEX**:
+
+       ./convbin -r ubx -o obs.rinex raw_log.ubx
+
+3. **Download IGS precise products** for the observation date from
+   [CDDIS](https://cddis.nasa.gov/archive/gnss/products/) or
+   [IGN](http://igs.ign.fr/products):
+   - **SP3** (precise orbits): `igsWWWWD.sp3` or rapid `igrWWWWD.sp3`
+   - **CLK** (precise clocks): `igsWWWWD.clk` or rapid `igrWWWWD.clk`
+   - Final products appear ~12–18 days after observation; rapid
+     products in ~1 day.  For a quick check, rapid is fine.
+
+4. **Run PPP-Static**:
+
+       ./rnx2rtkp -p 7 -sys G,E obs.rinex nav.rinex \
+           -sp3 igsWWWWD.sp3 -clk igsWWWWD.clk -o ppp_result.pos
+
+   `-p 7` selects PPP-Static.  `-sys G,E` processes GPS+Galileo
+   (matching our F9T signal config).
+
+5. **Compare** the RTKLIB solution against peppar-fix's
+   `data/position.json`.  Agreement within 2–3 cm confirms both
+   are correct.  A larger discrepancy warrants investigation
+   (antenna PCO difference, troposphere model, observation quality).
+
+### What this gives vs doesn't give
+
+| Provides | Does not provide |
+|----------|------------------|
+| Independent position in ITRF (±5 mm H / ±15 mm V with 24h) | Cable delay |
+| Cross-check of peppar-fix PPP position | F9T internal delay |
+| Completely different software + correction products | PPS alignment to GPS time |
+| No additional hardware needed | Carrier-phase noise floor (need zero-baseline) |
+
+This is not a substitute for the full calibration campaign — it only
+validates the antenna position.  But it's a useful quick sanity check
+that can be done today with existing hardware.
+
+### Notes
+
+- RTKLIB uses IGS final/rapid products (orbit + clock files), which
+  are different from the SSR corrections peppar-fix uses in real time.
+  This makes the position fix genuinely independent.
+- The F9T's L5 signal config (GPS L1+L5, GAL E1+E5a) is fully
+  supported by RTKLIB-EX.
+- `rtkrcv` can also do real-time PPP if you feed it the F9T's serial
+  stream + an NTRIP SSR correction stream, but post-processing with
+  final products gives a better position.
+
+
 ## Dependencies
 
 - [ ] Identify choke ring antenna model, verify ANTEX entry
@@ -285,4 +362,4 @@ These calibration products enable:
 - [ ] Acquire splitter (Wilkinson preferred for isolation)
 - [ ] Verify Leica PPS output availability and connector type
 - [ ] Determine closest CORS stations and coordinates
-- [ ] Install RTKLIB or equivalent for baseline processing
+- [ ] Install RTKLIB on a lab Pi for baseline processing and PPP
