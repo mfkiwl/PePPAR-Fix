@@ -329,7 +329,7 @@ Examples:
     )
     ap.add_argument("--target-baud", type=int, default=460800,
                     help="Target UART baud rate (default: 460800, ignored for non-UART ports)")
-    ap.add_argument("--port-type", default="USB", choices=["UART", "UART2", "USB", "SPI"],
+    ap.add_argument("--port-type", default="USB", choices=["UART", "UART2", "USB", "SPI", "I2C"],
                     help="u-blox logical port to configure (default: USB)")
     ap.add_argument("--rate", type=int, default=1,
                     help="Measurement rate in Hz (default: 1)")
