@@ -97,6 +97,30 @@ F9T_SIGNAL_CONFIG = {
     "CFG_SIGNAL_QZSS_ENA": 0,
 }
 
+# Classic L1+L2 ZED-F9T hardware (e.g. ptpmon).  Same TIM 2.20 firmware
+# as L5-capable units, but MON-HW3 vpManager_07=0 — the 1176.45 MHz RF
+# front-end is absent, so L5/E5a/B2a all NAK.  GAL second-freq is E5b
+# (1207 MHz); BDS second-freq is B2I (1207 MHz).  Observed on ptpmon
+# 2026-04-18 — factory reset + L5 health override + warm restart could
+# not enable any 1176 MHz signal.
+F9T_SIGNAL_CONFIG_L2_E5B = {
+    "CFG_SIGNAL_GPS_ENA": 1,
+    "CFG_SIGNAL_GPS_L1CA_ENA": 1,
+    "CFG_SIGNAL_GPS_L2C_ENA": 1,
+    "CFG_SIGNAL_GPS_L5_ENA": 0,
+    "CFG_SIGNAL_GAL_ENA": 1,
+    "CFG_SIGNAL_GAL_E1_ENA": 1,
+    "CFG_SIGNAL_GAL_E5A_ENA": 0,
+    "CFG_SIGNAL_GAL_E5B_ENA": 1,
+    "CFG_SIGNAL_BDS_ENA": 1,
+    "CFG_SIGNAL_BDS_B1_ENA": 1,
+    "CFG_SIGNAL_BDS_B2_ENA": 1,
+    "CFG_SIGNAL_BDS_B2A_ENA": 0,
+    "CFG_SIGNAL_GLO_ENA": 0,
+    "CFG_SIGNAL_SBAS_ENA": 0,
+    "CFG_SIGNAL_QZSS_ENA": 0,
+}
+
 # L5 signal plan: GPS L1+L5, GAL E1+E5a, BDS B1+B2a.
 # Preferred for PPP-AR (see rationale above).  Works on all F9T firmware.
 F9T_L5_SIGNAL_CONFIG = {
@@ -239,6 +263,28 @@ class F9TL5Driver(F9TDriver):
     )
 
 
+class F9TL2E5bDriver(F9TDriver):
+    """L2 profile for classic L1+L2 ZED-F9T hardware (no L5 RF).
+
+    Reports TIM 2.20 like L5-capable units but MON-HW3 vpManager_07=0 —
+    the 1176.45 MHz front-end is absent.  GAL second-freq is E5b (1207
+    MHz, matches the L2 RF chain); E5a NAKs.  BDS second-freq is B2I.
+    Observed on ptpmon's onboard F9T 2026-04-18.
+
+    CNES SSRA00CNE0 publishes GAL L7Q (E5b) phase biases alongside L1C,
+    so GAL dual-band AR works on this driver via the existing SSR
+    pipeline.  GPS AR would need an L2L-compatible phase bias source
+    (CNES publishes L2W; F9T tracks L2CL).
+    """
+    name = "ZED-F9T (L1/L2 profile, E5b)"
+    signal_config = F9T_SIGNAL_CONFIG_L2_E5B
+    if_pairs = (
+        ('GPS', 'GPS-L1CA', 'GPS-L2CL', 'G'),
+        ('GAL', 'GAL-E1C', 'GAL-E5bQ', 'E'),
+        ('BDS', 'BDS-B1I', 'BDS-B2I', 'C'),
+    )
+
+
 class F10TDriver(ReceiverDriver):
     name = "NEO-F10T"
     protver = "32"
@@ -254,6 +300,8 @@ def get_driver(name):
         return F9TL5Driver()
     if key in {"f9t-l2", "f9t_l2"}:
         return F9TDriver()
+    if key in {"f9t-l2-e5b", "f9t_l2_e5b"}:
+        return F9TL2E5bDriver()
     if key == "f10t":
         return F10TDriver()
     raise ValueError(f"Unknown receiver model: {name}")
