@@ -785,6 +785,26 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         if cb_f1 is not None and cb_f2 is not None:
                             pr_f1 -= cb_f1
                             pr_f2 -= cb_f2
+                        # Symmetric diagnostic to phase-bias lookup below:
+                        # log once per (sv, f1_sig, f2_sig) whether both
+                        # code biases are available.  Atomic application
+                        # means a single miss leaves the IF pseudorange
+                        # uncorrected — this is the mode that bit L5 hosts
+                        # on WHU and is a prime suspect for the ptpmon L2
+                        # drift.
+                        if not hasattr(ssr, '_cb_lookup_logged'):
+                            ssr._cb_lookup_logged = set()
+                        lk_cb = (sv, f1['sig_name'], f2['sig_name'])
+                        if lk_cb not in ssr._cb_lookup_logged:
+                            avail_cb = list(ssr._code_bias.get(sv, {}).keys())
+                            log.info("Code bias lookup: %s f1=%s→%s(%s) "
+                                     "f2=%s→%s(%s) avail=%s",
+                                     sv, f1['sig_name'], rinex_f1[0],
+                                     "HIT" if cb_f1 is not None else "MISS",
+                                     f2['sig_name'], rinex_f2[0],
+                                     "HIT" if cb_f2 is not None else "MISS",
+                                     avail_cb)
+                            ssr._cb_lookup_logged.add(lk_cb)
 
                     # Apply SSR phase biases before IF combination.
                     # Phase biases make float ambiguities integer-valued,
