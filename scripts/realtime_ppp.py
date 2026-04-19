@@ -120,6 +120,23 @@ BIAS_MSG_TYPES = {
 }
 
 
+# u-blox F9T reports BDS-3 modernized-signal cpMes in L1-reference cycles
+# (i.e. the reported cycle count, when scaled by λ_L1, equals the geometric
+# path).  To obtain native-carrier cycles, multiply the reported cpMes by
+# (λ_L1 / λ_native) = F_native/F_L1.  Verified empirically on ZED-F9T
+# TIM 2.25 at MadHat 2026-04-19.  Legacy BDS-2 signals (B1I, B2I, B3I) are
+# unaffected — they are reported in native cycles like GPS and GAL.
+#
+# B2a-I and B2a-Q are confirmed.  B1C is plausibly the same and listed here
+# tentatively so a GF-DIAG on a B1C-tracking receiver will produce clean
+# numbers if the quirk extends to it; drop from the set if diagnostics show
+# B1C in native cycles.
+_LAMBDA_L1 = C / F_L1
+_BDS_L1_REF_CYCLES = {
+    'BDS-B2aI', 'BDS-B2aQ',
+    'BDS-B1C', 'BDS-B1CD', 'BDS-B1CP',  # tentative — not lab-confirmed yet
+}
+
 SIG_WAVELENGTH = {
     'GPS-L1CA': C / F_L1,
     'GPS-L2CL': C / F_L2,
@@ -735,6 +752,25 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         continue
                     if pr < 1e6 or pr > 4e7:
                         continue
+
+                    # u-blox F9T quirk: BDS-3 modernized signal cpMes is
+                    # reported in L1-reference cycles, not native carrier
+                    # cycles.  Legacy BDS-2 signals (B1I, B2I) are in
+                    # native cycles.  Confirmed 2026-04-19 on MadHat via
+                    # GF-DIAG: cp * λ_native of B2a overshoots the code
+                    # pseudorange by factor F_L1/F_B2a ≈ 1.339, producing
+                    # unphysical 175 m per-epoch GF jumps that cascaded
+                    # into 8.4 km nav2Δ on GAL+BDS runs (see
+                    # memory/project_bds_gf_phase_units_bug.md).
+                    #
+                    # Convert to native cycles so every downstream
+                    # consumer (GF slip detector, MW wide-lane, IF
+                    # ambiguity, integer resolution) sees the physical
+                    # quantity it was designed for.
+                    if cp is not None and cp_valid and sig_name in _BDS_L1_REF_CYCLES:
+                        # cp_native = cp_L1 * (f_native / f_L1)
+                        #           = cp_L1 * λ_L1 / λ_native
+                        cp *= _LAMBDA_L1 / SIG_WAVELENGTH[sig_name]
 
                     raw_obs[sv][role] = {
                         'pr': pr, 'cno': cno,
