@@ -847,6 +847,52 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     pr_if = a1 * pr_f1 - a2 * pr_f2
                     phi_if_m = a1 * wl_f1 * cp_f1 - a2 * wl_f2 * cp_f2
 
+                    # Dual-freq raw-obs diagnostic for the BDS GF blow-up
+                    # investigation (2026-04-19).  Logs two consecutive
+                    # epochs of raw cp/pr/wl for the FIRST SV of each
+                    # constellation, plus a manually-computed GF delta,
+                    # so we can see whether the 60–190 m per-epoch GF on
+                    # BDS is a unit/wavelength bug or a receiver-side
+                    # measurement quirk.  One-shot per (sys, sv) pair.
+                    if not hasattr(serial_reader, '_gf_diag'):
+                        serial_reader._gf_diag = {}
+                    diag = serial_reader._gf_diag
+                    key = (sys_name, sv)
+                    if key not in diag:
+                        diag[key] = {'epoch1': None, 'epoch2': None}
+                    slot = diag[key]
+                    cp1_raw = f1['cp']
+                    cp2_raw = f2['cp']
+                    if slot['epoch1'] is None:
+                        slot['epoch1'] = (cp1_raw, cp2_raw, wl_f1, wl_f2,
+                                          pr_f1, pr_f2, f1['sig_name'],
+                                          f2['sig_name'])
+                    elif slot['epoch2'] is None:
+                        slot['epoch2'] = (cp1_raw, cp2_raw, wl_f1, wl_f2,
+                                          pr_f1, pr_f2, f1['sig_name'],
+                                          f2['sig_name'])
+                        e1 = slot['epoch1']
+                        e2 = slot['epoch2']
+                        gf1 = e1[0]*e1[2] - e1[1]*e1[3]
+                        gf2 = e2[0]*e2[2] - e2[1]*e2[3]
+                        d_phi1 = e2[0] - e1[0]
+                        d_phi2 = e2[1] - e1[1]
+                        d_pr1 = e2[4] - e1[4]
+                        d_pr2 = e2[5] - e1[5]
+                        log.info(
+                            "GF-DIAG %s %s f1=%s(%.4fm) f2=%s(%.4fm) "
+                            "cp1=[%.3f→%.3f Δ%.3f cyc] "
+                            "cp2=[%.3f→%.3f Δ%.3f cyc] "
+                            "pr1_Δ=%.2fm pr2_Δ=%.2fm "
+                            "gf1=%.3fm gf2=%.3fm gf_Δ=%.3fm "
+                            "expected_gf_Δ_from_phi=%.3fm",
+                            sys_name, sv,
+                            e1[6], e1[2], e1[7], e1[3],
+                            e1[0], e2[0], d_phi1,
+                            e1[1], e2[1], d_phi2,
+                            d_pr1, d_pr2,
+                            gf1, gf2, gf2 - gf1,
+                            d_phi1*e1[2] - d_phi2*e1[3])
                     observations.append({
                         'sv': sv,
                         'sys': sys_name,
