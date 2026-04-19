@@ -1,14 +1,24 @@
 # ZED-F9T Firmware Capability Matrix
 
 Experimentally determined 2026-04-14 via factory reset + individual
-CFG-VALSET probing on lab receivers sharing a common antenna/splitter.
+CFG-VALSET probing on lab receivers sharing a common antenna/splitter,
+plus follow-up probing on ptpmon 2026-04-18.
 
 ## Test receivers
 
-| Name | Module | Firmware | PROTVER | SEC-UNIQID | Host |
-|------|--------|----------|---------|------------|------|
-| F9T-TOP | ZED-F9T | TIM 2.20 | 29.20 | 136395244089 | TimeHat |
-| F9T-BOT | ZED-F9T-20B | TIM 2.25 | 29.25 | 262843023907 | MadHat |
+| Name | Module | Firmware | PROTVER | SEC-UNIQID | Host | vpManager_07 |
+|------|--------|----------|---------|------------|------|--------------|
+| F9T-TOP | ZED-F9T | TIM 2.20 | 29.20 | 136395244089 | TimeHat | 1 |
+| F9T-BOT | ZED-F9T-20B | TIM 2.25 | 29.25 | 262843023907 | MadHat | 1 |
+| F9T-PTP | ZED-F9T | TIM 2.20 | 29.20 | 675836739647 | ptpmon | **0** |
+
+`vpManager_07` is bit 7 of the virtual-pin manager bitmap returned by
+UBX-MON-HW3.  On the tested receivers it correlates perfectly with
+the presence of the 1176.45 MHz (L5/E5a/B2a) RF front-end — units
+with =0 NAK every signal in that band.  The firmware/module strings
+give no such hint: ptpmon and TimeHat report identical
+`MOD=ZED-F9T`, `FWVER=TIM 2.20`, `PROTVER=29.20`, and
+`ROM BASE 0x118B2060`.
 
 ## Signal capability matrix
 
@@ -16,19 +26,20 @@ Tested by sending CFG-VALSET (RAM layer) for each key individually
 after a CFG-CFG factory reset (F9T-TOP) or from running state
 (F9T-BOT). ACK = accepted, NAK = rejected by firmware.
 
-| Capability | CFG key | ZED-F9T (TIM 2.20) | ZED-F9T-20B (TIM 2.25) |
-|---|---|---|---|
-| GPS L1 C/A | CFG_SIGNAL_GPS_L1CA_ENA | ACK | ACK |
-| GPS L2C | CFG_SIGNAL_GPS_L2C_ENA | **ACK** | **NAK** |
-| GPS L5 | CFG_SIGNAL_GPS_L5_ENA | **ACK** | ACK |
-| GPS L5 health override | 0x10320001 | **ACK** | ACK |
-| GAL E1 | CFG_SIGNAL_GAL_E1_ENA | ACK | ACK |
-| GAL E5a | CFG_SIGNAL_GAL_E5A_ENA | ACK | ACK |
-| GAL E5b | CFG_SIGNAL_GAL_E5B_ENA | **NAK** | **NAK** |
-| GLONASS | CFG_SIGNAL_GLO_ENA | **NAK** | **NAK** |
-| NavIC | CFG_SIGNAL_NAVIC_ENA | **NAK** | **ACK** |
-| BeiDou B1 | CFG_SIGNAL_BDS_B1_ENA | ACK | ACK |
-| BeiDou B2a | CFG_SIGNAL_BDS_B2A_ENA | (not tested) | (not tested) |
+| Capability | CFG key | ZED-F9T (2.20, L5-hw) | ZED-F9T (2.20, L2-only hw) | ZED-F9T-20B (2.25) |
+|---|---|---|---|---|
+| GPS L1 C/A | CFG_SIGNAL_GPS_L1CA_ENA | ACK | ACK | ACK |
+| GPS L2C | CFG_SIGNAL_GPS_L2C_ENA | **ACK** | **ACK** | **NAK** |
+| GPS L5 | CFG_SIGNAL_GPS_L5_ENA | **ACK** | **NAK** | ACK |
+| GPS L5 health override | 0x10320001 | **ACK** | **ACK** | ACK |
+| GAL E1 | CFG_SIGNAL_GAL_E1_ENA | ACK | ACK | ACK |
+| GAL E5a | CFG_SIGNAL_GAL_E5A_ENA | ACK | **NAK** | ACK |
+| GAL E5b | CFG_SIGNAL_GAL_E5B_ENA | **NAK** | **ACK** | **NAK** |
+| GLONASS | CFG_SIGNAL_GLO_ENA | **NAK** | **NAK** | **NAK** |
+| NavIC | CFG_SIGNAL_NAVIC_ENA | **NAK** | (not tested) | **ACK** |
+| BeiDou B1 | CFG_SIGNAL_BDS_B1_ENA | ACK | ACK | ACK |
+| BeiDou B2 (B2I) | CFG_SIGNAL_BDS_B2_ENA | (not tested) | **ACK** | (not tested) |
+| BeiDou B2a | CFG_SIGNAL_BDS_B2A_ENA | (not tested) | **NAK** | (not tested) |
 
 ## Key findings
 
@@ -39,12 +50,28 @@ Both NAK `GLO_ENA`. The MON-VER extension string on TIM 2.20 lists
 reflection of actual capability. The -20B drops GLO from the string
 entirely.
 
-### ZED-F9T (TIM 2.20) supports BOTH L2C and L5
+### ZED-F9T (TIM 2.20) ships in two RF variants — firmware can't tell
 
-Contrary to prior documentation (`docs/receiver-signals.md` line
-114-126 which claimed TIM 2.20 NAKs L5), the non-20B ZED-F9T
-**accepts both L2C and L5 configuration**. It can run either signal
-plan, just not simultaneously (two-band RF chain limit).
+The plain `MOD=ZED-F9T` string covers two physically distinct parts:
+
+- **L5-capable variant** (F9T-TOP on TimeHat) — 1176.45 MHz front-end
+  present.  Accepts L5/E5a/B2a; NAKs E5b.  Can run either L2C or L5
+  as the second GPS band (two-band RF limit — not simultaneous).
+- **L2-only "classic" variant** (F9T on ptpmon) — no 1176.45 MHz
+  front-end.  NAKs L5/E5a/B2a; accepts L2C + E5b + B2I as the
+  second-band signals.  GPS L5 health override still ACKs (it's a
+  firmware-only CFG key), but any attempt to enable an L5-band
+  signal NAKs regardless of override or factory reset.
+
+The variants report identical firmware/module/PROTVER strings.  The
+only way to tell them apart from software is **MON-HW3 vpManager_07**
+(1 = L5-capable, 0 = L2-only).  Configuration failures that look
+like a firmware dependency-ordering problem on an "identical" unit
+are almost always this hardware split.
+
+The L5-capable ZED-F9T (TIM 2.20) **accepts both L2C and L5
+configuration**. It can run either signal plan, just not
+simultaneously (two-band RF chain limit).
 
 However, there is a sequencing constraint when changing bands via
 **individual** CFG-VALSET keys (not relevant when sending all keys
@@ -71,17 +98,27 @@ frequency.
 
 In exchange, the -20B gained NavIC support.
 
-### GAL E5b is dead on both
+### GAL E5 is hardware-dependent
 
-Neither firmware accepts E5b. The `F9T_SIGNAL_CONFIG` in
-`receiver.py` pairs L2C with E5b, but E5b NAKs on both firmware
-versions tested. This means the L2 signal plan cannot include GAL
-E5b — it would need GAL E5a (which is accepted by both).
+E5a (1176.45 MHz) and E5b (1207.14 MHz) are gated by different RF
+front-ends:
 
-**This is a bug in `receiver.py`**: the `F9TDriver` (L2 profile)
-specifies `GAL_E5B_ENA=1` in `F9T_SIGNAL_CONFIG`, which will NAK.
-The code should use `GAL_E5A_ENA=1` for both L2 and L5 profiles,
-or handle the NAK gracefully.
+- **L5-capable hardware**: accepts E5a, NAKs E5b.
+- **L2-only hardware**: accepts E5b, NAKs E5a.
+
+The `F9TDriver` L2 profile originally specified E5b (classic L1+L2
+u-blox F9T intent), was changed in commit 096dbdc to E5a after
+observing E5b NAKs on L5-hardware units — but that commit's test
+receivers were all L5-hardware.  Both profiles are needed:
+
+- `F9TDriver` — L2 profile with E5a (for L5-hardware units running
+  L2 as a diagnostic mode; GAL single-freq on second band)
+- `F9TL2E5bDriver` — L2 profile with E5b (for classic L2-only
+  hardware like ptpmon; full GAL dual-band)
+
+CNES SSRA00CNE0 publishes both L5Q (E5a) and L7Q (E5b) phase biases,
+so GAL dual-band AR works on either hardware variant with the existing
+SSR pipeline.
 
 ### Default config after factory reset
 
@@ -97,21 +134,25 @@ With L5 enabled and health override applied, all three lab receivers
 (7 GPS L5, 10-11 GAL E5a at the time of measurement). No SV
 dropout difference between firmware versions.
 
-## Summary: what each firmware can actually do
+## Summary: what each variant can actually do
 
-| Feature | ZED-F9T (TIM 2.20) | ZED-F9T-20B (TIM 2.25) |
-|---|---|---|
-| L1 + L2C | Yes | **No** |
-| L1 + L5 | **Yes** | Yes |
-| L5 health override | **Yes** | Yes |
-| GLONASS | No | No |
-| NavIC | No | **Yes** |
-| GAL E5b | No | No |
-| GAL E5a | Yes | Yes |
+| Feature | ZED-F9T 2.20 (L5-hw) | ZED-F9T 2.20 (L2-only hw) | ZED-F9T-20B (2.25) |
+|---|---|---|---|
+| L1 + L2C | Yes | Yes | **No** |
+| L1 + L5 | **Yes** | **No** | Yes |
+| L5 health override CFG key | Yes | Yes (but no effect) | Yes |
+| GLONASS | No | No | No |
+| NavIC | No | (untested) | **Yes** |
+| GAL E5a | Yes | **No** | Yes |
+| GAL E5b | **No** | **Yes** | No |
+| BDS B2I | (untested) | Yes | (untested) |
+| BDS B2a | (untested, expect Yes) | **No** | (untested) |
 
-The ZED-F9T (TIM 2.20) is strictly more capable for our purposes:
-it can run either L2 or L5, while the -20B is locked to L5 only.
-The -20B's NavIC support is not useful for PPP-AR (no SSR corrections
+The L5-hardware ZED-F9T (TIM 2.20) is the most capable: can run
+either L2 or L5, GAL dual-band via E5a.  The classic L2-only
+ZED-F9T (TIM 2.20) is locked to L2, GAL dual-band via E5b.  The
+-20B is locked to L5, GAL dual-band via E5a, and adds NavIC.  The
+-20B's NavIC support is not useful for PPP-AR (no SSR corrections
 available for NavIC).
 
 ## Why L5 is preferred for PPP-AR
@@ -152,11 +193,12 @@ lower code noise means faster WL convergence (fewer epochs to fix
 N_WL).  With L5, WL fixing completes in ~60 epochs; L2 would need
 proportionally more.
 
-### Reason 3: Firmware universality (practical)
+### Reason 3: Fleet uniformity (practical)
 
-L5 works on both ZED-F9T (TIM 2.20) and ZED-F9T-20B (TIM 2.25).
-L2C only works on TIM 2.20.  Preferring L5 avoids firmware-dependent
-behavior in the field.
+Most of our fleet is L5-capable hardware.  Preferring L5 keeps the
+majority of hosts on one signal plan, which simplifies AR tuning
+and cross-host comparison.  The classic L2-only variant (ptpmon)
+is the exception and runs the L2 profile by necessity.
 
 ### What would change with a different SSR source?
 
