@@ -793,18 +793,23 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         # on WHU and is a prime suspect for the ptpmon L2
                         # drift.
                         if not hasattr(ssr, '_cb_lookup_logged'):
-                            ssr._cb_lookup_logged = set()
+                            ssr._cb_lookup_logged = {}
+                        # Key by (sv, f1_sig, f2_sig); value = last-logged
+                        # (hit_f1, hit_f2, tuple(avail_cb)).  Re-log on any
+                        # change so late-arriving bias-mount updates show up
+                        # instead of being hidden by the initial MISS.
                         lk_cb = (sv, f1['sig_name'], f2['sig_name'])
-                        if lk_cb not in ssr._cb_lookup_logged:
-                            avail_cb = list(ssr._code_bias.get(sv, {}).keys())
+                        avail_cb = tuple(sorted(ssr._code_bias.get(sv, {}).keys()))
+                        snap = (cb_f1 is not None, cb_f2 is not None, avail_cb)
+                        if ssr._cb_lookup_logged.get(lk_cb) != snap:
                             log.info("Code bias lookup: %s f1=%s→%s(%s) "
                                      "f2=%s→%s(%s) avail=%s",
                                      sv, f1['sig_name'], rinex_f1[0],
                                      "HIT" if cb_f1 is not None else "MISS",
                                      f2['sig_name'], rinex_f2[0],
                                      "HIT" if cb_f2 is not None else "MISS",
-                                     avail_cb)
-                            ssr._cb_lookup_logged.add(lk_cb)
+                                     list(avail_cb))
+                            ssr._cb_lookup_logged[lk_cb] = snap
 
                     # Apply SSR phase biases before IF combination.
                     # Phase biases make float ambiguities integer-valued,

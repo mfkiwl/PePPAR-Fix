@@ -347,8 +347,44 @@ class SSRState:
 
     @staticmethod
     def _get_sat_id(msg, i):
-        """Get satellite ID from message, trying both IGS and standard RTCM fields."""
-        for field in (f'IDF011_{i:02d}', f'DF068_{i:02d}', f'DF384_{i:02d}'):
+        """Get satellite ID, trying per-constellation RTCM fields + IGS SSR.
+
+        pyrtcm uses distinct DF numbers per GNSS for code/phase bias messages:
+          GPS (1059, 1265): DF068
+          GLO (1065, 1066): DF384
+          GAL (1242, 1267): DF252
+          BDS (1260, 1270): DF488
+        IGS SSR 4076 uses IDF011 for all constellations.  The earlier
+        implementation only tried IDF011 / DF068 / DF384, so GAL and BDS
+        RTCM code-bias messages came back as sats_seen=0 and every bias
+        was silently dropped — observed on ptpmon 2026-04-18 dual-mount.
+        """
+        for field in (f'IDF011_{i:02d}',
+                      f'DF068_{i:02d}',   # GPS
+                      f'DF384_{i:02d}',   # GLO
+                      f'DF252_{i:02d}',   # GAL
+                      f'DF488_{i:02d}'):  # BDS
+            val = getattr(msg, field, None)
+            if val is not None:
+                return int(val)
+        return None
+
+    @staticmethod
+    def _get_sig_id(msg, i, j):
+        """Get signal ID for per-sat bias j, trying per-constellation fields.
+
+        pyrtcm fields for code-bias / phase-bias signal code indicator:
+          GPS: DF380 (code) / DF379 phase-side encoding varies
+          GLO: DF381
+          GAL: DF382
+          BDS: DF467
+        IGS SSR: IDF024.
+        """
+        for field in (f'IDF024_{i:02d}_{j:02d}',
+                      f'DF380_{i:02d}_{j:02d}',   # GPS
+                      f'DF381_{i:02d}_{j:02d}',   # GLO
+                      f'DF382_{i:02d}_{j:02d}',   # GAL
+                      f'DF467_{i:02d}_{j:02d}'):  # BDS
             val = getattr(msg, field, None)
             if val is not None:
                 return int(val)
@@ -454,10 +490,37 @@ class SSRState:
           DF379 = num biases, DF380 = signal ID, DF383 = bias (m)
         IGS SSR fields: IDF023/024/025
         """
+        identity = str(getattr(msg, 'identity', ''))
+        # Pick the signal-code map based on message source.  IGS SSR 4076
+        # subtypes use IGS's own signal numbering (captured in
+        # _SSR_SIGNAL_MAP); standard RTCM 1059/1065/1242/1260 use the
+        # RTCM 3.x tables (Table 3.5-91/100/101/...) captured in
+        # _RTCM_SSR_SIGNAL_MAP.  The maps disagree for most sig_ids —
+        # e.g. GPS sig_id 14 is "L5I" in RTCM but "C5Q" in IGS SSR — so
+        # using the wrong map either drops the bias or labels it under
+        # the wrong RINEX code.  Before this split the IGS map was used
+        # for all messages, which silently misfiled WHU's GPS L5I/L5Q
+        # biases under swapped keys (L5-host dual-mount was still
+        # functional because AR's phase-bias path dominates, but the
+        # ~10–25 cm per-SV code-bias error translated to ~8 cm residual
+        # clock/position bias after SV averaging).  RTCM-map results use
+        # the L-prefix tracking-mode label (e.g. "L5Q"); for code biases
+        # we store under the C-prefix observable code ("C5Q").
+        if identity.startswith('4076_'):
+            signal_map = _SSR_SIGNAL_MAP
+            rtcm_style = False
+        else:
+            signal_map = _RTCM_SSR_SIGNAL_MAP
+            rtcm_style = True
+
+        _dropped_no_map = 0
+        _stored = 0
+        _sats_seen = 0
         for i in range(1, n_sats + 1):
             sat_id = self._get_sat_id(msg, i)
             if sat_id is None:
                 continue
+            _sats_seen += 1
             prn = f"{sys_prefix}{sat_id:02d}"
 
             # Try IGS then standard
@@ -467,23 +530,44 @@ class SSRState:
             n_biases = int(n_biases)
 
             for j in range(1, n_biases + 1):
-                sig_id = getattr(msg, f'IDF024_{i:02d}_{j:02d}', None)
-                if sig_id is None:
-                    sig_id = getattr(msg, f'DF380_{i:02d}_{j:02d}', None)
+                sig_id = self._get_sig_id(msg, i, j)
                 bias_m = getattr(msg, f'IDF025_{i:02d}_{j:02d}', None)
                 if bias_m is None:
                     bias_m = getattr(msg, f'DF383_{i:02d}_{j:02d}', None)
                 if sig_id is None or bias_m is None:
                     continue
-                rinex_code = _SSR_SIGNAL_MAP.get((sys_prefix, int(sig_id)))
-                if rinex_code is None:
+                mapped = signal_map.get((sys_prefix, int(sig_id)))
+                if mapped is None:
+                    _dropped_no_map += 1
                     continue
+                # RTCM map stores tracking-mode labels as L-prefix; flip
+                # to C-prefix for code-observable dict keys.
+                if rtcm_style and mapped.startswith('L'):
+                    rinex_code = 'C' + mapped[1:]
+                else:
+                    rinex_code = mapped
+                _stored += 1
                 self._code_bias[prn][rinex_code] = BiasCorrection(
                     signal_code=rinex_code, bias_m=float(bias_m), is_phase=False,
                     rx_mono=rx_mono,
                     queue_remains=queue_remains,
                     correlation_confidence=correlation_confidence,
                 )
+        # One-shot diagnostic: log a summary the first time any given
+        # (identity, sys_prefix) pair is parsed, to expose the RTCM-vs-IGS
+        # signal-map gap.  Two bad outcomes to catch:
+        #   n_sats=0 / _sats_seen=0  →  pyrtcm didn't decode the message
+        #   _dropped_no_map > 0 with _stored == 0  →  every sig_id was
+        #     unknown in _SSR_SIGNAL_MAP (wrong map for RTCM 10xx/12xx).
+        if not hasattr(self, '_cb_parse_logged'):
+            self._cb_parse_logged = set()
+        lk = (identity, sys_prefix)
+        if lk not in self._cb_parse_logged:
+            log.info("code_bias parse: id=%s sys=%s n_sats=%d sats_seen=%d "
+                     "stored=%d dropped_no_map=%d",
+                     identity, sys_prefix, n_sats, _sats_seen,
+                     _stored, _dropped_no_map)
+            self._cb_parse_logged.add(lk)
 
     def _parse_phase_bias(self, msg, sys_prefix, n_sats,
                           rx_mono=None, queue_remains=None, correlation_confidence=None):
