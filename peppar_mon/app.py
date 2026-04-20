@@ -1,72 +1,80 @@
 """peppar-mon Textual app — scaffold.
 
-Starts as Textual's canonical clock example: a centered ``Digits``
-widget showing the current local time, updating once per second.
+Two lines of text, updated once per second:
 
-Once this runs end-to-end (terminal via ``python -m peppar_mon``, web
-via ``textual serve peppar_mon.app:PepparMonApp``), it gets fleshed
-out into the real status display by:
+  - local time HH:MM:SS with the system's tz suffix (e.g. "21:57:15 CDT")
+  - "PePPAR-Fix UpTime  Dd Hh Mm"
 
-  1. Adding a log-tailer input thread that reads the engine's logs
-  2. Parsing structured ``[TAG] key=value`` lines into a state store
-  3. Adding widgets that render the store — SV state histogram, NL
-     fix count, nav2Δ, host state machine, etc.
+Plain ``Static`` widgets, no segmented digits.  Once the log-tailer
+lands, the uptime source switches from the monitor's own start time
+to the engine's (parsed from the first [STATE] line of the log);
+the label stays the same so the display doesn't visibly flip.
 
-This file stays ``< 150 lines`` for as long as the scaffold lives so
-the structure stays grokable while we're iterating on it.
+Fleshed out in subsequent commits:
+
+  1. Log-tailer input thread (reads the engine log file).
+  2. Parser for [TAG] key=value lines into a state store.
+  3. Widgets for SV-state histogram, NL fix count, nav2Δ, host state.
 """
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 from textual.app import App, ComposeResult
-from textual.widgets import Digits, Header, Footer
+from textual.containers import Vertical
+from textual.widgets import Static, Header, Footer
+
+from peppar_mon._util import format_uptime
 
 
 class PepparMonApp(App):
-    """Status display for PePPAR-Fix.
-
-    Right now: a clock.  The point is to prove the Textual scaffold +
-    the `textual serve` web path work end-to-end before we wire in
-    engine log parsing.
-    """
+    """Status display for PePPAR-Fix — scaffold version."""
 
     CSS = """
     Screen {
         align: center middle;
     }
 
-    Digits {
+    #clock, #uptime {
         width: auto;
+        padding: 0 1;
+    }
+
+    #clock {
         color: $accent;
+        text-style: bold;
     }
     """
 
     TITLE = "peppar-mon"
-    SUB_TITLE = "scaffold — clock only"
+    SUB_TITLE = "scaffold"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
-        yield Digits("")
+        with Vertical():
+            yield Static("", id="clock")
+            yield Static("", id="uptime")
         yield Footer()
 
     def on_ready(self) -> None:
+        # Monotonic reference captured at startup.  When the log tailer
+        # lands, `_start_mono` is replaced with (or shadowed by) the
+        # engine's reported start time — the label text doesn't change.
+        self._start_mono = time.monotonic()
         self._tick()
-        # Run once per second.  Textual schedules set_interval callbacks
-        # on its own event loop, so the UI thread stays responsive.
+        # Textual schedules set_interval callbacks on its own event
+        # loop so the UI thread stays responsive.
         self.set_interval(1.0, self._tick)
 
     def _tick(self) -> None:
-        # System local time — datetime.now() returns naive local time by
-        # default.  .astimezone() attaches the system's local tz so we
-        # get the abbreviation (e.g. "CDT") for the footer display.
+        # datetime.now() is naive-local-time; .astimezone() attaches the
+        # system's tz so strftime("%Z") yields the abbreviation (e.g. CDT).
         now = datetime.now().astimezone()
-        digits = self.query_one(Digits)
-        digits.update(now.strftime("%H:%M:%S"))
-        # Put the date + tz abbreviation in the header's sub-title so
-        # it's visible without adding a second widget.
-        self.sub_title = now.strftime("%Y-%m-%d %Z")
+        self.query_one("#clock", Static).update(now.strftime("%H:%M:%S %Z"))
+        up = format_uptime(time.monotonic() - self._start_mono)
+        self.query_one("#uptime", Static).update(f"PePPAR-Fix UpTime  {up}")
 
 
 if __name__ == "__main__":
