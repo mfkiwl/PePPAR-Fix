@@ -11,3 +11,6 @@ smbus2
 allantools
 matplotlib
 pandas
+
+# peppar-mon status display (Textual TUI / `textual serve` for web)
+textual>=0.50

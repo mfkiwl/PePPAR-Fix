@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# peppar-mon — status display for PePPAR-Fix
+#
+# Thin launcher: discovers the Python venv, sets PYTHONPATH so the
+# top-level `peppar_mon` package is importable, and execs the app.
+#
+# Usage:
+#   peppar-mon                  # TUI in the current terminal
+#   peppar-mon --web [--port P] # browser via textual serve (defaults to 8000)
+#
+# The monitor reads the engine's log files — it does not import engine
+# internals.  See peppar_mon/__init__.py for the boundary contract.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+PYTHON_BIN="python3"
+if [[ -x "$REPO_ROOT/venv/bin/python" ]]; then
+    PYTHON_BIN="$REPO_ROOT/venv/bin/python"
+elif [[ -x "$HOME/pygpsclient/bin/python" ]]; then
+    PYTHON_BIN="$HOME/pygpsclient/bin/python"
+fi
+
+# Repo root on PYTHONPATH so `import peppar_mon` works.  We intentionally
+# do NOT add scripts/ — peppar-mon must not be able to import engine
+# modules by accident.  The boundary test enforces this at check time;
+# the launcher enforces it at run time.
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
+# --web → textual serve; everything else → direct TUI run.
+if [[ "${1:-}" == "--web" ]]; then
+    shift
+    PORT="${1:-8000}"
+    [[ "${1:-}" =~ ^[0-9]+$ ]] && shift || true
+    exec "$PYTHON_BIN" -m textual serve \
+        --port "$PORT" \
+        "peppar_mon.app:PepparMonApp" "$@"
+else
+    exec "$PYTHON_BIN" -m peppar_mon "$@"
+fi

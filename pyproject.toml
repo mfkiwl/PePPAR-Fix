@@ -23,7 +23,12 @@ dependencies = [
 [project.optional-dependencies]
 timebeat = ["smbus2"]
 analysis = ["allantools", "matplotlib", "pandas"]
-dev = ["pytest", "peppar-fix[analysis,timebeat]"]
+# peppar-mon — status display (scaffold in peppar_mon/).  Textual is the
+# only dep; no numpy/pyubx2/etc.  The monitor reads log files produced by
+# the engine and is explicitly forbidden from importing peppar_fix — see
+# peppar_mon/tests/test_boundary.py for the enforcement.
+mon = ["textual>=0.50"]
+dev = ["pytest", "peppar-fix[analysis,timebeat,mon]"]
 
 # Entry points — these become CLI commands after `pip install`.
 # Not yet functional: requires the import refactor (all bare imports
@@ -37,7 +42,8 @@ dev = ["pytest", "peppar-fix[analysis,timebeat]"]
 # peppar-rx-config = "peppar_fix.peppar_rx_config:main"
 
 [tool.setuptools.packages.find]
-where = ["scripts"]
+where = ["scripts", "."]
+include = ["peppar_fix*", "peppar_mon*"]
 
 [tool.setuptools.package-data]
 peppar_fix = ["*.toml"]
