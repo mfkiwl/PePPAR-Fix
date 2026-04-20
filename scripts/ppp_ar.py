@@ -104,6 +104,19 @@ class MelbourneWubbenaTracker:
             pr1_m, pr2_m: pseudorange in meters
             f1, f2: frequencies in Hz
         """
+        # Admit: receiver-tracked SV passing the elev/health/constellation
+        # gate enters processing.  MW.update is the first hook that sees
+        # a dual-frequency observation that has passed all those gates,
+        # so it's the natural place to transition TRACKING → FLOAT.
+        # Idempotent for SVs already in FLOAT or later states.
+        if self._sv_state is not None:
+            cur = self._sv_state.state(sv)
+            if cur is SvAmbState.TRACKING:
+                self._sv_state.transition(
+                    sv, SvAmbState.FLOAT,
+                    epoch=self._current_epoch, reason="admit",
+                )
+
         lambda_wl = C / (f1 - f2)
         mw = self._mw_meters(phi1_cyc, phi2_cyc, pr1_m, pr2_m, f1, f2)
 
