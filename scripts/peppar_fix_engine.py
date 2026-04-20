@@ -1762,7 +1762,14 @@ class AntPosEstThread(threading.Thread):
             for obs in observations:
                 self._sv_state.mark_seen(obs['sv'], self._n_epochs)
             if self._n_epochs % 60 == 0:  # sweep every ~1 min
-                self._sv_state.forget_stale(self._n_epochs, 600)
+                dropped = self._sv_state.forget_stale(self._n_epochs, 600)
+                # Keep the promoter's candidate map in sync — when a
+                # record is forgotten (arc boundary), any in-flight
+                # candidate for that SV is also stale.
+                for sv in dropped:
+                    self._promoter.forget(sv)
+                    self._false_fix.forget(sv)
+                    self._setting_drop.forget(sv)
             for ev in self._promoter.evaluate(self._n_epochs):
                 log.info(
                     "Promoted %s → NL_LONG_FIXED (Δaz=%.1f°, first=%s, now=%.0f°)",

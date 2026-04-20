@@ -147,26 +147,59 @@ class PromoterCleanWindowTest(unittest.TestCase):
 
 
 class PromoterInteractionTest(unittest.TestCase):
-    def test_forgets_candidate_when_sv_leaves_short(self):
+    def test_preserves_candidate_across_slip_and_refix(self):
+        """Day0419i bug: cycle slips on frequently-slipping SVs were
+        dropping the promoter's accumulator, so 8° Δaz never completed
+        even when integers were fine.  Accumulator now persists across
+        transient state excursions (slip → FLOAT → re-fix).
+        """
         t = SvStateTracker()
-        p = LongTermPromoter(t, dphi_threshold_deg=15.0,
-                               clean_window_epochs=30, eval_every=10)
+        p = LongTermPromoter(t, dphi_threshold_deg=8.0,
+                             clean_window_epochs=30, eval_every=10)
         t.transition("E20", SvAmbState.FLOAT, epoch=0)
         t.transition("E20", SvAmbState.WL_FIXED, epoch=1)
         t.transition("E20", SvAmbState.NL_SHORT_FIXED, epoch=2,
                      reason="test", az_deg=0.0)
-        for a in (5.0, 10.0, 15.0):
+        # Accumulate 5° across NL_SHORT_FIXED epochs.
+        for a in (1.0, 2.0, 3.0, 4.0, 5.0):
             p.ingest_az("E20", a)
-        # SV dropped by setting-SV monitor (NL_SHORT_FIXED → FLOAT).
-        t.transition("E20", SvAmbState.FLOAT, epoch=5,
-                     reason="setting_sv_drop:synthetic")
-        # ingest_az for a FLOAT SV is a no-op — but any subsequent
-        # evaluate() should drop the stale candidate.
-        p.ingest_az("E20", 20.0)
+        # Cycle slip takes SV back to FLOAT mid-probation.
+        t.transition("E20", SvAmbState.FLOAT, epoch=6,
+                     reason="slip:mw_jump conf=LOW")
+        # During slip, ingest_az is a no-op.  Candidate preserved.
+        p.ingest_az("E20", 6.0)
+        # SV re-fixes shortly after.
+        t.transition("E20", SvAmbState.WL_FIXED, epoch=7)
+        t.transition("E20", SvAmbState.NL_SHORT_FIXED, epoch=8,
+                     reason="test:refix", az_deg=6.0)
+        # Accumulate another 4° post-refix.
+        for a in (7.0, 8.0, 9.0, 10.0):
+            p.ingest_az("E20", a)
+        # Total Δaz: 5° (pre-slip) + 4° (post-refix) ≥ 8° threshold.
+        # Before the fix, re-fix would have dropped the candidate and
+        # reset accumulated_dphi to 0, so promotion would not fire.
         events = p.evaluate(10)
-        self.assertEqual(events, [])
-        # The SV did not get promoted; it's in FLOAT.
-        self.assertIs(t.state("E20"), SvAmbState.FLOAT)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['sv'], "E20")
+        self.assertIs(t.state("E20"), SvAmbState.NL_LONG_FIXED)
+
+    def test_forget_drops_candidate(self):
+        """Arc-boundary forget() (called from engine after forget_stale)
+        must drop the candidate so the next arc starts clean.
+        """
+        t = SvStateTracker()
+        p = LongTermPromoter(t, dphi_threshold_deg=8.0,
+                             clean_window_epochs=30, eval_every=10)
+        t.transition("E21", SvAmbState.FLOAT, epoch=0)
+        t.transition("E21", SvAmbState.WL_FIXED, epoch=1)
+        t.transition("E21", SvAmbState.NL_SHORT_FIXED, epoch=2,
+                     reason="test", az_deg=0.0)
+        for a in (5.0, 10.0):
+            p.ingest_az("E21", a)
+        # Arc boundary: engine decides this SV is set and drops it.
+        p.forget("E21")
+        # Candidate should be gone.
+        self.assertNotIn("E21", p._cands)
 
 
 if __name__ == "__main__":

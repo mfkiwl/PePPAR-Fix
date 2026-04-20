@@ -81,19 +81,25 @@ class LongTermPromoter:
     def ingest_az(self, sv: str, az_deg: Optional[float]) -> None:
         """Record this SV's current azimuth this epoch.
 
-        Only NL_SHORT_FIXED SVs are tracked; calls for other states are
-        no-ops (reduces bookkeeping on SVs whose promotion isn't
-        relevant, and avoids leaking state across slip → FLOAT → re-fix
-        cycles).
+        Only NL_SHORT_FIXED SVs get their accumulator updated; calls
+        for other states skip the update but preserve the candidate
+        state.  Candidates are dropped by:
+          - `note_false_fix_rejection` (real integer problem)
+          - `forget(sv)` called by the engine when the tracker forgets
+            the record (arc boundary)
+
+        Transient state excursions (cycle slip → FLOAT → re-fix) do
+        NOT drop the candidate.  Day0419i data showed E23 slipping
+        every 3-8 min; under the old "drop on state change" behavior
+        the accumulator never completed 8° because each slip reset
+        it.  Preserving it across slip/re-fix cycles lets a signal
+        that's merely noisy still earn long-term promotion.
         """
         if az_deg is None:
             return
         if self._tracker.state(sv) is not SvAmbState.NL_SHORT_FIXED:
-            # Stop tracking if SV left NL_SHORT_FIXED.  Re-entering
-            # NL_SHORT_FIXED from a fresh fix starts a new candidate
-            # because the tracker's first_fix_az_deg will have been
-            # re-populated on the transition.
-            self._cands.pop(sv, None)
+            # Candidate (if any) stays in _cands for later resumption.
+            # The accumulated_dphi is preserved across the gap.
             return
         rec = self._tracker.get(sv)
         c = self._cands.get(sv)
