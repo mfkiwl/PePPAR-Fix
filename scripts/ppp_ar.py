@@ -250,6 +250,7 @@ class NarrowLaneResolver:
     def __init__(self, frac_threshold=0.10, sigma_threshold=0.12,
                  corner_margin_sum=1.6, blacklist_epochs=60,
                  ar_elev_mask_deg=20.0,
+                 lambda_min_p_bootstrap=0.97,
                  sv_state: SvStateTracker | None = None,
                  nl_diag: NlDiagLogger | None = None):
         self.frac_threshold = frac_threshold    # |N1_frac| < this to fix
@@ -276,6 +277,15 @@ class NarrowLaneResolver:
         self.last_ratio = 0.0   # LAMBDA ratio test value (0 = not attempted)
         self.last_method = ""   # "lambda" or "rounding"
         self.last_success_rate = 0.0  # bootstrap success rate (0 = not computed)
+        # LAMBDA P_bootstrap threshold.  Classical PPP-AR literature uses 0.999,
+        # but day0419f NL_DIAG data (see project_nl_diag_classification_20260419
+        # and project_ptpmon_nl_diag_result_20260419) showed P saturates at
+        # 0.96-0.99 for n=4 batches on L5-fleet and ptpmon runs regardless of
+        # per-SV σ tightness — a mechanical ceiling.  Lowering the threshold
+        # to 0.97 lets LAMBDA succeed without the ratio test being loosened;
+        # FFRT (active via ratio_threshold=None, P_fail=0.001) still provides
+        # the primary reliability guard.
+        self._lambda_min_p_bootstrap = float(lambda_min_p_bootstrap)
         # Anti-lock-in: after PFR (or any external agent) unfixes an SV,
         # skip it from candidates for this many epochs so the next NL
         # attempt doesn't immediately propose the same wrong integer.
@@ -557,13 +567,14 @@ class NarrowLaneResolver:
         # not the intended 0.1%.
         fixed_vec, n_fixed, ratio, mask = lambda_resolve(
             n1_vec, Qa_nl, ratio_threshold=None, min_fixed=4,
-            min_success_rate=0.999)
+            min_success_rate=self._lambda_min_p_bootstrap)
 
         if fixed_vec is None:
             self.last_ratio = ratio
-            if self.last_success_rate < 0.999:
-                log.debug("LAMBDA skipped: bootstrap P=%.4f (need 0.999), "
-                          "%d candidates", self.last_success_rate, n_amb)
+            if self.last_success_rate < self._lambda_min_p_bootstrap:
+                log.debug("LAMBDA skipped: bootstrap P=%.4f (need %.3f), "
+                          "%d candidates", self.last_success_rate,
+                          self._lambda_min_p_bootstrap, n_amb)
                 if self._nl_diag is not None:
                     self._nl_diag.set_lambda_batch_result(
                         svs, ratio=ratio, p_bootstrap=self.last_success_rate,
