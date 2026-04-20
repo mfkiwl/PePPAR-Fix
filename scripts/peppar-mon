@@ -5,11 +5,13 @@
 # top-level `peppar_mon` package is importable, and execs the app.
 #
 # Usage:
-#   peppar-mon                  # TUI in the current terminal
-#   peppar-mon --web [--port P] # browser via textual serve (defaults to 8000)
+#   peppar-mon PATH/engine.log           # TUI in the current terminal
+#   peppar-mon --web 8000 PATH/eng.log   # textual serve to browser on :8000
 #
-# The monitor reads the engine's log files — it does not import engine
-# internals.  See peppar_mon/__init__.py for the boundary contract.
+# The log file argument is mandatory — peppar-mon's display is driven
+# entirely by the engine's log, so running without one has nothing to
+# show.  The monitor reads the log file but does not import engine
+# internals; see peppar_mon/__init__.py for the boundary contract.
 
 set -euo pipefail
 

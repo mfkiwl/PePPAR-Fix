@@ -26,7 +26,6 @@ from __future__ import annotations
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
@@ -58,14 +57,10 @@ class PepparMonApp(App):
     TITLE = "peppar-mon"
     SUB_TITLE = "scaffold"
 
-    def __init__(self, log_path: Optional[Path] = None) -> None:
+    def __init__(self, log_path: Path) -> None:
         super().__init__()
-        self.log_path = log_path
-        self._reader: Optional[LogReader] = None
-        # Fallback uptime reference — the monitor's own start time.
-        # Used until / unless the LogReader recovers the engine's
-        # start time from the log file.
-        self._own_start_mono = time.monotonic()
+        self.log_path = Path(log_path)
+        self._reader: LogReader = LogReader(self.log_path)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -75,12 +70,8 @@ class PepparMonApp(App):
         yield Footer()
 
     def on_ready(self) -> None:
-        if self.log_path is not None:
-            self._reader = LogReader(self.log_path)
-            self._reader.start()
-            self.sub_title = f"reading {self.log_path}"
-        else:
-            self.sub_title = "no --log — showing peppar-mon uptime only"
+        self.sub_title = f"reading {self.log_path}"
+        self._reader.start()
         self._tick()
         # Textual schedules set_interval callbacks on its own event
         # loop so the UI thread stays responsive.
@@ -88,8 +79,7 @@ class PepparMonApp(App):
 
     def on_unmount(self) -> None:
         # Best-effort teardown when the app exits.
-        if self._reader is not None:
-            self._reader.stop()
+        self._reader.stop()
 
     def _tick(self) -> None:
         # datetime.now() is naive-local-time; .astimezone() attaches the
@@ -99,28 +89,23 @@ class PepparMonApp(App):
         self.query_one("#uptime", Static).update(self._uptime_line())
 
     def _uptime_line(self) -> str:
-        """Render the uptime row, preferring engine uptime when known.
+        """Render the uptime row.
 
-        Once the LogReader has recovered the engine's start time,
-        uptime is ``datetime.now() − engine_start_time``.  Until then
-        we fall back to the monitor's own process uptime — labelled so
-        the reader isn't misled about the source.
+        When the LogReader has parsed a timestamped line (which happens
+        within one poll interval of the log file appearing), uptime is
+        ``datetime.now() − engine_start_time``.  Before that — e.g. the
+        engine hasn't started yet, or the log exists but is still empty
+        — the row shows ``(waiting)`` so the user knows the reader is
+        alive but hasn't found a start timestamp yet.
         """
-        engine_start = (
-            self._reader.state.engine_start_time
-            if self._reader is not None else None
-        )
-        if engine_start is not None:
-            # Both are naive-local (see parse_log_timestamp) — subtract
-            # directly; no tz arithmetic required.
-            elapsed_s = (datetime.now() - engine_start).total_seconds()
-            up = format_uptime(max(0.0, elapsed_s))
-            return f"PePPAR-Fix UpTime  {up}"
-        # Fallback: peppar-mon's own uptime.  Label shows "(monitor)" so
-        # the user knows they're looking at a different clock until the
-        # engine log is parsed.
-        up = format_uptime(time.monotonic() - self._own_start_mono)
-        return f"PePPAR-Fix UpTime  (monitor) {up}"
+        engine_start = self._reader.state.engine_start_time
+        if engine_start is None:
+            return "PePPAR-Fix UpTime  (waiting for first log line)"
+        # Both are naive-local (see parse_log_timestamp) — subtract
+        # directly; no tz arithmetic required.
+        elapsed_s = (datetime.now() - engine_start).total_seconds()
+        up = format_uptime(max(0.0, elapsed_s))
+        return f"PePPAR-Fix UpTime  {up}"
 
 
 if __name__ == "__main__":
