@@ -565,8 +565,14 @@ class NarrowLaneResolver:
         # too loose for small n_amb, which is the regime we're in on
         # GAL-only: ratio=2.0 at n_amb=5 corresponds to ~5% failure rate,
         # not the intended 0.1%.
+        # min_fixed=3 enables one extra PAR retry for n=4 batches: if full
+        # 4-SV attempt fails (bootstrap, <2 candidates, or FFRT ratio),
+        # drop worst and try 3.  Day0419g data showed REJECT_LAMBDA_RATIO
+        # dominant at n=4 after the P_bootstrap fix — PAR at min_fixed=4
+        # couldn't retry the subset.  FFRT's critical ratio scales with n,
+        # so the 0.001 failure target still holds at 3.
         fixed_vec, n_fixed, ratio, mask = lambda_resolve(
-            n1_vec, Qa_nl, ratio_threshold=None, min_fixed=4,
+            n1_vec, Qa_nl, ratio_threshold=None, min_fixed=3,
             min_success_rate=self._lambda_min_p_bootstrap)
 
         if fixed_vec is None:
