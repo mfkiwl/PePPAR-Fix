@@ -95,6 +95,19 @@ class LogState:
     #: snapshot.
     sv_states: dict[str, str] = field(default_factory=dict)
 
+    #: Constellation prefixes that have NL integer-fix capability
+    #: given the receiver + correction streams currently connected.
+    #: Populated from ``Phase bias lookup`` log lines: if any SV of
+    #: constellation X has been seen with both f1 and f2 bias HITs,
+    #: X is in this set.  Used by SvStateTable to render ``-`` in
+    #: NL cells for constellations that *architecturally* can't
+    #: reach NL (ptpmon F9T-L2 tracking L2W + CNES publishing L2L
+    #: → GPS never NL-capable).  Latched on first HIT-HIT; never
+    #: downgraded, because a single confirmed SV proves the bias
+    #: pair exists in the stream.
+    nl_capable_constellations: frozenset[str] = field(
+        default_factory=frozenset)
+
 
 class LogReader:
     """Threaded engine-log consumer.
@@ -201,6 +214,43 @@ class LogReader:
             self.state.last_line_time = ts
         self._parse_state_line(line)
         self._parse_sv_state_line(line)
+        self._parse_phase_bias_lookup(line)
+
+    def _parse_phase_bias_lookup(self, line: str) -> None:
+        """Look for ``Phase bias lookup: <sv> f1=...(HIT|MISS) f2=...(HIT|MISS)``.
+
+        Engine emits one per SV as it's first processed with SSR
+        biases active.  Both HITs → constellation of this SV can
+        reach NL (the IF ambiguity has a matched phase-bias pair).
+
+        We latch the constellation as NL-capable on the first HIT-
+        HIT and never downgrade.  A single confirmed SV proves the
+        bias pair exists in the stream for that system — other SVs
+        of the same constellation may fall in and out of individual
+        HIT status (newly-arrived SVs, stale biases) but the
+        capability is a property of the correction stream, not of
+        any one SV.
+
+        The complement is the useful signal here: if no SV of
+        constellation X ever shows HIT-HIT, X stays out of the set
+        and the widget renders ``-`` for NL cells — matches the
+        ptpmon+CNES reality where GPS's L2W tracking never lines
+        up with CNES's L2L phase-bias publication.
+        """
+        m = _PHASE_BIAS_LOOKUP_RE.search(line)
+        if m is None:
+            return
+        sv = m.group("sv")
+        f1_ok = m.group("f1_status") == "HIT"
+        f2_ok = m.group("f2_status") == "HIT"
+        if not (f1_ok and f2_ok):
+            return
+        prefix = sv[:1]
+        if prefix in self.state.nl_capable_constellations:
+            return  # already latched
+        self.state.nl_capable_constellations = (
+            self.state.nl_capable_constellations | frozenset({prefix})
+        )
 
     def _parse_sv_state_line(self, line: str) -> None:
         """Extract per-SV state from ``[SV_STATE] <sv>: <from> → <to>``.
@@ -271,4 +321,19 @@ _STATE_LINE_RE = re.compile(
 _SV_STATE_LINE_RE = re.compile(
     r"\[SV_STATE\] (?P<sv>[A-Z]\d{2,3}): "
     r"(?P<from>[A-Z_]+) → (?P<to>[A-Z_]+)\b"
+)
+
+# Matches ``Phase bias lookup: G24 f1=GPS-L1CA→('C1C', 'L1C')(HIT) ``
+# ``f2=GPS-L2CL→('C2L', 'L2L')(MISS) avail=[...]``.  We only need
+# the SV identifier and the two HIT/MISS statuses — the details
+# after ``avail=`` aren't used.  The signal-mapping itself contains
+# a tuple in parens (``('C1C', 'L1C')``), so the regex between
+# ``f1=`` and ``(HIT|MISS)`` uses non-greedy ``.*?`` to skip past
+# the tuple and lock onto the status parens.  Engine's format is
+# stable because it's part of the log contract
+# (scripts/realtime_ppp.py).
+_PHASE_BIAS_LOOKUP_RE = re.compile(
+    r"Phase bias lookup: (?P<sv>[A-Z]\d{2,3})\s+"
+    r"f1=.*?\((?P<f1_status>HIT|MISS)\)\s+"
+    r"f2=.*?\((?P<f2_status>HIT|MISS)\)"
 )

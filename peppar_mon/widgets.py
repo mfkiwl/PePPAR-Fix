@@ -31,20 +31,33 @@ _CONSTELLATION_ROWS: tuple[tuple[str, str], ...] = (
     ("C", "BDS"),
 )
 
-# Column definitions: (header label, SvAmbState values aggregated).
+# Column definitions: (header, aggregated states, needs_nl_capability).
+# The third field flags columns whose values should render as ``-``
+# (architecturally impossible) when the constellation lacks NL
+# capability — i.e. when the receiver's tracked signals don't line
+# up with the correction stream's published phase biases for NL
+# integer fixing.  Only NL_SHORT and NL_LONG need the capability
+# check; Tracked/WL/SQUELCHED are reachable on any dual-freq GNSS.
+#
 # TRACKING and FLOAT are pooled into "Tracked" because the distinction
 # (receiver-sees vs admitted) isn't operationally meaningful at a
 # glance — what matters is "we see it but haven't integer-fixed it."
-# WL/NL_SHORT/NL_LONG are each their own column since they're distinct
-# steps in the promotion ladder.  SQUELCHED is its own column so a
-# cooldown-dominated constellation is visible.
-_COLUMNS: tuple[tuple[str, frozenset[str]], ...] = (
-    ("Tracked",   frozenset({"TRACKING", "FLOAT"})),
-    ("WL",        frozenset({"WL_FIXED"})),
-    ("NL_SHORT",  frozenset({"NL_SHORT_FIXED"})),
-    ("NL_LONG",   frozenset({"NL_LONG_FIXED"})),
-    ("SQUELCHED", frozenset({"SQUELCHED"})),
+_COLUMNS: tuple[tuple[str, frozenset[str], bool], ...] = (
+    ("Tracked",   frozenset({"TRACKING", "FLOAT"}),    False),
+    ("WL",        frozenset({"WL_FIXED"}),             False),
+    ("NL_SHORT",  frozenset({"NL_SHORT_FIXED"}),       True),
+    ("NL_LONG",   frozenset({"NL_LONG_FIXED"}),        True),
+    ("SQUELCHED", frozenset({"SQUELCHED"}),            False),
 )
+
+# Rendered in cells that are architecturally impossible given the
+# receiver+corrections combination.  Contrast with ``0``, which
+# means "currently none but could rise."  The distinction matters
+# on ptpmon where the GPS NL columns stay ``-`` the whole run
+# because CNES's L2L phase biases don't match the F9T's L2W
+# tracking — that failure mode is fundamentally different from
+# "no NL fixes have landed yet but they could."
+_NOT_POSSIBLE = "-"
 
 
 class StateBar(Widget):
@@ -193,56 +206,91 @@ class SvStateTable(Widget):
         self,
         *,
         sv_states: Optional[Mapping[str, str]] = None,
+        nl_capable: Optional[Iterable[str]] = None,
         id: Optional[str] = None,  # noqa: A002 — Textual ctor kwarg
     ) -> None:
         super().__init__(id=id)
         self._sv_states: Mapping[str, str] = dict(sv_states or {})
+        self._nl_capable: frozenset[str] = frozenset(nl_capable or ())
 
-    def update_sv_states(
-        self, sv_states: Mapping[str, str],
+    def update(
+        self,
+        *,
+        sv_states: Mapping[str, str],
+        nl_capable: Iterable[str] = (),
     ) -> None:
-        """Record a new sv_states snapshot and refresh.
+        """Record a new snapshot and refresh if anything visible changed.
 
-        We compare by counts-per-cell, not by the raw dict, because
-        the dict changes on every SV transition but most of those
-        transitions won't move any cell count (e.g. a WL_FIXED SV
-        cycling into NL_SHORT_FIXED and back doesn't change the
-        aggregated totals when both happen between ticks).  Saves
-        repaints on busy logs.
+        Change detection compares:
+          * aggregated cell counts (what the widget actually shows)
+          * nl_capable set (flips NL columns between "-" and counts)
+        Updates that don't move either are silently dropped to avoid
+        repaints on busy logs where per-SV churn doesn't move the
+        displayed totals.
         """
         new_counts = _aggregate(sv_states)
         old_counts = _aggregate(self._sv_states)
-        if new_counts == old_counts:
+        new_cap = frozenset(nl_capable)
+        if new_counts == old_counts and new_cap == self._nl_capable:
             # Still replace the stored dict so future diffs compare
             # against the latest snapshot — but skip the refresh().
             self._sv_states = dict(sv_states)
             return
         self._sv_states = dict(sv_states)
+        self._nl_capable = new_cap
         self.refresh()
+
+    # Historical single-arg update.  Kept as a thin wrapper so
+    # tests and callers that only care about sv_states don't break
+    # when the NL-capability feature lands.
+    def update_sv_states(
+        self, sv_states: Mapping[str, str],
+    ) -> None:
+        self.update(sv_states=sv_states, nl_capable=self._nl_capable)
 
     # ── Rendering ───────────────────────────────────────────────── #
 
     def render(self) -> Table:  # noqa: D401 — Rich-style
-        """Render the fixed-shape table with current counts."""
+        """Render the fixed-shape table with current counts.
+
+        Cell rules:
+          * Constellation never observed (no SV of that prefix has
+            ever been in sv_states) → every cell in the row
+            renders ``-``.  Protects the operator from reading a
+            legitimate "0" when the constellation is actually
+            disabled (engine's ``systems=`` arg) or simply not
+            visible on this antenna.
+          * Column requires NL capability and the constellation
+            isn't in ``nl_capable`` → cell renders ``-``.  That's
+            the architectural "can't get here" signal.
+          * Otherwise → integer count (including plain ``0`` when
+            the constellation is observed and capable but no SVs
+            are currently in the column's state set).
+        """
         counts = _aggregate(self._sv_states)
+        observed = frozenset(counts.keys())
         table = Table(
-            box=None,      # the app container has its own padding
+            box=None,
             padding=(0, 1),
             show_header=True,
             show_edge=False,
         )
-        # Left column is the constellation label; the rest are state
-        # aggregates from _COLUMNS.
         table.add_column("", style="bold")
-        for col_name, _members in _COLUMNS:
-            # Right-justify numeric columns so varying widths line up.
+        for col_name, _members, _needs_nl in _COLUMNS:
             table.add_column(col_name, justify="right")
         for prefix, label in _CONSTELLATION_ROWS:
             row_counts = counts.get(prefix, {})
             cells = [label]
-            for _col_name, members in _COLUMNS:
-                n = sum(row_counts.get(m, 0) for m in members)
-                cells.append(str(n))
+            constellation_observed = prefix in observed
+            nl_capable = prefix in self._nl_capable
+            for _col_name, members, needs_nl in _COLUMNS:
+                if not constellation_observed:
+                    cells.append(_NOT_POSSIBLE)
+                elif needs_nl and not nl_capable:
+                    cells.append(_NOT_POSSIBLE)
+                else:
+                    n = sum(row_counts.get(m, 0) for m in members)
+                    cells.append(str(n))
             table.add_row(*cells)
         return table
 

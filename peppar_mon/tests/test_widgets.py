@@ -182,12 +182,18 @@ class SvStateTableRenderTest(unittest.TestCase):
         self.assertIn("BDS", out)
 
     def test_counts_partition_correctly(self):
-        """Cells match `_aggregate` output for a known input."""
-        self.table.update_sv_states({
-            "G05": "FLOAT", "G10": "FLOAT", "G17": "WL_FIXED",
-            "E21": "NL_LONG_FIXED", "E05": "NL_SHORT_FIXED",
-            "C32": "SQUELCHED",
-        })
+        """Cells match `_aggregate` output for a known input.
+        All three constellations are NL-capable here so the NL
+        cells render counts (not ``-``) — isolates partitioning
+        from the capability signal tested separately below."""
+        self.table.update(
+            sv_states={
+                "G05": "FLOAT", "G10": "FLOAT", "G17": "WL_FIXED",
+                "E21": "NL_LONG_FIXED", "E05": "NL_SHORT_FIXED",
+                "C32": "SQUELCHED",
+            },
+            nl_capable=frozenset("GEC"),
+        )
         from rich.console import Console
         console = Console(width=100, record=True, legacy_windows=False)
         console.print(self.table.render())
@@ -213,9 +219,12 @@ class SvStateTableRenderTest(unittest.TestCase):
         """SQUELCHED SVs don't fall into Tracked — they're their own
         column.  Catches a common source of mis-aggregation where
         "SV not in fix set" gets conflated with "tracked"."""
-        self.table.update_sv_states({
-            "G05": "SQUELCHED", "G10": "SQUELCHED", "G17": "FLOAT",
-        })
+        self.table.update(
+            sv_states={
+                "G05": "SQUELCHED", "G10": "SQUELCHED", "G17": "FLOAT",
+            },
+            nl_capable=frozenset("G"),
+        )
         from rich.console import Console
         console = Console(width=100, record=True, legacy_windows=False)
         console.print(self.table.render())
@@ -230,9 +239,10 @@ class SvStateTableRenderTest(unittest.TestCase):
         """TRACKING and FLOAT both land in the "Tracked" column —
         the distinction is less useful than "admitted-but-not-fixed"
         grouping."""
-        self.table.update_sv_states({
-            "G05": "TRACKING", "G10": "FLOAT",
-        })
+        self.table.update(
+            sv_states={"G05": "TRACKING", "G10": "FLOAT"},
+            nl_capable=frozenset("G"),
+        )
         from rich.console import Console
         console = Console(width=100, record=True, legacy_windows=False)
         console.print(self.table.render())
@@ -264,6 +274,123 @@ class SvStateTableRenderTest(unittest.TestCase):
         # change, so refresh must fire.
         self.table.update_sv_states({"G05": "WL_FIXED"})
         self.assertEqual(calls["n"], 2)
+
+
+class SvStateTableCapabilityTest(unittest.TestCase):
+    """``-`` vs ``0`` distinction driven by nl_capable set and
+    observed-constellation set."""
+
+    def _render(self, table):
+        from rich.console import Console
+        console = Console(width=100, record=True, legacy_windows=False)
+        console.print(table.render())
+        return console.export_text()
+
+    def test_unobserved_constellation_renders_all_dashes(self):
+        """Constellation never observed in sv_states (e.g. BDS on a
+        run with systems=gps,gal) → entire row renders ``-``.
+        Protects operator from reading a "0" as "currently none"
+        when it really means "not configured"."""
+        table = SvStateTable()
+        table.update(sv_states={"G05": "FLOAT"}, nl_capable=frozenset("G"))
+        out = self._render(table)
+        bds_line = next(line for line in out.splitlines() if "BDS" in line)
+        self.assertEqual(
+            bds_line.split(), ["BDS", "-", "-", "-", "-", "-"],
+        )
+
+    def test_nl_cells_dash_when_not_capable(self):
+        """Observed constellation without NL capability (ptpmon GPS
+        case: tracked, WL reachable, but L2L phase biases missing)
+        → Tracked/WL/SQUELCHED render counts, NL cells render ``-``."""
+        table = SvStateTable()
+        table.update(
+            sv_states={"G05": "FLOAT", "G10": "WL_FIXED"},
+            nl_capable=frozenset(),  # GPS not NL-capable
+        )
+        out = self._render(table)
+        gps_line = next(line for line in out.splitlines() if "GPS" in line)
+        self.assertEqual(
+            gps_line.split(), ["GPS", "1", "1", "-", "-", "0"],
+        )
+
+    def test_nl_cells_zero_when_capable_but_empty(self):
+        """Observed + NL-capable constellation with no NL fixes yet
+        → NL cells render ``0`` (not ``-``).  This is the
+        distinction that lets an operator see the filter is in a
+        position to promote SVs even when none have promoted yet."""
+        table = SvStateTable()
+        table.update(
+            sv_states={"E05": "FLOAT", "E10": "WL_FIXED"},
+            nl_capable=frozenset("E"),
+        )
+        out = self._render(table)
+        gal_line = next(line for line in out.splitlines() if "GAL" in line)
+        self.assertEqual(
+            gal_line.split(), ["GAL", "1", "1", "0", "0", "0"],
+        )
+
+    def test_ptpmon_scenario(self):
+        """End-to-end ptpmon day0421c picture: GPS SVs tracked + WL
+        but zero NL capability; GAL has full capability with some
+        counts in each state; BDS not present.  Expected rendering:
+
+            GPS  3  6  -  -  0
+            GAL  3  4  1  0  2
+            BDS  -  -  -  -  -
+        """
+        sv_states = {
+            # GPS: 3 in tracked, 6 in WL, 0 in NL states, 0 squelched.
+            **{f"G0{i}": "FLOAT" for i in range(1, 4)},
+            **{f"G1{i}": "WL_FIXED" for i in range(0, 6)},
+            # GAL: 3 tracked, 4 WL, 1 NL_SHORT, 0 NL_LONG, 2 squelched.
+            **{f"E0{i}": "FLOAT" for i in range(1, 4)},
+            **{f"E1{i}": "WL_FIXED" for i in range(0, 4)},
+            "E21": "NL_SHORT_FIXED",
+            "E22": "SQUELCHED",
+            "E23": "SQUELCHED",
+            # BDS: none.
+        }
+        table = SvStateTable()
+        table.update(sv_states=sv_states, nl_capable=frozenset("E"))
+        out = self._render(table)
+        gps_line = next(line for line in out.splitlines() if "GPS" in line)
+        gal_line = next(line for line in out.splitlines() if "GAL" in line)
+        bds_line = next(line for line in out.splitlines() if "BDS" in line)
+        self.assertEqual(
+            gps_line.split(), ["GPS", "3", "6", "-", "-", "0"],
+        )
+        self.assertEqual(
+            gal_line.split(), ["GAL", "3", "4", "1", "0", "2"],
+        )
+        self.assertEqual(
+            bds_line.split(), ["BDS", "-", "-", "-", "-", "-"],
+        )
+
+    def test_capability_flip_triggers_refresh(self):
+        """When nl_capable gains a new constellation, the table must
+        refresh — cells flip from ``-`` to counts, which is a visible
+        change even if sv_states didn't move."""
+        table = SvStateTable()
+        table.update(
+            sv_states={"E05": "WL_FIXED"}, nl_capable=frozenset(),
+        )
+        calls = {"n": 0}
+
+        def fake_refresh():
+            calls["n"] += 1
+        table.refresh = fake_refresh  # type: ignore[method-assign]
+
+        # Same sv_states, different nl_capable — must refresh.
+        table.update(
+            sv_states={"E05": "WL_FIXED"}, nl_capable=frozenset("E"),
+        )
+        self.assertEqual(calls["n"], 1)
+        # Same sv_states AND same nl_capable — no-op.
+        table.update(
+            sv_states={"E05": "WL_FIXED"}, nl_capable=frozenset("E"),
+        )
+        self.assertEqual(calls["n"], 1)
 
 
 if __name__ == "__main__":

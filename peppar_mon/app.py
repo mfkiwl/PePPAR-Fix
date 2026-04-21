@@ -153,8 +153,9 @@ class PepparMonApp(App):
             current=s.do_freq_est_state,
             visited=s.do_freq_est_visited,
         )
-        self.query_one("#sv-state-table", SvStateTable).update_sv_states(
-            s.sv_states,
+        self.query_one("#sv-state-table", SvStateTable).update(
+            sv_states=s.sv_states,
+            nl_capable=s.nl_capable_constellations,
         )
 
     def _uptime_line(self) -> str:

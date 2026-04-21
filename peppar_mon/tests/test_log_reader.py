@@ -227,6 +227,78 @@ class StateLineParsingTest(unittest.TestCase):
         self.assertIsNone(r.state.do_freq_est_state)
 
 
+class PhaseBiasCapabilityTest(unittest.TestCase):
+    """``Phase bias lookup`` lines feed nl_capable_constellations.
+
+    Matches the engine-side signal that distinguishes architecturally-
+    reachable NL states from merely-empty ones: a HIT-HIT lookup for
+    any SV of a constellation proves the correction stream has the
+    phase-bias pair needed to reach NL.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "engine.log"
+
+    def test_both_hit_latches_constellation(self):
+        """HIT on f1 AND f2 for any GAL SV → GAL NL-capable."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO Phase bias lookup: E34 "
+            "f1=GAL-E1C→('C1C', 'L1C')(HIT) f2=GAL-E5bQ→('C7Q', 'L7Q')"
+            "(HIT) avail=['L1C', 'L5Q', 'L7Q']\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: "E" in r.state.nl_capable_constellations)
+        self.assertIn("E", r.state.nl_capable_constellations)
+
+    def test_miss_on_f2_keeps_constellation_out(self):
+        """GPS f1=HIT, f2=MISS (ptpmon + CNES reality) → GPS stays
+        out of nl_capable_constellations across the whole run."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO Phase bias lookup: G24 "
+            "f1=GPS-L1CA→('C1C', 'L1C')(HIT) f2=GPS-L2CL→('C2L', 'L2L')"
+            "(MISS) avail=['L1C', 'L2W', 'L5I']\n"
+            "2026-04-21 07:00:01,000 INFO Phase bias lookup: G12 "
+            "f1=GPS-L1CA→('C1C', 'L1C')(HIT) f2=GPS-L2CL→('C2L', 'L2L')"
+            "(MISS) avail=['L1C', 'L2W']\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.lines_read >= 2)
+        self.assertNotIn("G", r.state.nl_capable_constellations)
+
+    def test_one_hit_hit_sv_is_enough(self):
+        """Capability latches on the first HIT-HIT for any SV of a
+        constellation; subsequent MISS-containing lookups for other
+        SVs of the same constellation don't downgrade."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO Phase bias lookup: E34 "
+            "f1=GAL-E1C→('C1C', 'L1C')(HIT) f2=GAL-E5bQ→('C7Q', 'L7Q')"
+            "(HIT) avail=['L1C', 'L7Q']\n"
+            # Later SV with a MISS — shouldn't un-latch E.
+            "2026-04-21 07:00:01,000 INFO Phase bias lookup: E99 "
+            "f1=GAL-E1C→('C1C', 'L1C')(HIT) f2=GAL-E5bQ→('C7Q', 'L7Q')"
+            "(MISS) avail=[]\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: "E" in r.state.nl_capable_constellations)
+        self.assertIn("E", r.state.nl_capable_constellations)
+
+    def test_multiple_constellations_independent(self):
+        """GAL NL-capable doesn't make GPS NL-capable."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO Phase bias lookup: E34 "
+            "f1=GAL-E1C→('C1C', 'L1C')(HIT) f2=GAL-E5bQ→('C7Q', 'L7Q')"
+            "(HIT) avail=[]\n"
+            "2026-04-21 07:00:01,000 INFO Phase bias lookup: G24 "
+            "f1=GPS-L1CA→('C1C', 'L1C')(HIT) f2=GPS-L2CL→('C2L', 'L2L')"
+            "(MISS) avail=[]\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: "E" in r.state.nl_capable_constellations)
+        self.assertEqual(r.state.nl_capable_constellations, frozenset({"E"}))
+
+
 class SvStateParsingTest(unittest.TestCase):
     """[SV_STATE] transitions feed the per-SV state dict."""
 
