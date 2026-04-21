@@ -36,7 +36,10 @@ class OSBParser:
 
     def _parse(self, path):
         in_solution = False
-        with open(path) as f:
+        # CODE / IGN BIA files often have non-UTF-8 bytes (umlauts in
+        # author credits); decode with errors='replace' so we don't
+        # crash before reaching the ASCII +BIAS/SOLUTION block.
+        with open(path, encoding='utf-8', errors='replace') as f:
             for line in f:
                 if line.startswith('+BIAS/SOLUTION'):
                     in_solution = True

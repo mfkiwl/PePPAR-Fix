@@ -86,21 +86,79 @@ _SYS_TO_LOWER = {'GPS': 'gps', 'GAL': 'gal', 'BDS': 'bds',
                  'GLO': 'glo', 'QZS': 'qzs'}
 
 
-def _build_obs_for_filter(rx_obs, gps_time):
+# L2C-family tracking modes (L, S, X) and L5 I-or-combined (Q, X) all
+# target the same physical signal, and analysis centers typically
+# publish one bias value that covers all tracking variants.  CODE's
+# IAR products for 2020/001 specifically publish L2X as the canonical
+# L2C attribute and verifiably use **identical** numeric values for
+# L2C/L2W/L2X (e.g. G08 all three = 0.70203 ns).  RINEX OBS files,
+# however, typically record whichever variant the receiver happened to
+# track — L2L on a Septentrio.  Without this fallback, every L2L/L2S
+# lookup misses and the harness processes uncorrected phase.
+_OSB_ATTR_FALLBACK = {
+    'L5Q': ('L5X',), 'L5X': ('L5Q',),
+    'L2L': ('L2X', 'L2C'), 'L2S': ('L2X', 'L2C'),
+    'L2C': ('L2X',), 'L2X': ('L2C',),
+    'C5Q': ('C5X',), 'C5X': ('C5Q',),
+    'C2L': ('C2X', 'C2C'), 'C2S': ('C2X', 'C2C'),
+    'C2C': ('C2X',), 'C2X': ('C2C',),
+    'C1C': ('C1X',), 'C1X': ('C1C',),
+    'L1C': ('L1X',), 'L1X': ('L1C',),
+}
+
+
+def _osb_get(osb, sv: str, code: str):
+    """OSB lookup with tracking-attribute fallback for CODE-style BIA files."""
+    v = osb.get_osb(sv, code)
+    if v is not None:
+        return v
+    for alt in _OSB_ATTR_FALLBACK.get(code, ()):
+        v = osb.get_osb(sv, alt)
+        if v is not None:
+            return v
+    return None
+
+
+def _build_obs_for_filter(rx_obs, gps_time, osb=None):
     """Convert SvObservation list to the dict format PPPFilter.update
     expects (matches realtime_ppp.serial_reader output, including the
-    lowercase 'sys' name convention)."""
+    lowercase 'sys' name convention).
+
+    If an OSBParser is supplied, satellite-side code + phase biases are
+    subtracted from the raw observations before the IF combination is
+    formed — matching what `solve_ppp.load_ppp_epochs` does for the
+    RAWX path.  Without this correction, per-SV L1-L5 ISC biases of
+    several meters leak into pseudorange residuals."""
+    try:
+        from solve_ppp import SIG_TO_RINEX
+    except ImportError:
+        SIG_TO_RINEX = {}
     out = []
     for o in rx_obs:
-        # Compute IF combination
+        # Compute IF combination coefficients
         f1 = C_LIGHT / o.wl_f1
         f2 = C_LIGHT / o.wl_f2
         a1 = f1 * f1 / (f1 * f1 - f2 * f2)
         a2 = -f2 * f2 / (f1 * f1 - f2 * f2)
-        pr_if = a1 * o.pr1_m + a2 * o.pr2_m
-        # Phase combination: convert cycles → meters first
+        pr1 = o.pr1_m
+        pr2 = o.pr2_m
         phi1_m = o.phi1_cyc * o.wl_f1
         phi2_m = o.phi2_cyc * o.wl_f2
+        if osb is not None:
+            rinex_f1 = SIG_TO_RINEX.get(o.f1_sig_name)
+            rinex_f2 = SIG_TO_RINEX.get(o.f2_sig_name)
+            if rinex_f1 and rinex_f2:
+                c1 = _osb_get(osb, o.sv, rinex_f1[0])
+                c2 = _osb_get(osb, o.sv, rinex_f2[0])
+                if c1 is not None and c2 is not None:
+                    pr1 -= c1
+                    pr2 -= c2
+                p1 = _osb_get(osb, o.sv, rinex_f1[1])
+                p2 = _osb_get(osb, o.sv, rinex_f2[1])
+                if p1 is not None and p2 is not None:
+                    phi1_m -= p1
+                    phi2_m -= p2
+        pr_if = a1 * pr1 + a2 * pr2
         phi_if_m = a1 * phi1_m + a2 * phi2_m
         out.append({
             'sv': o.sv,
@@ -141,12 +199,46 @@ def run(args) -> int:
     obs_hdr = parse_obs_header(obs_path)
     interval_s = obs_hdr.interval_s or 30.0
 
-    # Load broadcast ephemeris from RINEX NAV
-    nav_path = Path(args.nav)
-    beph = BroadcastEphemeris()
-    n_eph = load_into_ephemeris(nav_path, beph)
-    log.info("Loaded %d broadcast ephemeris records (%d SVs)",
-             n_eph, beph.n_satellites)
+    # Ephemeris source: SP3 precise orbits when available (sub-cm
+    # accuracy), broadcast NAV otherwise (~1–2 m).  Both provide the
+    # same `sat_position(sv, t) → (pos, clk)` interface, so the filter
+    # doesn't care which it gets.
+    if args.sp3:
+        from solve_pseudorange import SP3
+        sp3 = SP3(args.sp3)
+        log.info("Loaded SP3: %d epochs, %d SVs",
+                 len(sp3.epochs), len(sp3.positions))
+        eph_source = sp3
+    else:
+        nav_path = Path(args.nav) if args.nav else None
+        if nav_path is None:
+            log.error("must provide --nav or --sp3")
+            return 2
+        beph = BroadcastEphemeris()
+        n_eph = load_into_ephemeris(nav_path, beph)
+        log.info("Loaded %d broadcast ephemeris records (%d SVs)",
+                 n_eph, beph.n_satellites)
+        eph_source = beph
+
+    # Optional high-rate satellite clock file.  30 s RINEX CLK files
+    # from analysis centers override the 300 s SP3 clocks with ~30–50 ps
+    # accuracy — essential for sub-dm PPP since the 300 s SP3 clock
+    # interpolation error can be several ns of pseudorange.
+    clk_file = None
+    if args.clk:
+        from ppp_corrections import CLKFile
+        clk_file = CLKFile(args.clk)
+        log.info("Loaded CLK: %d SVs", len(clk_file._t0))
+
+    # Optional satellite-side code + phase bias file (Bias-SINEX OSB).
+    # CODE, WUM, and CNES all publish these; applying them removes the
+    # per-SV L1-L5 ISC biases and (for phase) enables PPP-AR downstream.
+    osb = None
+    if args.bia:
+        from ppp_corrections import OSBParser
+        osb = OSBParser(args.bia)
+        log.info("Loaded OSB: %d (PRN, signal) bias entries across %d SVs",
+                 len(osb.biases), len(osb.prns()))
 
     # Filter is initialised lazily on the first usable epoch — we use
     # ls_init() to seed both position AND receiver clock from that
@@ -179,7 +271,7 @@ def run(args) -> int:
             n_skipped_empty += 1
             continue
 
-        observations = _build_obs_for_filter(sv_obs_list, t)
+        observations = _build_obs_for_filter(sv_obs_list, t, osb=osb)
 
         # First-usable-epoch bootstrap via ls_init: solves for
         # position + receiver-clock offset from the IF pseudoranges
@@ -189,7 +281,7 @@ def run(args) -> int:
         if filt is None:
             try:
                 ls_result, ls_ok, ls_n = ls_init(
-                    observations, beph, t, clk_file=None,
+                    observations, eph_source, t, clk_file=clk_file,
                 )
             except Exception as e:
                 log.warning("ls_init failed at epoch %d: %s", ep_idx, e)
@@ -215,13 +307,13 @@ def run(args) -> int:
                 filt.predict(dt)
         prev_t = t
 
-        # Filter update — beph supplies sat_position which returns
-        # (pos, clk).  clk_file=None tells the filter to use the clock
-        # value from sat_position (BroadcastEphemeris doesn't expose a
-        # separate sat_clock method, unlike CLK precise products).
+        # Filter update — eph_source supplies sat_position which returns
+        # (pos, clk).  clk_file overrides the clock when given (high-rate
+        # CLK product); otherwise the filter uses the clock value from
+        # sat_position.
         try:
             n_used, resid, sys_counts = filt.update(
-                observations, beph, t, clk_file=None,
+                observations, eph_source, t, clk_file=clk_file,
             )
         except Exception as e:
             log.error("filt.update failed at epoch %d (%s): %s",
@@ -280,8 +372,18 @@ def main():
     )
     ap.add_argument("--obs", required=True,
                     help="RINEX 3.x OBS file (PRIDE-PPPAR or IGS MGEX)")
-    ap.add_argument("--nav", required=True,
-                    help="RINEX 3.x NAV file (broadcast ephemeris)")
+    ap.add_argument("--nav", default=None,
+                    help="RINEX 3.x NAV file (broadcast ephemeris).  "
+                         "Either --nav or --sp3 must be provided.")
+    ap.add_argument("--sp3", default=None,
+                    help="SP3 precise orbit file (e.g. CODE com20863.eph).  "
+                         "If provided, overrides --nav as the orbit source "
+                         "and gives sub-cm satellite position accuracy.")
+    ap.add_argument("--clk", default=None,
+                    help="RINEX CLK file with high-rate precise clocks "
+                         "(e.g. CODE com20863.clk at 30 s).  Overrides the "
+                         "clock values from --sp3 / --nav.  Required for "
+                         "sub-dm results.")
     ap.add_argument("--bia", default=None,
                     help="Optional Bias-SINEX OSB file")
     ap.add_argument("--truth", required=True,
