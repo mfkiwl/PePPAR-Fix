@@ -227,5 +227,98 @@ class StateLineParsingTest(unittest.TestCase):
         self.assertIsNone(r.state.do_freq_est_state)
 
 
+class SvStateParsingTest(unittest.TestCase):
+    """[SV_STATE] transitions feed the per-SV state dict."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "engine.log"
+
+    def test_transition_updates_sv_state(self):
+        """Basic case: one SV transitions TRACKING → FLOAT → WL_FIXED,
+        final value in sv_states matches the last transition."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO [SV_STATE] G05: TRACKING → "
+            "FLOAT (epoch=10)\n"
+            "2026-04-21 07:00:30,000 INFO [SV_STATE] G05: FLOAT → "
+            "WL_FIXED (epoch=40)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.sv_states.get("G05") == "WL_FIXED")
+        self.assertEqual(r.state.sv_states.get("G05"), "WL_FIXED")
+
+    def test_multi_sv_independent_tracking(self):
+        """Concurrent SVs: each tracked independently, no cross-talk."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO [SV_STATE] G05: TRACKING → "
+            "FLOAT (epoch=10)\n"
+            "2026-04-21 07:00:01,000 INFO [SV_STATE] E21: TRACKING → "
+            "FLOAT (epoch=10)\n"
+            "2026-04-21 07:00:02,000 INFO [SV_STATE] C32: TRACKING → "
+            "FLOAT (epoch=10)\n"
+            "2026-04-21 07:00:03,000 INFO [SV_STATE] E21: FLOAT → "
+            "WL_FIXED (epoch=15)\n"
+            "2026-04-21 07:00:04,000 INFO [SV_STATE] E21: WL_FIXED → "
+            "NL_SHORT_FIXED (epoch=20)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(
+            lambda: r.state.sv_states.get("E21") == "NL_SHORT_FIXED",
+        )
+        self.assertEqual(r.state.sv_states.get("G05"), "FLOAT")
+        self.assertEqual(r.state.sv_states.get("E21"), "NL_SHORT_FIXED")
+        self.assertEqual(r.state.sv_states.get("C32"), "FLOAT")
+
+    def test_squelched_is_captured(self):
+        """SVs squelched after false-fix should land with their
+        SQUELCHED state reflected — needed for the table's
+        SQUELCHED column."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO [SV_STATE] E21: NL_SHORT_FIXED → "
+            "SQUELCHED (epoch=100, elev=74°, squelch=120s, reason=...)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.sv_states.get("E21") == "SQUELCHED")
+        self.assertEqual(r.state.sv_states.get("E21"), "SQUELCHED")
+
+    def test_non_sv_state_lines_ignored(self):
+        """Lines without the [SV_STATE] tag must not leak into
+        sv_states — false matches corrupt the table."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO [STATE] AntPosEst: → "
+            "unsurveyed (initial)\n"
+            "2026-04-21 07:00:00,001 INFO slip: sv=E21 reasons=mw_jump\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.lines_read >= 2)
+        self.assertEqual(r.state.sv_states, {})
+
+    def test_snapshot_is_safe_to_copy(self):
+        """Readers will snapshot sv_states on each tick.  The
+        replacement-on-write protocol must mean a copy taken *before*
+        the next update remains valid after it.  If the reader mutated
+        the dict in place, that contract would break."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO [SV_STATE] G05: TRACKING → "
+            "FLOAT (epoch=10)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: "G05" in r.state.sv_states)
+        snap1 = r.state.sv_states
+        # Append another transition.
+        with self.path.open("a") as f:
+            f.write(
+                "2026-04-21 07:00:01,000 INFO [SV_STATE] G05: FLOAT → "
+                "WL_FIXED (epoch=15)\n"
+            )
+        _wait_until(lambda: r.state.sv_states.get("G05") == "WL_FIXED")
+        snap2 = r.state.sv_states
+        # snap1 is frozen in time.  If the reader had mutated in
+        # place, snap1 would now show WL_FIXED too.
+        self.assertEqual(snap1.get("G05"), "FLOAT")
+        self.assertEqual(snap2.get("G05"), "WL_FIXED")
+
+
 if __name__ == "__main__":
     unittest.main()

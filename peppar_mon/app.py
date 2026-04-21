@@ -34,7 +34,7 @@ from textual.widgets import Static, Header, Footer
 
 from peppar_mon._util import format_uptime
 from peppar_mon.log_reader import LogReader
-from peppar_mon.widgets import StateBar
+from peppar_mon.widgets import StateBar, SvStateTable
 
 # State enums mirrored from scripts/peppar_fix/states.py.  Kept as
 # plain tuples to preserve enum declaration order — that's the order
@@ -121,6 +121,7 @@ class PepparMonApp(App):
                 all_states=_DO_FREQ_EST_STATES,
                 id="do-freq-est",
             )
+            yield SvStateTable(id="sv-state-table")
         yield Footer()
 
     def on_ready(self) -> None:
@@ -151,6 +152,9 @@ class PepparMonApp(App):
         self.query_one("#do-freq-est", StateBar).update_state(
             current=s.do_freq_est_state,
             visited=s.do_freq_est_visited,
+        )
+        self.query_one("#sv-state-table", SvStateTable).update_sv_states(
+            s.sv_states,
         )
 
     def _uptime_line(self) -> str:

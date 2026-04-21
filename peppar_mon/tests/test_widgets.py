@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import unittest
 
-from peppar_mon.widgets import StateBar
+from peppar_mon.widgets import StateBar, SvStateTable, _aggregate
 
 
 _ANT_STATES = (
@@ -127,6 +127,143 @@ class StateBarRenderTest(unittest.TestCase):
         self.assertIn("AntPosEst:", t.plain)
         for s in _ANT_STATES:
             self.assertNotIn(f"[{s}]", t.plain)  # nothing is "current"
+
+
+class AggregateTest(unittest.TestCase):
+    """`_aggregate` turns sv_states into constellation→state→count."""
+
+    def test_empty_input_returns_empty_dict(self):
+        self.assertEqual(_aggregate({}), {})
+
+    def test_single_sv_lands_in_prefix(self):
+        got = _aggregate({"G05": "FLOAT"})
+        self.assertEqual(got, {"G": {"FLOAT": 1}})
+
+    def test_multi_constellation_partitions_correctly(self):
+        sv_states = {
+            "G05": "FLOAT", "G10": "FLOAT", "G17": "WL_FIXED",
+            "E21": "NL_LONG_FIXED", "E05": "NL_SHORT_FIXED",
+            "C32": "SQUELCHED",
+        }
+        got = _aggregate(sv_states)
+        self.assertEqual(got["G"], {"FLOAT": 2, "WL_FIXED": 1})
+        self.assertEqual(
+            got["E"], {"NL_LONG_FIXED": 1, "NL_SHORT_FIXED": 1},
+        )
+        self.assertEqual(got["C"], {"SQUELCHED": 1})
+
+    def test_unknown_prefix_still_tallied(self):
+        """An R-prefix (GLONASS) SV doesn't have a row in the table
+        today, but _aggregate itself just groups by prefix — the
+        widget is the one that filters to known constellations.
+        Keeps the function decoupled from row definitions."""
+        got = _aggregate({"R01": "FLOAT"})
+        self.assertEqual(got, {"R": {"FLOAT": 1}})
+
+
+class SvStateTableRenderTest(unittest.TestCase):
+    """`SvStateTable.render()` produces a correct count grid."""
+
+    def setUp(self):
+        self.table = SvStateTable()
+
+    def test_empty_sv_states_renders_all_zeros(self):
+        """No SVs observed yet — table still shows all three
+        constellation rows with zero counts.  Predictable shape,
+        no "invisible until data arrives" flicker."""
+        rich_table = self.table.render()
+        # Render the table to a plain string to introspect cells.
+        from rich.console import Console
+        console = Console(width=100, record=True, legacy_windows=False)
+        console.print(rich_table)
+        out = console.export_text()
+        self.assertIn("GPS", out)
+        self.assertIn("GAL", out)
+        self.assertIn("BDS", out)
+
+    def test_counts_partition_correctly(self):
+        """Cells match `_aggregate` output for a known input."""
+        self.table.update_sv_states({
+            "G05": "FLOAT", "G10": "FLOAT", "G17": "WL_FIXED",
+            "E21": "NL_LONG_FIXED", "E05": "NL_SHORT_FIXED",
+            "C32": "SQUELCHED",
+        })
+        from rich.console import Console
+        console = Console(width=100, record=True, legacy_windows=False)
+        console.print(self.table.render())
+        out = console.export_text()
+        # GPS row should have 2 in Tracked (2× FLOAT) + 1 in WL.
+        gps_line = next(line for line in out.splitlines() if "GPS" in line)
+        # Header is `Tracked WL NL_SHORT NL_LONG SQUELCHED`; our row
+        # values in the same order are 2 1 0 0 0.  Rich-render
+        # inserts whitespace; check each value appears in the row.
+        self.assertEqual(
+            gps_line.split(), ["GPS", "2", "1", "0", "0", "0"],
+        )
+        gal_line = next(line for line in out.splitlines() if "GAL" in line)
+        self.assertEqual(
+            gal_line.split(), ["GAL", "0", "0", "1", "1", "0"],
+        )
+        bds_line = next(line for line in out.splitlines() if "BDS" in line)
+        self.assertEqual(
+            bds_line.split(), ["BDS", "0", "0", "0", "0", "1"],
+        )
+
+    def test_squelched_is_its_own_column(self):
+        """SQUELCHED SVs don't fall into Tracked — they're their own
+        column.  Catches a common source of mis-aggregation where
+        "SV not in fix set" gets conflated with "tracked"."""
+        self.table.update_sv_states({
+            "G05": "SQUELCHED", "G10": "SQUELCHED", "G17": "FLOAT",
+        })
+        from rich.console import Console
+        console = Console(width=100, record=True, legacy_windows=False)
+        console.print(self.table.render())
+        out = console.export_text()
+        gps_line = next(line for line in out.splitlines() if "GPS" in line)
+        # Tracked=1 (the one FLOAT), SQUELCHED=2
+        self.assertEqual(
+            gps_line.split(), ["GPS", "1", "0", "0", "0", "2"],
+        )
+
+    def test_tracking_pools_into_tracked(self):
+        """TRACKING and FLOAT both land in the "Tracked" column —
+        the distinction is less useful than "admitted-but-not-fixed"
+        grouping."""
+        self.table.update_sv_states({
+            "G05": "TRACKING", "G10": "FLOAT",
+        })
+        from rich.console import Console
+        console = Console(width=100, record=True, legacy_windows=False)
+        console.print(self.table.render())
+        out = console.export_text()
+        gps_line = next(line for line in out.splitlines() if "GPS" in line)
+        self.assertEqual(
+            gps_line.split(), ["GPS", "2", "0", "0", "0", "0"],
+        )
+
+    def test_update_no_op_when_counts_unchanged(self):
+        """A new snapshot that aggregates to identical counts
+        shouldn't trigger refresh() — matters for busy logs where
+        per-SV churn doesn't change the totals."""
+        calls = {"n": 0}
+
+        def fake_refresh():
+            calls["n"] += 1
+        self.table.refresh = fake_refresh  # type: ignore[method-assign]
+
+        # First update — state changes from {} to {G05: FLOAT}.
+        self.table.update_sv_states({"G05": "FLOAT"})
+        self.assertEqual(calls["n"], 1)
+        # Second update — same counts per constellation column
+        # (G05 FLOAT → G10 FLOAT is a different dict but same cell
+        # counts).  Must no-op on refresh.
+        self.table.update_sv_states({"G10": "FLOAT"})
+        self.assertEqual(calls["n"], 1)
+        # Third update — G05 transitions to WL_FIXED: the counts
+        # change, so refresh must fire.
+        self.table.update_sv_states({"G05": "WL_FIXED"})
+        self.assertEqual(calls["n"], 2)
 
 
 if __name__ == "__main__":

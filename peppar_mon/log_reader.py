@@ -84,6 +84,17 @@ class LogState:
     ant_pos_est_visited: tuple[str, ...] = field(default_factory=tuple)
     do_freq_est_visited: tuple[str, ...] = field(default_factory=tuple)
 
+    #: Per-SV current state (SvAmbState as string), keyed by SV
+    #: identifier like ``G05``, ``E21``, ``C32``.  Populated from
+    #: ``[SV_STATE] <sv>: <from> → <to>`` transition lines.  SVs
+    #: that haven't produced a transition yet aren't present —
+    #: engine logs one at admission so every observed SV lands here
+    #: within a few epochs.  Immutable from readers' perspective:
+    #: the reader thread replaces the dict on each update rather
+    #: than mutating in place, so an app tick sees a consistent
+    #: snapshot.
+    sv_states: dict[str, str] = field(default_factory=dict)
+
 
 class LogReader:
     """Threaded engine-log consumer.
@@ -189,6 +200,29 @@ class LogReader:
                 self.state.engine_start_time = ts
             self.state.last_line_time = ts
         self._parse_state_line(line)
+        self._parse_sv_state_line(line)
+
+    def _parse_sv_state_line(self, line: str) -> None:
+        """Extract per-SV state from ``[SV_STATE] <sv>: <from> → <to>``.
+
+        Engine emits one per transition (the peppar_fix.sv_state
+        tracker logs every legal edge).  We capture only the
+        post-transition state; the history isn't needed for the
+        table view.
+
+        Updates ``self.state.sv_states`` by copy-on-write so readers
+        always see a consistent snapshot.  Python dict copies are
+        cheap for the 20–40 SVs we typically track.
+        """
+        m = _SV_STATE_LINE_RE.search(line)
+        if m is None:
+            return
+        sv = m.group("sv")
+        new_state = m.group("to")
+        # copy-on-write to keep readers race-free.
+        new_dict = dict(self.state.sv_states)
+        new_dict[sv] = new_state
+        self.state.sv_states = new_dict
 
     def _parse_state_line(self, line: str) -> None:
         """Look for a [STATE] transition and update the relevant field.
@@ -227,4 +261,14 @@ class LogReader:
 _STATE_LINE_RE = re.compile(
     r"\[STATE\] (?P<machine>\w+): "
     r"(?:(?P<from>[\w_]+) )?→ (?P<to>[\w_]+)\b"
+)
+
+# Matches ``[SV_STATE] G05: TRACKING → FLOAT (epoch=…, elev=…, reason=…)``.
+# SV is the PRN identifier: one alpha (G/E/C/R/J/I), two or three
+# digits.  States are the SvAmbState enum values, all uppercase with
+# underscores.  The parenthesised details are not captured — the
+# table only needs the current state.
+_SV_STATE_LINE_RE = re.compile(
+    r"\[SV_STATE\] (?P<sv>[A-Z]\d{2,3}): "
+    r"(?P<from>[A-Z_]+) → (?P<to>[A-Z_]+)\b"
 )
