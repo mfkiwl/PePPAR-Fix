@@ -185,7 +185,9 @@ class SvStateTableRenderTest(unittest.TestCase):
         """Cells match `_aggregate` output for a known input.
         All three constellations are NL-capable here so the NL
         cells render counts (not ``-``) — isolates partitioning
-        from the capability signal tested separately below."""
+        from the capability signal tested separately below.
+        Columns: Tracked, Float, WL, SQUELCHED, NL_SHORT, NL_LONG.
+        """
         self.table.update(
             sv_states={
                 "G05": "FLOAT", "G10": "FLOAT", "G17": "WL_FIXED",
@@ -198,27 +200,26 @@ class SvStateTableRenderTest(unittest.TestCase):
         console = Console(width=100, record=True, legacy_windows=False)
         console.print(self.table.render())
         out = console.export_text()
-        # GPS row should have 2 in Tracked (2× FLOAT) + 1 in WL.
         gps_line = next(line for line in out.splitlines() if "GPS" in line)
-        # Header is `Tracked WL NL_SHORT NL_LONG SQUELCHED`; our row
-        # values in the same order are 2 1 0 0 0.  Rich-render
-        # inserts whitespace; check each value appears in the row.
+        # GPS: 2×FLOAT, 1×WL_FIXED → 0 tracked, 2 float, 1 wl.
         self.assertEqual(
-            gps_line.split(), ["GPS", "2", "1", "0", "0", "0"],
+            gps_line.split(), ["GPS", "0", "2", "1", "0", "0", "0"],
         )
         gal_line = next(line for line in out.splitlines() if "GAL" in line)
+        # GAL: 1×NL_SHORT, 1×NL_LONG.
         self.assertEqual(
-            gal_line.split(), ["GAL", "0", "0", "0", "1", "1"],
+            gal_line.split(), ["GAL", "0", "0", "0", "0", "1", "1"],
         )
         bds_line = next(line for line in out.splitlines() if "BDS" in line)
+        # BDS: 1×SQUELCHED.
         self.assertEqual(
-            bds_line.split(), ["BDS", "0", "0", "1", "0", "0"],
+            bds_line.split(), ["BDS", "0", "0", "0", "1", "0", "0"],
         )
 
     def test_squelched_is_its_own_column(self):
-        """SQUELCHED SVs don't fall into Tracked — they're their own
-        column.  Catches a common source of mis-aggregation where
-        "SV not in fix set" gets conflated with "tracked"."""
+        """SQUELCHED SVs don't fall into Tracked/Float — they're
+        their own column.  Catches a common source of mis-aggregation
+        where "SV not in fix set" gets conflated with "tracked"."""
         self.table.update(
             sv_states={
                 "G05": "SQUELCHED", "G10": "SQUELCHED", "G17": "FLOAT",
@@ -230,15 +231,18 @@ class SvStateTableRenderTest(unittest.TestCase):
         console.print(self.table.render())
         out = console.export_text()
         gps_line = next(line for line in out.splitlines() if "GPS" in line)
-        # Tracked=1 (the one FLOAT), SQUELCHED=2
+        # Tracked=0, Float=1 (G17), WL=0, SQUELCHED=2, NL_S=0, NL_L=0.
         self.assertEqual(
-            gps_line.split(), ["GPS", "1", "0", "2", "0", "0"],
+            gps_line.split(), ["GPS", "0", "1", "0", "2", "0", "0"],
         )
 
-    def test_tracking_pools_into_tracked(self):
-        """TRACKING and FLOAT both land in the "Tracked" column —
-        the distinction is less useful than "admitted-but-not-fixed"
-        grouping."""
+    def test_tracking_and_float_are_separate_columns(self):
+        """TRACKING goes to the "Tracked" column; FLOAT goes to the
+        "Float" column.  The split lets an operator see the gap
+        between "receiver sees it" and "engine has admitted it to
+        the float PPP filter" — meaningful during bootstrap where
+        Float lags Tracked, and a persistent gap flags an
+        admission-path problem."""
         self.table.update(
             sv_states={"G05": "TRACKING", "G10": "FLOAT"},
             nl_capable=frozenset("G"),
@@ -248,8 +252,9 @@ class SvStateTableRenderTest(unittest.TestCase):
         console.print(self.table.render())
         out = console.export_text()
         gps_line = next(line for line in out.splitlines() if "GPS" in line)
+        # Tracked=1 (G05 TRACKING), Float=1 (G10 FLOAT), rest zero.
         self.assertEqual(
-            gps_line.split(), ["GPS", "2", "0", "0", "0", "0"],
+            gps_line.split(), ["GPS", "1", "1", "0", "0", "0", "0"],
         )
 
     def test_update_no_op_when_counts_unchanged(self):
@@ -296,13 +301,14 @@ class SvStateTableCapabilityTest(unittest.TestCase):
         out = self._render(table)
         bds_line = next(line for line in out.splitlines() if "BDS" in line)
         self.assertEqual(
-            bds_line.split(), ["BDS", "-", "-", "-", "-", "-"],
+            bds_line.split(), ["BDS", "-", "-", "-", "-", "-", "-"],
         )
 
     def test_nl_cells_dash_when_not_capable(self):
         """Observed constellation without NL capability (ptpmon GPS
         case: tracked, WL reachable, but L2L phase biases missing)
-        → Tracked/WL/SQUELCHED render counts, NL cells render ``-``."""
+        → Tracked/Float/WL/SQUELCHED render counts, NL cells
+        render ``-``."""
         table = SvStateTable()
         table.update(
             sv_states={"G05": "FLOAT", "G10": "WL_FIXED"},
@@ -310,8 +316,9 @@ class SvStateTableCapabilityTest(unittest.TestCase):
         )
         out = self._render(table)
         gps_line = next(line for line in out.splitlines() if "GPS" in line)
+        # Tracked=0, Float=1, WL=1, SQUELCHED=0, NL_S=-, NL_L=-.
         self.assertEqual(
-            gps_line.split(), ["GPS", "1", "1", "0", "-", "-"],
+            gps_line.split(), ["GPS", "0", "1", "1", "0", "-", "-"],
         )
 
     def test_nl_cells_zero_when_capable_but_empty(self):
@@ -326,25 +333,28 @@ class SvStateTableCapabilityTest(unittest.TestCase):
         )
         out = self._render(table)
         gal_line = next(line for line in out.splitlines() if "GAL" in line)
+        # Tracked=0, Float=1, WL=1, SQUELCHED=0, NL_S=0, NL_L=0.
         self.assertEqual(
-            gal_line.split(), ["GAL", "1", "1", "0", "0", "0"],
+            gal_line.split(), ["GAL", "0", "1", "1", "0", "0", "0"],
         )
 
     def test_ptpmon_scenario(self):
-        """End-to-end ptpmon day0421c picture: GPS SVs tracked + WL
-        but zero NL capability; GAL has full capability with some
-        counts in each state; BDS not present.  Expected rendering
-        (columns: Tracked, WL, SQUELCHED, NL_SHORT, NL_LONG):
+        """End-to-end ptpmon day0421c picture: GPS SVs with float +
+        WL but zero NL capability; GAL has full capability with
+        some counts in each state; BDS not present.  All SVs here
+        come from the FLOAT state (admitted to the filter), not
+        TRACKING (pre-admit).  Expected rendering
+        (columns: Tracked, Float, WL, SQUELCHED, NL_SHORT, NL_LONG):
 
-            GPS  3  6  0  -  -
-            GAL  3  4  2  1  0
-            BDS  -  -  -  -  -
+            GPS  0  3  6  0  -  -
+            GAL  0  3  4  2  1  0
+            BDS  -  -  -  -  -  -
         """
         sv_states = {
-            # GPS: 3 in tracked, 6 in WL, 0 in NL states, 0 squelched.
+            # GPS: 3 in Float, 6 in WL, 0 in NL, 0 squelched.
             **{f"G0{i}": "FLOAT" for i in range(1, 4)},
             **{f"G1{i}": "WL_FIXED" for i in range(0, 6)},
-            # GAL: 3 tracked, 4 WL, 1 NL_SHORT, 0 NL_LONG, 2 squelched.
+            # GAL: 3 Float, 4 WL, 1 NL_SHORT, 0 NL_LONG, 2 squelched.
             **{f"E0{i}": "FLOAT" for i in range(1, 4)},
             **{f"E1{i}": "WL_FIXED" for i in range(0, 4)},
             "E21": "NL_SHORT_FIXED",
@@ -359,13 +369,13 @@ class SvStateTableCapabilityTest(unittest.TestCase):
         gal_line = next(line for line in out.splitlines() if "GAL" in line)
         bds_line = next(line for line in out.splitlines() if "BDS" in line)
         self.assertEqual(
-            gps_line.split(), ["GPS", "3", "6", "0", "-", "-"],
+            gps_line.split(), ["GPS", "0", "3", "6", "0", "-", "-"],
         )
         self.assertEqual(
-            gal_line.split(), ["GAL", "3", "4", "2", "1", "0"],
+            gal_line.split(), ["GAL", "0", "3", "4", "2", "1", "0"],
         )
         self.assertEqual(
-            bds_line.split(), ["BDS", "-", "-", "-", "-", "-"],
+            bds_line.split(), ["BDS", "-", "-", "-", "-", "-", "-"],
         )
 
     def test_capability_flip_triggers_refresh(self):

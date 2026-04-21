@@ -33,29 +33,40 @@ _CONSTELLATION_ROWS: tuple[tuple[str, str], ...] = (
 
 # Column definitions: (header, aggregated states, needs_nl_capability).
 # Column ORDER is operationally meaningful — it mirrors the usual
-# SV trajectory: first seen (Tracked), wide-lane fixed (WL),
-# temporary setback (SQUELCHED), then the promotion ladder
-# (NL_SHORT → NL_LONG).  Placing SQUELCHED between WL and
-# NL_SHORT matches the common recovery path: a squelched SV comes
-# off cooldown, re-fixes WL, and typically heads into NL_SHORT
-# next.  Reading left-to-right gives a coherent story.
+# SV trajectory:
+#
+#   Tracked   — receiver sees the SV (SvAmbState.TRACKING), hasn't
+#               yet been admitted to the float PPP filter
+#   Float     — admitted to the float filter (SvAmbState.FLOAT),
+#               no integer fix yet — the difference is "is this
+#               SV contributing to the position solution?"
+#   WL        — Melbourne-Wubbena wide-lane integer fixed
+#   SQUELCHED — cooldown-bound exclusion after a slip / false fix;
+#               placed between WL and NL_SHORT because a squelched
+#               SV typically re-fixes WL off cooldown and then
+#               heads into NL_SHORT next
+#   NL_SHORT  — short-term member of the fix set
+#   NL_LONG   — long-term member (survived ≥ 8° of Δaz)
+#
+# Reading left-to-right gives a coherent progression story; the
+# Tracked/Float split (added 2026-04-21) matters during bootstrap
+# where Float lags Tracked as the engine admits SVs to the filter
+# at its own pace.  A persistent gap between the two indicates
+# admission-path issues.
 #
 # Third field flags columns whose values should render as ``-``
 # (architecturally impossible) when the constellation lacks NL
 # capability — i.e. when the receiver's tracked signals don't line
 # up with the correction stream's published phase biases for NL
 # integer fixing.  Only NL_SHORT and NL_LONG need the capability
-# check; Tracked/WL/SQUELCHED are reachable on any dual-freq GNSS.
-#
-# TRACKING and FLOAT are pooled into "Tracked" because the distinction
-# (receiver-sees vs admitted) isn't operationally meaningful at a
-# glance — what matters is "we see it but haven't integer-fixed it."
+# check; the rest are reachable on any dual-freq GNSS.
 _COLUMNS: tuple[tuple[str, frozenset[str], bool], ...] = (
-    ("Tracked",   frozenset({"TRACKING", "FLOAT"}),    False),
-    ("WL",        frozenset({"WL_FIXED"}),             False),
-    ("SQUELCHED", frozenset({"SQUELCHED"}),            False),
-    ("NL_SHORT",  frozenset({"NL_SHORT_FIXED"}),       True),
-    ("NL_LONG",   frozenset({"NL_LONG_FIXED"}),        True),
+    ("Tracked",   frozenset({"TRACKING"}),        False),
+    ("Float",     frozenset({"FLOAT"}),           False),
+    ("WL",        frozenset({"WL_FIXED"}),        False),
+    ("SQUELCHED", frozenset({"SQUELCHED"}),       False),
+    ("NL_SHORT",  frozenset({"NL_SHORT_FIXED"}),  True),
+    ("NL_LONG",   frozenset({"NL_LONG_FIXED"}),   True),
 )
 
 # Rendered in cells that are architecturally impossible given the
