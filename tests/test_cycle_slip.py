@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'scripts'))
 from ppp_ar import MelbourneWubbenaTracker, NarrowLaneResolver, C
 from peppar_fix.cycle_slip import (
     ARC_GAP_MAX_S,
+    ARC_RESTART_GAP_S,
     GF_JUMP_THRESHOLD_M,
     LOCKTIME_DROP_MS,
     MW_JUMP_N_SIGMA,
@@ -101,14 +102,29 @@ class TestArcGap(unittest.TestCase):
         self.assertEqual(events, [])
 
     def test_gap_with_fresh_lock_triggers(self):
-        """SV reappears after a gap with a small locktime — the tracking
-        arc restarted, ambiguity must be flushed."""
+        """SV reappears after a gap exceeding ARC_RESTART_GAP_S with
+        a small locktime — the tracking arc restarted, ambiguity must
+        be flushed."""
         mon = CycleSlipMonitor()
         mon.check([make_obs(lock_ms=10_000)], 1000.0, 0)
         events = mon.check([make_obs(lock_ms=500)],
-                           1000.0 + ARC_GAP_MAX_S + 2.0, 1)
+                           1000.0 + ARC_RESTART_GAP_S + 2.0, 1)
         self.assertEqual(len(events), 1)
         self.assertIn('arc_gap', events[0].reasons)
+
+    def test_short_gap_does_not_trigger(self):
+        """Gap between ARC_GAP_MAX_S and ARC_RESTART_GAP_S is almost
+        always a benign packet drop at 1 Hz; even with a fresh locktime
+        we don't flag arc_gap (real integer slips in that window would
+        come through the MW-jump detector independently).  Matches the
+        ptpmon day0420e finding that 1-10 s gaps are LOW-confidence
+        false positives dominating the slip rate."""
+        mon = CycleSlipMonitor()
+        mon.check([make_obs(lock_ms=10_000)], 1000.0, 0)
+        events = mon.check([make_obs(lock_ms=500)],
+                           1000.0 + 5.0, 1)       # 5 s gap → no slip
+        if events:
+            self.assertNotIn('arc_gap', events[0].reasons)
 
     def test_gap_with_sustained_lock_no_slip(self):
         """SV observation missing for several epochs but locktime_ms
@@ -119,7 +135,7 @@ class TestArcGap(unittest.TestCase):
         mon = CycleSlipMonitor()
         mon.check([make_obs(lock_ms=60_000)], 1000.0, 0)
         events = mon.check([make_obs(lock_ms=64_000)],
-                           1000.0 + ARC_GAP_MAX_S + 3.0, 1)
+                           1000.0 + ARC_RESTART_GAP_S + 3.0, 1)
         if events:
             self.assertNotIn('arc_gap', events[0].reasons)
 

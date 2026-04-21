@@ -78,6 +78,20 @@ _LAMBDA_L1 = _C_LIGHT / _F_L1                           # ~0.190 m
 
 LOCKTIME_DROP_MS = 500.0
 ARC_GAP_MAX_S = 1.5                                     # ~1 epoch at 1 Hz
+# Distinct from ARC_GAP_MAX_S: ARC_GAP_MAX_S is a RECENCY window for
+# detectors that need adjacent epochs (ubx_locktime_drop, gf_jump).
+# ARC_RESTART_GAP_S is the threshold for declaring the tracking arc
+# itself broken.  Single packet drops at 1 Hz produce 2-4 s gaps
+# without a real lock loss, and the lock_ms secondary gate doesn't
+# reliably catch them (u-blox resets lock_ms for brief tracking-loop
+# lapses that aren't cycle slips).  The ptpmon day0420e overnight and
+# our L5-fleet day0419k both show ~55-71 % of "slips" are LOW-confidence
+# arc_gaps under 10 s with the 1.5 s threshold — all likely false
+# positives.  30 s still catches any genuine arc restart (SV setting,
+# receiver resync, occlusion > 30 s), while the MW-jump detector
+# independently catches real integer slips inside the 1.5 s – 30 s
+# window.
+ARC_RESTART_GAP_S = 30.0
 GF_JUMP_THRESHOLD_M = _LAMBDA_L1 / 4.0                  # ~4.76 cm
 MW_JUMP_N_SIGMA = 5.0   # combined with a 0.5-cyc sigma floor in
                          # MelbourneWubbenaTracker; threshold ≥ 2.5 cyc
@@ -193,17 +207,19 @@ class CycleSlipMonitor:
                         and (prev.lock_ms - lock_ms) > LOCKTIME_DROP_MS):
                     reasons.append("ubx_locktime_drop")
 
-                # 2. Arc continuity — any gap larger than one epoch may
-                #    indicate a broken tracking arc.  But the receiver
-                #    can hold carrier lock through observation gaps that
-                #    happen upstream (half-cycle transients, SSR bias
-                #    lookup misses, constellation filter churn).  Only
-                #    flag when the receiver's own locktime says the arc
-                #    was actually re-acquired — i.e., current locktime
-                #    does NOT span the gap with margin.  If lock_ms
-                #    substantially exceeds gap, the SV was locked the
-                #    whole time and this is a false-positive gap.
-                if gap_s > ARC_GAP_MAX_S:
+                # 2. Arc continuity — a gap larger than ARC_RESTART_GAP_S
+                #    may indicate a broken tracking arc.  Below that,
+                #    the gap is almost certainly a packet drop upstream
+                #    (observation-stream decimation, half-cycle
+                #    transients, SSR bias lookup miss, constellation
+                #    filter churn) even if lock_ms looks low, because
+                #    u-blox resets lock_ms for brief tracking-loop
+                #    lapses that aren't cycle slips.  Above the
+                #    threshold, we still apply the secondary lock_ms
+                #    gate: if current locktime substantially exceeds
+                #    the gap, the SV was locked the whole time so
+                #    don't flag.
+                if gap_s > ARC_RESTART_GAP_S:
                     gap_ms = gap_s * 1000.0
                     if lock_ms < gap_ms + LOCKTIME_DROP_MS:
                         reasons.append("arc_gap")
