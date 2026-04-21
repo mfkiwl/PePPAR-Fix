@@ -429,22 +429,26 @@ def iter_nav_records(path: Path) -> Iterator[tuple[str, dict]]:
 def load_into_ephemeris(path: Path, beph) -> int:
     """Populate a BroadcastEphemeris instance from a RINEX NAV file.
 
-    Uses the same 2-eph-per-SV retention as `BroadcastEphemeris
-    .update_from_rtcm`: if multiple records share the same `toc` for an
-    SV, keep the latest; otherwise retain the two most recent (by toc).
+    Unlike the RTCM-streaming path (which caps at 2 records per SV so
+    memory doesn't grow unboundedly), batch RINEX loading keeps **all**
+    records for each SV.  `sat_position` scans the list and picks the
+    record with smallest |t − toc|, so having the full day's worth of
+    ephemerides lets it pick the right ±2 h window for any query time.
+    Capping at 2 would leave one eph ~22 h stale when querying near
+    00:00 UTC, producing hundreds-of-meters of extrapolation error.
+
+    If multiple records share the same `toc` for an SV, the later one
+    overwrites (matches the engine's same-toc update behavior).
 
     Returns the number of records loaded.  Adds GM per system, matching
     what the RTCM path does.
     """
-    # Import locally to avoid a hard dep from the reader itself (so it
-    # can be tested without the full engine tree).
     from broadcast_eph import GM_GPS, GM_GAL, GM_BDS
 
     GM_BY_SYS = {'G': GM_GPS, 'E': GM_GAL, 'C': GM_BDS}
     n = 0
     for prn, eph in iter_nav_records(path):
         eph['gm'] = GM_BY_SYS.get(eph['system'])
-        # Same retention logic as BroadcastEphemeris.update_from_rtcm.
         existing = beph._ephs.get(prn)
         if existing is None:
             beph._ephs[prn] = [eph]
@@ -458,8 +462,5 @@ def load_into_ephemeris(path: Path, beph) -> int:
                     break
             if not replaced:
                 existing.append(eph)
-                if len(existing) > 2:
-                    existing.sort(key=lambda e: e.get('toc', 0))
-                    beph._ephs[prn] = existing[-2:]
         n += 1
     return n
