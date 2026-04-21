@@ -10,3 +10,8 @@
 # Textual pulls in rich, markdown-it-py, linkify-it-py, platformdirs,
 # and a few smaller deps automatically.  Total install ~30-40 MB.
 textual>=0.50
+# Textual 8.x split its `serve` subcommand out into the `textual-serve`
+# package.  Without it, `python -m textual serve ...` silently falls
+# back to running the textual demo app — which is what you were seeing
+# if --web appeared to launch "welcome to Textual" instead of peppar-mon.
+textual-serve>=1.0
