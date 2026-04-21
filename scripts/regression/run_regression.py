@@ -59,6 +59,7 @@ import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -81,9 +82,14 @@ def _parse_truth(s: str) -> np.ndarray:
     return np.array(parts)
 
 
+_SYS_TO_LOWER = {'GPS': 'gps', 'GAL': 'gal', 'BDS': 'bds',
+                 'GLO': 'glo', 'QZS': 'qzs'}
+
+
 def _build_obs_for_filter(rx_obs, gps_time):
     """Convert SvObservation list to the dict format PPPFilter.update
-    expects (matches realtime_ppp.serial_reader output)."""
+    expects (matches realtime_ppp.serial_reader output, including the
+    lowercase 'sys' name convention)."""
     out = []
     for o in rx_obs:
         # Compute IF combination
@@ -98,7 +104,7 @@ def _build_obs_for_filter(rx_obs, gps_time):
         phi_if_m = a1 * phi1_m + a2 * phi2_m
         out.append({
             'sv': o.sv,
-            'sys': o.sys,
+            'sys': _SYS_TO_LOWER.get(o.sys, o.sys.lower()),
             'pr_if': pr_if,
             'phi_if_m': phi_if_m,
             'cno': o.cno,
@@ -124,7 +130,7 @@ def run(args) -> int:
     """Run one regression scenario.  Returns process exit code."""
     # Late imports so the module is importable without engine deps
     from broadcast_eph import BroadcastEphemeris
-    from solve_ppp import PPPFilter
+    from solve_ppp import PPPFilter, ls_init
 
     truth_ecef = _parse_truth(args.truth)
     profile = L5_PROFILE if args.profile == "l5" else L2_PROFILE
@@ -135,18 +141,6 @@ def run(args) -> int:
     obs_hdr = parse_obs_header(obs_path)
     interval_s = obs_hdr.interval_s or 30.0
 
-    # Initial position — start from APPROX POSITION (a few-meter
-    # estimate the receiver carries in the file) so the filter's
-    # convergence path is realistic.  If truth is sub-cm this is
-    # already pretty close, but we want to test the filter's
-    # ability to refine, not just declare truth.
-    init_ecef = (
-        np.array(obs_hdr.approx_xyz) if obs_hdr.approx_xyz else truth_ecef
-    )
-    seed_offset = float(np.linalg.norm(init_ecef - truth_ecef))
-    log.info("Initial seed ECEF: %s (%.2f m from truth)",
-             init_ecef.tolist(), seed_offset)
-
     # Load broadcast ephemeris from RINEX NAV
     nav_path = Path(args.nav)
     beph = BroadcastEphemeris()
@@ -154,19 +148,22 @@ def run(args) -> int:
     log.info("Loaded %d broadcast ephemeris records (%d SVs)",
              n_eph, beph.n_satellites)
 
-    # Initialise PPP filter
-    filt = PPPFilter()
-    systems = set()
-    for sys_name in profile.keys():
-        systems.add(sys_name)
-    filt.initialize(init_ecef, 0.0, systems=systems)
+    # Filter is initialised lazily on the first usable epoch — we use
+    # ls_init() to seed both position AND receiver clock from that
+    # epoch's pseudoranges.  Seeding clock=0 (the previous behavior)
+    # leaves the filter facing a microsecond-to-millisecond receiver
+    # clock bias on every observation, which it rejects as outliers
+    # before its EKF can converge.
+    filt: Optional[PPPFilter] = None
+    systems_lower = {_SYS_TO_LOWER.get(s, s.lower()) for s in profile.keys()}
+    seed_offset: Optional[float] = None
 
     # Iterate epochs
     prev_t = None
     n_processed = 0
     n_skipped_empty = 0
     n_skipped_too_few = 0
-    last_pos = init_ecef
+    last_pos = truth_ecef
     lock_accum: dict = {}
 
     for ep_idx, ep in enumerate(iter_epochs(obs_path)):
@@ -183,6 +180,33 @@ def run(args) -> int:
             continue
 
         observations = _build_obs_for_filter(sv_obs_list, t)
+
+        # First-usable-epoch bootstrap via ls_init: solves for
+        # position + receiver-clock offset from the IF pseudoranges
+        # alone.  Without this seed, the filter starts with clk=0
+        # but the real receiver carries a μs–ms clock bias that
+        # shows up as huge per-SV pseudorange residuals.
+        if filt is None:
+            try:
+                ls_result, ls_ok, ls_n = ls_init(
+                    observations, beph, t, clk_file=None,
+                )
+            except Exception as e:
+                log.warning("ls_init failed at epoch %d: %s", ep_idx, e)
+                continue
+            if not ls_ok or ls_n < 4:
+                log.debug("ls_init not converged at epoch %d (ok=%s n=%d)",
+                          ep_idx, ls_ok, ls_n)
+                continue
+            init_ecef = np.array(ls_result[:3])
+            init_clk = float(ls_result[3])
+            seed_offset = float(np.linalg.norm(init_ecef - truth_ecef))
+            log.info("ls_init bootstrap: pos=%s, clk=%.3e s "
+                     "(%.2f m from truth, n_used=%d)",
+                     init_ecef.tolist(), init_clk / C_LIGHT,
+                     seed_offset, ls_n)
+            filt = PPPFilter()
+            filt.initialize(init_ecef, init_clk, systems=systems_lower)
 
         # Filter prediction step
         if prev_t is not None:
@@ -231,7 +255,8 @@ def run(args) -> int:
     print(f"Epochs processed:  {n_processed}")
     print(f"Epochs skipped:    {n_skipped_empty} (empty), "
           f"{n_skipped_too_few} (too-few-SVs)")
-    print(f"Initial seed err:  {seed_offset:.3f} m")
+    print(f"Initial seed err:  "
+          f"{seed_offset:.3f} m" if seed_offset is not None else "n/a")
     print(f"Final position:    {last_pos.tolist()}")
     print(f"Truth position:    {truth_ecef.tolist()}")
     print(f"Final error 3D:    {err_3d:.3f} m")

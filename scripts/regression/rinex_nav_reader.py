@@ -169,16 +169,15 @@ def _parse_epoch_line(line: str):
 
 # ── Record parsers ─────────────────────────────────────────────────── #
 
-# Angular keys (semicircles in RINEX, converted to radians on output)
-_ANGULAR_KEYS = ('M0', 'delta_n', 'omega', 'omega0', 'i0', 'i_dot',
-                 'omega_dot')
-
-
 def _finalize(eph: dict) -> dict:
-    """Common post-processing: semicircle → radian; add `system`; etc."""
-    for key in _ANGULAR_KEYS:
-        if key in eph and eph[key] is not None:
-            eph[key] = eph[key] * math.pi
+    """Common post-processing — placeholder for any per-record fixups.
+
+    RINEX 3 NAV files store Keplerian angular fields (M0, omega, omega0,
+    i0, delta_n, i_dot, omega_dot) in **radians** — not semicircles — so
+    no unit conversion is needed.  The engine's `ingest_rtcm` path
+    multiplies by π because pyrtcm returns raw broadcast semicircles;
+    that conversion does NOT apply to RINEX NAV input.
+    """
     return eph
 
 
