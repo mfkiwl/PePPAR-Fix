@@ -20,9 +20,10 @@ timestamped line.  Everything else is a hook for the next commit.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -64,6 +65,24 @@ class LogState:
     #: Last-line timestamp (useful to detect a stalled engine — if the
     #: log hasn't advanced in a while, the engine likely crashed).
     last_line_time: Optional[datetime] = None
+
+    #: Current state of the AntPosEst state machine (lowercase string
+    #: matching the enum values in scripts/peppar_fix/states.py:
+    #: "unsurveyed", "verifying", "verified", "converging", "resolved",
+    #: "moved").  None until the first [STATE] line is observed.
+    ant_pos_est_state: Optional[str] = None
+
+    #: Current state of the DOFreqEst state machine (lowercase string:
+    #: "uninitialized", "phase_setting", "freq_verifying", "tracking",
+    #: "holdover").  None until the first [STATE] line is observed.
+    do_freq_est_state: Optional[str] = None
+
+    #: States each machine has visited so far this run (ordered set,
+    #: preserving first-visit order).  Used by StateBar widgets to
+    #: render visited-vs-unvisited distinction.  Reassigned (rather
+    #: than mutated in place) so readers see a consistent snapshot.
+    ant_pos_est_visited: tuple[str, ...] = field(default_factory=tuple)
+    do_freq_est_visited: tuple[str, ...] = field(default_factory=tuple)
 
 
 class LogReader:
@@ -159,13 +178,53 @@ class LogReader:
     def _ingest(self, line: str) -> None:
         """Update state from one raw log line.
 
-        Only the timestamp extraction is wired up today.  Structured
-        ``[TAG] key=value`` parsing lands in the next commit.
+        Extracts:
+          * timestamps (first = engine_start_time, latest = last_line_time)
+          * [STATE] transitions for AntPosEst and DOFreqEst
         """
         self.state.lines_read += 1
         ts = parse_log_timestamp(line)
-        if ts is None:
+        if ts is not None:
+            if self.state.engine_start_time is None:
+                self.state.engine_start_time = ts
+            self.state.last_line_time = ts
+        self._parse_state_line(line)
+
+    def _parse_state_line(self, line: str) -> None:
+        """Look for a [STATE] transition and update the relevant field.
+
+        Engine emits two variants (see scripts/peppar_fix/states.py):
+          * initial:    ``[STATE] AntPosEst: → unsurveyed (initial)``
+          * transition: ``[STATE] AntPosEst: unsurveyed → verifying after 12s``
+
+        Both end with ``→ <new_state>`` followed by either EOL or
+        ``after …``.  The same regex catches both.
+        """
+        m = _STATE_LINE_RE.search(line)
+        if m is None:
             return
-        if self.state.engine_start_time is None:
-            self.state.engine_start_time = ts
-        self.state.last_line_time = ts
+        machine = m.group("machine")
+        new_state = m.group("to")
+        if machine == "AntPosEst":
+            self.state.ant_pos_est_state = new_state
+            if new_state not in self.state.ant_pos_est_visited:
+                self.state.ant_pos_est_visited = (
+                    self.state.ant_pos_est_visited + (new_state,)
+                )
+        elif machine == "DOFreqEst":
+            self.state.do_freq_est_state = new_state
+            if new_state not in self.state.do_freq_est_visited:
+                self.state.do_freq_est_visited = (
+                    self.state.do_freq_est_visited + (new_state,)
+                )
+
+
+# Matches both ``[STATE] AntPosEst: → unsurveyed (initial)`` and
+# ``[STATE] AntPosEst: converging → resolved after 393s (details)``.
+# Anchoring on ``[STATE]`` avoids false positives from other log lines
+# that happen to contain an arrow.  The ``from`` group is optional to
+# handle the initial-state log line which has no from-state.
+_STATE_LINE_RE = re.compile(
+    r"\[STATE\] (?P<machine>\w+): "
+    r"(?:(?P<from>[\w_]+) )?→ (?P<to>[\w_]+)\b"
+)

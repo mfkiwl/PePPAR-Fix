@@ -23,6 +23,7 @@ Fleshed out in subsequent commits:
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +34,30 @@ from textual.widgets import Static, Header, Footer
 
 from peppar_mon._util import format_uptime
 from peppar_mon.log_reader import LogReader
+from peppar_mon.widgets import StateBar
+
+# State enums mirrored from scripts/peppar_fix/states.py.  Kept as
+# plain tuples to preserve enum declaration order — that's the order
+# the widget renders them in, left-to-right, and it should match the
+# state-machine progression so users can see where the engine *is* and
+# where it's *going* in one glance.  Keep in sync if the engine side
+# grows a new state.
+_ANT_POS_EST_STATES = (
+    "unsurveyed", "verifying", "verified",
+    "converging", "resolved", "moved",
+)
+_DO_FREQ_EST_STATES = (
+    "uninitialized", "phase_setting", "freq_verifying",
+    "tracking", "holdover",
+)
+
+# Environment variable the --web launcher sets.  `textual serve` imports
+# `peppar_mon.app:PepparMonApp` and instantiates it with no arguments,
+# so there's no way to thread a log_path argument through the textual
+# CLI.  We read it from the environment instead.  Direct TUI callers
+# (via __main__) pass log_path explicitly through argparse and don't
+# need to touch the env var.
+_LOG_PATH_ENV = "PEPPAR_MON_LOG"
 
 
 class PepparMonApp(App):
@@ -40,7 +65,12 @@ class PepparMonApp(App):
 
     CSS = """
     Screen {
-        align: center middle;
+        align: center top;
+    }
+
+    #status {
+        width: 1fr;
+        padding: 1 2;
     }
 
     #clock, #uptime {
@@ -52,21 +82,45 @@ class PepparMonApp(App):
         color: $accent;
         text-style: bold;
     }
+
+    StateBar {
+        padding: 0 1;
+    }
     """
 
     TITLE = "peppar-mon"
     SUB_TITLE = "scaffold"
 
-    def __init__(self, log_path: Path) -> None:
+    def __init__(self, log_path: Path | None = None) -> None:
         super().__init__()
+        if log_path is None:
+            env = os.environ.get(_LOG_PATH_ENV)
+            if not env:
+                raise RuntimeError(
+                    f"log_path not provided and {_LOG_PATH_ENV} is unset. "
+                    f"Direct invocation: python -m peppar_mon LOG_FILE.  "
+                    f"Web invocation: scripts/peppar-mon --web PORT LOG_FILE "
+                    f"(the launcher sets {_LOG_PATH_ENV} for you)."
+                )
+            log_path = env
         self.log_path = Path(log_path)
         self._reader: LogReader = LogReader(self.log_path)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
-        with Vertical():
+        with Vertical(id="status"):
             yield Static("", id="clock")
             yield Static("", id="uptime")
+            yield StateBar(
+                machine_name="AntPosEst",
+                all_states=_ANT_POS_EST_STATES,
+                id="ant-pos-est",
+            )
+            yield StateBar(
+                machine_name="DOFreqEst",
+                all_states=_DO_FREQ_EST_STATES,
+                id="do-freq-est",
+            )
         yield Footer()
 
     def on_ready(self) -> None:
@@ -87,6 +141,17 @@ class PepparMonApp(App):
         now_tz = datetime.now().astimezone()
         self.query_one("#clock", Static).update(now_tz.strftime("%H:%M:%S %Z"))
         self.query_one("#uptime", Static).update(self._uptime_line())
+        # State bars.  Read the snapshot once so the two bars see the
+        # same LogState instant even if the reader thread updates mid-tick.
+        s = self._reader.state
+        self.query_one("#ant-pos-est", StateBar).update_state(
+            current=s.ant_pos_est_state,
+            visited=s.ant_pos_est_visited,
+        )
+        self.query_one("#do-freq-est", StateBar).update_state(
+            current=s.do_freq_est_state,
+            visited=s.do_freq_est_visited,
+        )
 
     def _uptime_line(self) -> str:
         """Render the uptime row.

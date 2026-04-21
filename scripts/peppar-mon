@@ -36,6 +36,19 @@ if [[ "${1:-}" == "--web" ]]; then
     shift
     PORT="${1:-8000}"
     [[ "${1:-}" =~ ^[0-9]+$ ]] && shift || true
+    # `textual serve` imports `peppar_mon.app:PepparMonApp` and calls
+    # it with no args — there's no way to forward a positional log
+    # path through textual's CLI.  We thread it through the
+    # environment instead; the app's __init__ reads PEPPAR_MON_LOG
+    # when log_path is None.  Previously the log path was passed as
+    # an extra positional arg and textual fell back to its demo
+    # welcome screen because our constructor raised TypeError.
+    if [[ $# -lt 1 ]]; then
+        echo "usage: peppar-mon --web PORT LOG_FILE" >&2
+        exit 2
+    fi
+    export PEPPAR_MON_LOG="$1"
+    shift
     exec "$PYTHON_BIN" -m textual serve \
         --port "$PORT" \
         "peppar_mon.app:PepparMonApp" "$@"

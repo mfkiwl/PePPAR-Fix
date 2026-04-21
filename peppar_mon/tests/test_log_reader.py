@@ -135,5 +135,97 @@ class LogReaderTest(unittest.TestCase):
         self.assertFalse(reader._thread.is_alive())
 
 
+class StateLineParsingTest(unittest.TestCase):
+    """[STATE] transitions feed into ant_pos_est_state / do_freq_est_state."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "engine.log"
+
+    def test_initial_state_line_sets_field(self):
+        """`[STATE] AntPosEst: → unsurveyed (initial)` seeds the state."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO [STATE] AntPosEst: → "
+            "unsurveyed (initial)\n"
+            "2026-04-21 07:00:00,001 INFO [STATE] DOFreqEst: → "
+            "uninitialized (initial)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(
+            lambda: r.state.ant_pos_est_state and r.state.do_freq_est_state
+        )
+        self.assertEqual(r.state.ant_pos_est_state, "unsurveyed")
+        self.assertEqual(r.state.do_freq_est_state, "uninitialized")
+        self.assertEqual(r.state.ant_pos_est_visited, ("unsurveyed",))
+        self.assertEqual(r.state.do_freq_est_visited, ("uninitialized",))
+
+    def test_transition_line_updates_current_and_visited(self):
+        """A transition appends to visited, sets current to the new state."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO [STATE] AntPosEst: → "
+            "unsurveyed (initial)\n"
+            "2026-04-21 07:05:00,000 INFO [STATE] AntPosEst: unsurveyed → "
+            "verifying after 300s\n"
+            "2026-04-21 07:06:00,000 INFO [STATE] AntPosEst: verifying → "
+            "converging after 60s\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.ant_pos_est_state == "converging")
+        self.assertEqual(r.state.ant_pos_est_state, "converging")
+        self.assertEqual(
+            r.state.ant_pos_est_visited,
+            ("unsurveyed", "verifying", "converging"),
+        )
+
+    def test_revisiting_state_doesnt_dup_visited(self):
+        """When the machine flaps back to a state it's been in before,
+        visited must not contain duplicates — the set-like guarantee
+        matters for the widget's rendering."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO [STATE] AntPosEst: → "
+            "converging (initial)\n"
+            "2026-04-21 07:05:00,000 INFO [STATE] AntPosEst: converging → "
+            "resolved after 300s\n"
+            "2026-04-21 07:06:00,000 INFO [STATE] AntPosEst: resolved → "
+            "converging after 60s\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.ant_pos_est_state == "converging" and
+                    "resolved" in r.state.ant_pos_est_visited)
+        self.assertEqual(r.state.ant_pos_est_state, "converging")
+        self.assertEqual(
+            r.state.ant_pos_est_visited, ("converging", "resolved"),
+        )
+
+    def test_machines_are_independent(self):
+        """Updating one machine's state leaves the other alone."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO [STATE] AntPosEst: → "
+            "unsurveyed (initial)\n"
+            "2026-04-21 07:00:00,001 INFO [STATE] DOFreqEst: → "
+            "uninitialized (initial)\n"
+            "2026-04-21 07:05:00,000 INFO [STATE] DOFreqEst: "
+            "uninitialized → phase_setting after 300s\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.do_freq_est_state == "phase_setting")
+        self.assertEqual(r.state.ant_pos_est_state, "unsurveyed")
+        self.assertEqual(r.state.do_freq_est_state, "phase_setting")
+
+    def test_non_state_lines_are_ignored(self):
+        """Lines without ``[STATE] <machine>: → <state>`` must not touch
+        the state fields — false matches here would corrupt the display."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO AntPosEst position improved\n"
+            "2026-04-21 07:00:00,001 INFO Moving from one place to another\n"
+            "2026-04-21 07:00:01,000 INFO [NL_DIAG] epoch=5 result=CAND\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.lines_read >= 3)
+        self.assertIsNone(r.state.ant_pos_est_state)
+        self.assertIsNone(r.state.do_freq_est_state)
+
+
 if __name__ == "__main__":
     unittest.main()
