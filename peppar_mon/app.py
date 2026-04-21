@@ -32,9 +32,17 @@ from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static, Header, Footer
 
-from peppar_mon._util import format_uptime
+from peppar_mon._util import format_elapsed_short, format_uptime
 from peppar_mon.log_reader import LogReader
 from peppar_mon.widgets import StateBar, SvStateTable
+
+# If no new timestamped line has landed in the log within this many
+# seconds, the engine is assumed dead and the uptime row flips to a
+# DOWN indicator.  30 s is generous — the engine writes [EPH] every
+# few seconds and AntPosEst every 10 s even during a quiet period,
+# so a 30 s silence is well outside normal operation.  Not so tight
+# that a brief disk-flush hiccup trips it.
+_STALE_LOG_THRESHOLD_S = 30.0
 
 # State enums mirrored from scripts/peppar_fix/states.py.  Kept as
 # plain tuples to preserve enum declaration order — that's the order
@@ -159,23 +167,53 @@ class PepparMonApp(App):
         )
 
     def _uptime_line(self) -> str:
-        """Render the uptime row.
+        """Delegates to the module-level pure function so it can
+        be unit-tested without spinning up a Textual app."""
+        return build_uptime_line(
+            state=self._reader.state,
+            now=datetime.now(),
+            stale_threshold_s=_STALE_LOG_THRESHOLD_S,
+        )
 
-        When the LogReader has parsed a timestamped line (which happens
-        within one poll interval of the log file appearing), uptime is
-        ``datetime.now() − engine_start_time``.  Before that — e.g. the
-        engine hasn't started yet, or the log exists but is still empty
-        — the row shows ``(waiting)`` so the user knows the reader is
-        alive but hasn't found a start timestamp yet.
-        """
-        engine_start = self._reader.state.engine_start_time
-        if engine_start is None:
-            return "PePPAR-Fix UpTime  (waiting for first log line)"
-        # Both are naive-local (see parse_log_timestamp) — subtract
-        # directly; no tz arithmetic required.
-        elapsed_s = (datetime.now() - engine_start).total_seconds()
-        up = format_uptime(max(0.0, elapsed_s))
-        return f"PePPAR-Fix UpTime  {up}"
+
+def build_uptime_line(
+    *,
+    state,
+    now: datetime,
+    stale_threshold_s: float,
+) -> str:
+    """Render the uptime / death-indicator row from a LogState.
+
+    Three display cases:
+      * No log data yet (engine hasn't started writing, or file
+        still empty) — ``(waiting for first log line)``.
+      * Log is fresh (last timestamp within ``stale_threshold_s``
+        of ``now``) — engine uptime in ``Dd Hh Mm`` format.
+      * Log is stale (last write past threshold) — red DOWN
+        indicator with elapsed-since-last-activity.  Operator
+        expects a dead engine to be visibly distinguished, not
+        silently accumulate uptime based on a frozen start.
+
+    Returns a string with Rich markup so Static.update()
+    renders the DOWN case in red+bold without needing a separate
+    Text renderable.  Pure function for unit-testability: no
+    ``datetime.now()`` calls inside, caller injects the clock.
+    """
+    engine_start = state.engine_start_time
+    if engine_start is None:
+        return "PePPAR-Fix UpTime  (waiting for first log line)"
+    last_line = state.last_line_time
+    if last_line is not None:
+        stale_s = (now - last_line).total_seconds()
+        if stale_s > stale_threshold_s:
+            return (
+                f"[bold red]DOWN[/]  "
+                f"no log activity for "
+                f"{format_elapsed_short(stale_s)}"
+            )
+    elapsed_s = (now - engine_start).total_seconds()
+    up = format_uptime(max(0.0, elapsed_s))
+    return f"PePPAR-Fix UpTime  {up}"
 
 
 if __name__ == "__main__":

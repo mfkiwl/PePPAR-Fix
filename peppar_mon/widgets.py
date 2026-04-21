@@ -32,7 +32,15 @@ _CONSTELLATION_ROWS: tuple[tuple[str, str], ...] = (
 )
 
 # Column definitions: (header, aggregated states, needs_nl_capability).
-# The third field flags columns whose values should render as ``-``
+# Column ORDER is operationally meaningful — it mirrors the usual
+# SV trajectory: first seen (Tracked), wide-lane fixed (WL),
+# temporary setback (SQUELCHED), then the promotion ladder
+# (NL_SHORT → NL_LONG).  Placing SQUELCHED between WL and
+# NL_SHORT matches the common recovery path: a squelched SV comes
+# off cooldown, re-fixes WL, and typically heads into NL_SHORT
+# next.  Reading left-to-right gives a coherent story.
+#
+# Third field flags columns whose values should render as ``-``
 # (architecturally impossible) when the constellation lacks NL
 # capability — i.e. when the receiver's tracked signals don't line
 # up with the correction stream's published phase biases for NL
@@ -45,9 +53,9 @@ _CONSTELLATION_ROWS: tuple[tuple[str, str], ...] = (
 _COLUMNS: tuple[tuple[str, frozenset[str], bool], ...] = (
     ("Tracked",   frozenset({"TRACKING", "FLOAT"}),    False),
     ("WL",        frozenset({"WL_FIXED"}),             False),
+    ("SQUELCHED", frozenset({"SQUELCHED"}),            False),
     ("NL_SHORT",  frozenset({"NL_SHORT_FIXED"}),       True),
     ("NL_LONG",   frozenset({"NL_LONG_FIXED"}),        True),
-    ("SQUELCHED", frozenset({"SQUELCHED"}),            False),
 )
 
 # Rendered in cells that are architecturally impossible given the

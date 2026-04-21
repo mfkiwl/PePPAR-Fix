@@ -208,11 +208,11 @@ class SvStateTableRenderTest(unittest.TestCase):
         )
         gal_line = next(line for line in out.splitlines() if "GAL" in line)
         self.assertEqual(
-            gal_line.split(), ["GAL", "0", "0", "1", "1", "0"],
+            gal_line.split(), ["GAL", "0", "0", "0", "1", "1"],
         )
         bds_line = next(line for line in out.splitlines() if "BDS" in line)
         self.assertEqual(
-            bds_line.split(), ["BDS", "0", "0", "0", "0", "1"],
+            bds_line.split(), ["BDS", "0", "0", "1", "0", "0"],
         )
 
     def test_squelched_is_its_own_column(self):
@@ -232,7 +232,7 @@ class SvStateTableRenderTest(unittest.TestCase):
         gps_line = next(line for line in out.splitlines() if "GPS" in line)
         # Tracked=1 (the one FLOAT), SQUELCHED=2
         self.assertEqual(
-            gps_line.split(), ["GPS", "1", "0", "0", "0", "2"],
+            gps_line.split(), ["GPS", "1", "0", "2", "0", "0"],
         )
 
     def test_tracking_pools_into_tracked(self):
@@ -311,7 +311,7 @@ class SvStateTableCapabilityTest(unittest.TestCase):
         out = self._render(table)
         gps_line = next(line for line in out.splitlines() if "GPS" in line)
         self.assertEqual(
-            gps_line.split(), ["GPS", "1", "1", "-", "-", "0"],
+            gps_line.split(), ["GPS", "1", "1", "0", "-", "-"],
         )
 
     def test_nl_cells_zero_when_capable_but_empty(self):
@@ -333,10 +333,11 @@ class SvStateTableCapabilityTest(unittest.TestCase):
     def test_ptpmon_scenario(self):
         """End-to-end ptpmon day0421c picture: GPS SVs tracked + WL
         but zero NL capability; GAL has full capability with some
-        counts in each state; BDS not present.  Expected rendering:
+        counts in each state; BDS not present.  Expected rendering
+        (columns: Tracked, WL, SQUELCHED, NL_SHORT, NL_LONG):
 
-            GPS  3  6  -  -  0
-            GAL  3  4  1  0  2
+            GPS  3  6  0  -  -
+            GAL  3  4  2  1  0
             BDS  -  -  -  -  -
         """
         sv_states = {
@@ -358,10 +359,10 @@ class SvStateTableCapabilityTest(unittest.TestCase):
         gal_line = next(line for line in out.splitlines() if "GAL" in line)
         bds_line = next(line for line in out.splitlines() if "BDS" in line)
         self.assertEqual(
-            gps_line.split(), ["GPS", "3", "6", "-", "-", "0"],
+            gps_line.split(), ["GPS", "3", "6", "0", "-", "-"],
         )
         self.assertEqual(
-            gal_line.split(), ["GAL", "3", "4", "1", "0", "2"],
+            gal_line.split(), ["GAL", "3", "4", "2", "1", "0"],
         )
         self.assertEqual(
             bds_line.split(), ["BDS", "-", "-", "-", "-", "-"],

@@ -26,6 +26,26 @@ def format_uptime(elapsed_s: float) -> str:
     return f"{days}d {hours}h {minutes}m"
 
 
+def format_elapsed_short(elapsed_s: float) -> str:
+    """Render elapsed as a compact Xh Ym Zs / Xm Ys / Xs string.
+
+    Used by the death-detection indicator, which needs to show
+    second-scale precision at short durations ("DOWN — 35s")
+    AND drop seconds once the gap becomes minutes-scale
+    ("DOWN — 5m 2s" → seconds kept; "DOWN — 1h 5m" → seconds
+    dropped for readability).  Threshold: drop seconds once
+    elapsed crosses one hour.
+    """
+    total = max(0, int(elapsed_s))
+    hours, rem = divmod(total, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    if minutes > 0:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
 # Python logging's default format puts a comma between seconds and the
 # milliseconds field.  strptime can't consume "," as a decimal separator,
 # so we match with a regex and stitch the microseconds back on manually.
