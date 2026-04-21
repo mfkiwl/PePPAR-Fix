@@ -401,8 +401,9 @@ class AntennaPositionLine(Widget):
         position: Optional[tuple[float, float, float]] = None,
         sigma_m: Optional[float] = None,
         id: Optional[str] = None,  # noqa: A002
+        classes: Optional[str] = None,
     ) -> None:
-        super().__init__(id=id)
+        super().__init__(id=id, classes=classes)
         self._state = state
         self._position = position
         self._sigma_m = sigma_m
@@ -520,8 +521,9 @@ class SecondOpinionLine(Widget):
         *,
         nav2_delta_m: Optional[float] = None,
         id: Optional[str] = None,  # noqa: A002
+        classes: Optional[str] = None,
     ) -> None:
-        super().__init__(id=id)
+        super().__init__(id=id, classes=classes)
         self._delta = nav2_delta_m
 
     def update_delta(self, nav2_delta_m: Optional[float]) -> None:
