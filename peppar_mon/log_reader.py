@@ -108,6 +108,29 @@ class LogState:
     nl_capable_constellations: frozenset[str] = field(
         default_factory=frozenset)
 
+    #: Latest AntPosEst filter position, extracted from the most
+    #: recent ``[AntPosEst N] σ=X pos=(lat, lon, alt) ...`` log
+    #: line.  None before the first such line lands.  Tuple is
+    #: (lat_deg, lon_deg, alt_m).  Precision matches whatever the
+    #: engine logged — today 6 decimals on lat/lon (~11 cm) and
+    #: 1 decimal on altitude (~10 cm).  See
+    #: ``project_to_main_position_log_precision_20260421.md`` for
+    #: the engine-side precision ask.
+    antenna_position: Optional[tuple[float, float, float]] = None
+
+    #: Latest AntPosEst 3D σ (m) from the same log line.  Drives
+    #: per-digit uncertainty shading in the AntennaPositionLine
+    #: widget — digits below the σ quantum render dim.  None
+    #: before first observation.
+    antenna_sigma_m: Optional[float] = None
+
+    #: Latest nav2Δ (m) — scalar 3D distance from AntPosEst pos to
+    #: the F9T's secondary-engine position.  Engine only emits the
+    #: delta, not the absolute NAV2 position, so that's what we
+    #: display in the "2nd Opinion" row.  None until first
+    #: observation or when the engine runs without a nav2_store.
+    nav2_delta_m: Optional[float] = None
+
 
 class LogReader:
     """Threaded engine-log consumer.
@@ -215,6 +238,42 @@ class LogReader:
         self._parse_state_line(line)
         self._parse_sv_state_line(line)
         self._parse_phase_bias_lookup(line)
+        self._parse_antposest_line(line)
+
+    def _parse_antposest_line(self, line: str) -> None:
+        """Extract position + σ + nav2Δ from ``[AntPosEst N] ...``.
+
+        The engine emits one of these every ~10 epochs with format:
+
+            [AntPosEst 4200] σ=0.023m pos=(LAT, LON, ALT) ...
+                             ... nav2Δ=2.8m ZTD=+274±3mm
+
+        We extract three pieces:
+          * σ (3D, metres) — drives uncertainty shading on the
+            antenna-position display
+          * (lat, lon, alt) — the filter's current position
+          * nav2Δ — scalar delta to the F9T's secondary-engine
+            position; rendered as the "2nd Opinion" row
+
+        nav2Δ is optional (may not appear on early-bootstrap lines
+        before a NAV2 fix arrives, or when no nav2_store is
+        configured).  Position and σ are always present on
+        ``[AntPosEst ...]`` lines, so missing them silently would
+        mask a log-format change — treat as a noisy pattern
+        mismatch and just skip the line.
+        """
+        m = _ANTPOSEST_LINE_RE.search(line)
+        if m is None:
+            return
+        self.state.antenna_sigma_m = float(m.group("sigma"))
+        self.state.antenna_position = (
+            float(m.group("lat")),
+            float(m.group("lon")),
+            float(m.group("alt")),
+        )
+        nav2 = m.group("nav2d")
+        if nav2 is not None:
+            self.state.nav2_delta_m = float(nav2)
 
     def _parse_phase_bias_lookup(self, line: str) -> None:
         """Look for ``Phase bias lookup: <sv> f1=...(HIT|MISS) f2=...(HIT|MISS)``.
@@ -336,4 +395,18 @@ _PHASE_BIAS_LOOKUP_RE = re.compile(
     r"Phase bias lookup: (?P<sv>[A-Z]\d{2,3})\s+"
     r"f1=.*?\((?P<f1_status>HIT|MISS)\)\s+"
     r"f2=.*?\((?P<f2_status>HIT|MISS)\)"
+)
+
+# Matches ``[AntPosEst 4200] σ=0.023m pos=(LAT, LON, ALT) ...``.
+# σ, lat, lon, alt are always present; nav2Δ is optional (may not
+# be logged on early-bootstrap lines before NAV2 kicks in, or in
+# runs without a nav2_store).  Altitude is signed (engine has been
+# seen briefly showing negative altitudes during bootstrap glitches)
+# and can have any number of decimals per ``project_to_main_...``.
+# nav2Δ precision today is 1 decimal; accept any.
+_ANTPOSEST_LINE_RE = re.compile(
+    r"\[AntPosEst \d+\]\s+"
+    r"σ=(?P<sigma>[\d.]+)m\s+"
+    r"pos=\((?P<lat>-?[\d.]+),\s*(?P<lon>-?[\d.]+),\s*(?P<alt>-?[\d.]+)\)"
+    r"(?:.*?nav2Δ=(?P<nav2d>[\d.]+)m)?"
 )

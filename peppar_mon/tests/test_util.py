@@ -6,7 +6,8 @@ import unittest
 from datetime import datetime
 
 from peppar_mon._util import (
-    format_elapsed_short, format_uptime, parse_log_timestamp,
+    format_elapsed_short, format_uncertainty, format_uptime,
+    parse_log_timestamp, uncertain_decimals_deg, uncertain_decimals_m,
 )
 
 
@@ -71,6 +72,74 @@ class ParseLogTimestampTest(unittest.TestCase):
         line = "2026-04-19 21:09:12,007 \x00\x01 corrupted line"
         ts = parse_log_timestamp(line)
         self.assertEqual(ts.hour, 21)
+
+
+class FormatUncertaintyTest(unittest.TestCase):
+    """Adaptive ± display: cm at sub-meter, m beyond."""
+
+    def test_sub_10cm_one_decimal_cm(self):
+        self.assertEqual(format_uncertainty(0.023), "± 2.3 cm")
+        self.assertEqual(format_uncertainty(0.099), "± 9.9 cm")
+
+    def test_sub_meter_integer_cm(self):
+        self.assertEqual(format_uncertainty(0.23), "± 23 cm")
+        self.assertEqual(format_uncertainty(0.99), "± 99 cm")
+
+    def test_sub_10m_one_decimal_m(self):
+        self.assertEqual(format_uncertainty(1.0), "± 1.0 m")
+        self.assertEqual(format_uncertainty(9.9), "± 9.9 m")
+
+    def test_beyond_10m_integer_m(self):
+        self.assertEqual(format_uncertainty(12.0), "± 12 m")
+        self.assertEqual(format_uncertainty(99.5), "± 100 m")
+
+    def test_none_renders_question(self):
+        self.assertEqual(format_uncertainty(None), "± ?")
+
+    def test_negative_renders_question(self):
+        """Guard against arithmetic that could produce a negative."""
+        self.assertEqual(format_uncertainty(-1.0), "± ?")
+
+
+class UncertainDecimalsDegTest(unittest.TestCase):
+    """How many trailing decimals of a degree are below the σ
+    quantum (latitude — 1° ≈ 111 km)."""
+
+    def test_three_cm_sigma_yields_seven_confident_decimals(self):
+        # σ = 0.03 m → σ_deg = 2.7e-7 → floor(-log10(2.7e-7)) = 6.
+        # So 6 confident decimals; the 7th and beyond are dim.
+        self.assertEqual(uncertain_decimals_deg(0.03), 6)
+
+    def test_meter_sigma_reduces_confident_decimals(self):
+        # σ = 1 m → σ_deg ≈ 9e-6 → ~5 confident decimals.
+        self.assertEqual(uncertain_decimals_deg(1.0), 5)
+
+    def test_tiny_sigma_yields_many_decimals(self):
+        # σ = 1 mm → σ_deg = 9e-9 → 8 confident decimals.
+        self.assertEqual(uncertain_decimals_deg(0.001), 8)
+
+    def test_none_returns_zero(self):
+        self.assertEqual(uncertain_decimals_deg(None), 0)
+
+    def test_zero_sigma_returns_zero(self):
+        self.assertEqual(uncertain_decimals_deg(0.0), 0)
+
+
+class UncertainDecimalsMTest(unittest.TestCase):
+    """Same idea for altitude (metres directly)."""
+
+    def test_three_cm_sigma_one_confident_decimal(self):
+        # σ = 0.023 → floor(-log10(0.023)) = floor(1.64) = 1.
+        self.assertEqual(uncertain_decimals_m(0.023), 1)
+
+    def test_one_meter_sigma_zero_decimals(self):
+        self.assertEqual(uncertain_decimals_m(1.0), 0)
+
+    def test_one_mm_sigma_three_decimals(self):
+        self.assertEqual(uncertain_decimals_m(0.001), 3)
+
+    def test_none_returns_zero(self):
+        self.assertEqual(uncertain_decimals_m(None), 0)
 
 
 class FormatElapsedShortTest(unittest.TestCase):

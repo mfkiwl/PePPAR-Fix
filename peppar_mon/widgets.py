@@ -21,6 +21,29 @@ from textual.widget import Widget
 from rich.table import Table
 from rich.text import Text
 
+from peppar_mon._util import (
+    format_uncertainty,
+    uncertain_decimals_deg,
+    uncertain_decimals_m,
+)
+
+# AntPosEstState (engine side, lowercase string) → display label in
+# the AntennaPositionLine row.  Bob's 4-way mapping (2026-04-21):
+#   UNSURVEYED / VERIFYING / VERIFIED → "Surveying"  (pre-PPP)
+#   CONVERGING                        → "Resolving" (in the filter)
+#   RESOLVED                          → "Resolved"  (anchored)
+#   MOVED                             → "Moved"     (displacement)
+# Anything else (e.g. None before first [STATE] line) falls back to
+# "Waiting" so the row is never blank.
+_ANTPOS_LABEL: dict[Optional[str], str] = {
+    "unsurveyed": "Surveying",
+    "verifying": "Surveying",
+    "verified": "Surveying",
+    "converging": "Resolving",
+    "resolved": "Resolved",
+    "moved": "Moved",
+}
+
 # SV constellation prefix → human label, in display order.
 # Keep GPS first (most satellites), then GAL, then BDS.  Add more
 # rows here when we start running QZSS / NAVIC / SBAS and care
@@ -331,3 +354,187 @@ def _aggregate(
         prefix = sv[0]
         out.setdefault(prefix, Counter())[state] += 1
     return {p: dict(c) for p, c in out.items()}
+
+
+class AntennaPositionLine(Widget):
+    """Single-line right-aligned antenna-position display.
+
+    Layout::
+
+        Antenna Position Resolving LAT / LON / ALT ± 2.3 cm
+
+    Four pieces separated by spaces:
+
+      * ``Antenna Position`` — literal prefix
+      * state label: Surveying / Resolving / Resolved / Moved /
+        Waiting (Bob's 4-way mapping; see ``_ANTPOS_LABEL``)
+      * ``lat / lon / alt`` — filter's current position.  Format
+        matches whatever precision the engine emits in the
+        ``[AntPosEst]`` line.  Digits below the σ quantum are
+        rendered ``dim`` so the operator sees at a glance which
+        digits are truth-bearing.
+      * ``± X unit`` — 3D σ scaled to cm / m per
+        ``format_uncertainty``.
+
+    Design notes:
+      * Single renderable.  No per-field subcomponents — this is
+        a one-line status read-out, not an interactive form.
+      * Right-alignment is the caller's job via CSS — the widget
+        itself just produces a ``Text``.  Saves a layout argument
+        here and matches how Rich-rendered widgets usually work
+        in Textual.
+      * If position is None (pre-bootstrap), renders ``Antenna
+        Position Waiting`` with no numbers.  Rich-Text-safe.
+    """
+
+    DEFAULT_CSS = """
+    AntennaPositionLine {
+        height: 1;
+        width: auto;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        state: Optional[str] = None,
+        position: Optional[tuple[float, float, float]] = None,
+        sigma_m: Optional[float] = None,
+        id: Optional[str] = None,  # noqa: A002
+    ) -> None:
+        super().__init__(id=id)
+        self._state = state
+        self._position = position
+        self._sigma_m = sigma_m
+
+    def update_position(
+        self,
+        *,
+        state: Optional[str],
+        position: Optional[tuple[float, float, float]],
+        sigma_m: Optional[float],
+    ) -> None:
+        """Record a new snapshot; no-op if nothing display-relevant
+        changed (saves repaints when the engine line arrives with
+        the same state/σ the widget already shows — typical in
+        steady state where position moves in sub-cm increments)."""
+        if (
+            state == self._state
+            and position == self._position
+            and sigma_m == self._sigma_m
+        ):
+            return
+        self._state = state
+        self._position = position
+        self._sigma_m = sigma_m
+        self.refresh()
+
+    # ── Rendering ───────────────────────────────────────────────── #
+
+    def render(self) -> Text:
+        label = _ANTPOS_LABEL.get(self._state, "Waiting")
+        t = Text()
+        t.append("Antenna Position ", style="bold")
+        t.append(label + " ")
+        if self._position is None:
+            # No numeric block yet — state label alone.
+            return t
+        lat, lon, alt = self._position
+        # Format matches engine's current precision (:.6f lat/lon,
+        # :.1f alt).  Widens automatically when main lands the
+        # precision ask — the regex captures whatever's logged,
+        # so the string we get already has the full precision;
+        # our format here re-stringifies with enough decimals to
+        # preserve what the engine emitted.  Using :.8f / :.3f
+        # gives a fixed width today (tail zeros) and becomes
+        # exact when the engine widens.  Trailing-zero shading
+        # from uncertainty handles the visual.
+        lat_s = f"{lat:.8f}"
+        lon_s = f"{lon:.8f}"
+        alt_s = f"{alt:.3f}"
+        self._append_shaded_deg(t, lat_s)
+        t.append(" / ")
+        self._append_shaded_deg(t, lon_s)
+        t.append(" / ")
+        self._append_shaded_m(t, alt_s)
+        t.append(" ")
+        t.append(format_uncertainty(self._sigma_m))
+        return t
+
+    def _append_shaded_deg(self, t: Text, s: str) -> None:
+        """Append a degree-formatted number with digits below the
+        σ quantum rendered ``dim``.  Point is preserved; integer
+        part never shaded."""
+        confident = uncertain_decimals_deg(self._sigma_m)
+        self._append_with_decimal_shading(t, s, confident)
+
+    def _append_shaded_m(self, t: Text, s: str) -> None:
+        """Same for altitude (metres)."""
+        confident = uncertain_decimals_m(self._sigma_m)
+        self._append_with_decimal_shading(t, s, confident)
+
+    @staticmethod
+    def _append_with_decimal_shading(
+        t: Text, s: str, confident_decimals: int,
+    ) -> None:
+        """Given a string like ``40.12345678`` and a count of
+        confident decimal places, append it to ``t`` with the
+        trailing (uncertain) decimals styled ``dim``.  Handles
+        edge cases: no decimal point (integer), confident ≥ all
+        decimals (no shading), confident = 0 (shade everything
+        after the point)."""
+        if "." not in s:
+            t.append(s)
+            return
+        whole, frac = s.split(".", 1)
+        t.append(whole + ".")
+        if confident_decimals >= len(frac):
+            t.append(frac)
+            return
+        cut = max(0, confident_decimals)
+        t.append(frac[:cut])
+        t.append(frac[cut:], style="dim")
+
+
+class SecondOpinionLine(Widget):
+    """Single-line right-aligned ``2nd Opinion X.X m 3D`` readout.
+
+    Shows the scalar distance between the AntPosEst filter's
+    position and the F9T's NAV2 secondary-engine position.  Bob's
+    preference (2026-04-21): just show the delta magnitude, not
+    the absolute NAV2 position — the delta is the useful signal.
+
+    Renders ``2nd Opinion  —`` when no nav2Δ has been observed
+    (engine without nav2_store, or pre-first-NAV2-fix bootstrap).
+    """
+
+    DEFAULT_CSS = """
+    SecondOpinionLine {
+        height: 1;
+        width: auto;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        nav2_delta_m: Optional[float] = None,
+        id: Optional[str] = None,  # noqa: A002
+    ) -> None:
+        super().__init__(id=id)
+        self._delta = nav2_delta_m
+
+    def update_delta(self, nav2_delta_m: Optional[float]) -> None:
+        if nav2_delta_m == self._delta:
+            return
+        self._delta = nav2_delta_m
+        self.refresh()
+
+    def render(self) -> Text:
+        t = Text()
+        t.append("2nd Opinion ", style="bold")
+        if self._delta is None:
+            t.append("—")
+        else:
+            t.append(f"{self._delta:.1f} m 3D")
+        return t

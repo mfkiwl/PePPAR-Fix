@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import unittest
 
-from peppar_mon.widgets import StateBar, SvStateTable, _aggregate
+from peppar_mon.widgets import (
+    AntennaPositionLine, SecondOpinionLine,
+    StateBar, SvStateTable, _aggregate,
+)
 
 
 _ANT_STATES = (
@@ -401,6 +404,192 @@ class SvStateTableCapabilityTest(unittest.TestCase):
         table.update(
             sv_states={"E05": "WL_FIXED"}, nl_capable=frozenset("E"),
         )
+        self.assertEqual(calls["n"], 1)
+
+
+class AntennaPositionLineTest(unittest.TestCase):
+    """Single-line position readout with state-driven label and
+    σ-driven digit shading."""
+
+    def _render(self, widget):
+        from rich.console import Console
+        console = Console(width=200, record=True, legacy_windows=False)
+        console.print(widget.render())
+        return console.export_text()
+
+    def _render_text(self, widget):
+        """Return the raw Rich Text for span-level inspection."""
+        return widget.render()
+
+    # ── Labels ─────────────────────────────────────────────────── #
+
+    def test_state_unsurveyed_renders_surveying(self):
+        w = AntennaPositionLine(state="unsurveyed")
+        self.assertIn("Surveying", self._render(w))
+
+    def test_state_verifying_renders_surveying(self):
+        w = AntennaPositionLine(state="verifying")
+        self.assertIn("Surveying", self._render(w))
+
+    def test_state_verified_renders_surveying(self):
+        w = AntennaPositionLine(state="verified")
+        self.assertIn("Surveying", self._render(w))
+
+    def test_state_converging_renders_resolving(self):
+        w = AntennaPositionLine(state="converging")
+        self.assertIn("Resolving", self._render(w))
+
+    def test_state_resolved_renders_resolved(self):
+        w = AntennaPositionLine(state="resolved")
+        self.assertIn("Resolved", self._render(w))
+
+    def test_state_moved_renders_moved(self):
+        w = AntennaPositionLine(state="moved")
+        self.assertIn("Moved", self._render(w))
+
+    def test_state_none_renders_waiting(self):
+        """Pre-first-[STATE] line: no state → Waiting."""
+        w = AntennaPositionLine(state=None)
+        self.assertIn("Waiting", self._render(w))
+
+    # ── Position numeric rendering ─────────────────────────────── #
+
+    def test_no_position_hides_numeric_block(self):
+        """Pre-first-[AntPosEst]: state label only, no lat/lon/alt."""
+        w = AntennaPositionLine(state="converging", position=None)
+        out = self._render(w)
+        self.assertIn("Resolving", out)
+        self.assertNotIn("/", out)     # no lat / lon / alt separator
+        self.assertNotIn("±", out)     # no uncertainty block either
+
+    def test_position_renders_lat_lon_alt(self):
+        w = AntennaPositionLine(
+            state="resolved",
+            position=(40.12345678, -90.12345678, 198.247),
+            sigma_m=0.023,
+        )
+        out = self._render(w)
+        self.assertIn("40.12345678", out)
+        self.assertIn("-90.12345678", out)
+        self.assertIn("198.247", out)
+        self.assertIn("/", out)
+        self.assertIn("±", out)
+
+    def test_uncertainty_string_present(self):
+        w = AntennaPositionLine(
+            state="resolved",
+            position=(40.12345678, -90.12345678, 198.247),
+            sigma_m=0.023,
+        )
+        self.assertIn("± 2.3 cm", self._render(w))
+
+    # ── Digit shading ─────────────────────────────────────────── #
+
+    def test_digits_past_sigma_are_dim(self):
+        """σ = 3 cm → 6 confident lat decimals, 1 confident alt
+        decimal.  The 7th+ lat decimal and 2nd+ alt decimal get
+        ``dim`` style."""
+        w = AntennaPositionLine(
+            state="resolved",
+            position=(40.12345678, -90.12345678, 198.247),
+            sigma_m=0.03,
+        )
+        t = self._render_text(w)
+        # Find the span that covers "78" (the uncertain trailing
+        # digits of the lat 40.12345678).
+        plain = t.plain
+        start = plain.index("40.12345678") + len("40.123456")
+        spans_over = [
+            sp for sp in t.spans
+            if sp.start <= start < sp.end
+        ]
+        self.assertTrue(
+            any("dim" in str(sp.style) for sp in spans_over),
+            f"expected a dim span over trailing lat digits; "
+            f"spans={[(sp.start, sp.end, str(sp.style)) for sp in t.spans]}",
+        )
+
+    def test_all_digits_confident_when_sigma_sub_mm(self):
+        """σ = 0.1 mm → 7+ confident lat decimals.  Nothing dim."""
+        w = AntennaPositionLine(
+            state="resolved",
+            position=(40.12345678, -90.12345678, 198.247),
+            sigma_m=0.0001,
+        )
+        t = self._render_text(w)
+        # No dim spans at all in the numeric region.
+        for sp in t.spans:
+            self.assertNotIn("dim", str(sp.style))
+
+    # ── Update short-circuit ─────────────────────────────────── #
+
+    def test_update_no_op_when_unchanged(self):
+        w = AntennaPositionLine(
+            state="resolved",
+            position=(41.0, -88.0, 100.0),
+            sigma_m=0.023,
+        )
+        calls = {"n": 0}
+
+        def fake_refresh():
+            calls["n"] += 1
+        w.refresh = fake_refresh  # type: ignore[method-assign]
+
+        # Same state → no refresh.
+        w.update_position(
+            state="resolved",
+            position=(41.0, -88.0, 100.0),
+            sigma_m=0.023,
+        )
+        self.assertEqual(calls["n"], 0)
+        # σ changes → refresh fires (shading may flip).
+        w.update_position(
+            state="resolved",
+            position=(41.0, -88.0, 100.0),
+            sigma_m=0.500,
+        )
+        self.assertEqual(calls["n"], 1)
+
+
+class SecondOpinionLineTest(unittest.TestCase):
+    def _render(self, widget):
+        from rich.console import Console
+        console = Console(width=80, record=True, legacy_windows=False)
+        console.print(widget.render())
+        return console.export_text()
+
+    def test_none_renders_em_dash(self):
+        """No nav2Δ observed → em-dash placeholder.  Tells the
+        operator the row is alive but has no data yet."""
+        w = SecondOpinionLine(nav2_delta_m=None)
+        out = self._render(w)
+        self.assertIn("2nd Opinion", out)
+        self.assertIn("—", out)
+        self.assertNotIn("m 3D", out)
+
+    def test_value_renders_with_units(self):
+        w = SecondOpinionLine(nav2_delta_m=2.8)
+        self.assertIn("2.8 m 3D", self._render(w))
+
+    def test_zero_is_explicit(self):
+        """Distinguish "no data" (em-dash) from "exactly zero"
+        (which is a legitimate — and notable — value)."""
+        w = SecondOpinionLine(nav2_delta_m=0.0)
+        out = self._render(w)
+        self.assertIn("0.0 m 3D", out)
+        self.assertNotIn("—", out)
+
+    def test_update_no_op_when_unchanged(self):
+        w = SecondOpinionLine(nav2_delta_m=2.8)
+        calls = {"n": 0}
+
+        def fake_refresh():
+            calls["n"] += 1
+        w.refresh = fake_refresh  # type: ignore[method-assign]
+
+        w.update_delta(2.8)   # no-op
+        w.update_delta(2.8)   # no-op
+        w.update_delta(3.1)   # should fire
         self.assertEqual(calls["n"], 1)
 
 

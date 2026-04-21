@@ -29,12 +29,14 @@ from datetime import datetime
 from pathlib import Path
 
 from textual.app import App, ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.widgets import Static, Header, Footer
 
 from peppar_mon._util import format_elapsed_short, format_uptime
 from peppar_mon.log_reader import LogReader
-from peppar_mon.widgets import StateBar, SvStateTable
+from peppar_mon.widgets import (
+    AntennaPositionLine, SecondOpinionLine, StateBar, SvStateTable,
+)
 
 # If no new timestamped line has landed in the log within this many
 # seconds, the engine is assumed dead and the uptime row flips to a
@@ -81,8 +83,21 @@ class PepparMonApp(App):
         padding: 1 2;
     }
 
-    #clock, #uptime {
+    /* Top two rows: left item auto-widths, right item stretches to
+       fill and right-aligns its content so the position/delta read-
+       outs hug the right edge without stepping on the clock/uptime
+       to their left. */
+    .top-row {
+        height: 1;
+        width: 1fr;
+    }
+    .top-row-left {
         width: auto;
+        padding: 0 1;
+    }
+    .top-row-right {
+        width: 1fr;
+        content-align: right middle;
         padding: 0 1;
     }
 
@@ -117,8 +132,18 @@ class PepparMonApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with Vertical(id="status"):
-            yield Static("", id="clock")
-            yield Static("", id="uptime")
+            # Row 1: clock (left) + antenna-position (right).
+            with Horizontal(classes="top-row"):
+                yield Static("", id="clock", classes="top-row-left")
+                yield AntennaPositionLine(
+                    id="antenna-position", classes="top-row-right",
+                )
+            # Row 2: uptime / DOWN (left) + 2nd Opinion (right).
+            with Horizontal(classes="top-row"):
+                yield Static("", id="uptime", classes="top-row-left")
+                yield SecondOpinionLine(
+                    id="second-opinion", classes="top-row-right",
+                )
             yield StateBar(
                 machine_name="AntPosEst",
                 all_states=_ANT_POS_EST_STATES,
@@ -164,6 +189,14 @@ class PepparMonApp(App):
         self.query_one("#sv-state-table", SvStateTable).update(
             sv_states=s.sv_states,
             nl_capable=s.nl_capable_constellations,
+        )
+        self.query_one("#antenna-position", AntennaPositionLine).update_position(
+            state=s.ant_pos_est_state,
+            position=s.antenna_position,
+            sigma_m=s.antenna_sigma_m,
+        )
+        self.query_one("#second-opinion", SecondOpinionLine).update_delta(
+            s.nav2_delta_m,
         )
 
     def _uptime_line(self) -> str:

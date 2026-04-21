@@ -227,6 +227,97 @@ class StateLineParsingTest(unittest.TestCase):
         self.assertIsNone(r.state.do_freq_est_state)
 
 
+class AntPosEstLineTest(unittest.TestCase):
+    """Parsing position + σ + nav2Δ from ``[AntPosEst N]``
+    lines.  The widget relies on these fields landing in LogState
+    on every epoch — a silent parser failure would freeze the
+    position display at its last value."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "engine.log"
+
+    def test_typical_line_extracts_all_fields(self):
+        self.path.write_text(
+            "2026-04-21 17:48:07,703 INFO   [AntPosEst 4210] "
+            "σ=0.023m pos=(40.123456, -90.123456, 198.2) n=12 amb=12 "
+            "WL: 12/17 fixed NL: 3 fixed R=5.4 P=0.997 nav2Δ=2.7m "
+            "ZTD=+274±3mm\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.antenna_position is not None)
+        self.assertEqual(r.state.antenna_sigma_m, 0.023)
+        self.assertEqual(
+            r.state.antenna_position, (40.123456, -90.123456, 198.2),
+        )
+        self.assertEqual(r.state.nav2_delta_m, 2.7)
+
+    def test_negative_altitude_parses(self):
+        """Engine has been briefly seen emitting negative altitudes
+        during a filter glitch.  Regex must accept them."""
+        self.path.write_text(
+            "2026-04-21 17:48:07,703 INFO   [AntPosEst 4210] "
+            "σ=1.500m pos=(40.123456, -90.123456, -5.8) n=12 amb=12\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.antenna_position is not None)
+        self.assertEqual(r.state.antenna_position[2], -5.8)
+
+    def test_line_without_nav2_still_parses(self):
+        """Early bootstrap lines may not carry nav2Δ (no NAV2
+        fix yet).  Position + σ must still land; nav2_delta_m
+        stays None."""
+        self.path.write_text(
+            "2026-04-21 17:48:07,703 INFO   [AntPosEst 10] "
+            "σ=2.356m pos=(40.123400, -90.123500, 201.3) n=11 amb=14 "
+            "WL: 0/15 fixed NL: 0 fixed\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.antenna_position is not None)
+        self.assertEqual(r.state.antenna_sigma_m, 2.356)
+        self.assertIsNone(r.state.nav2_delta_m)
+
+    def test_latest_line_wins(self):
+        """When multiple [AntPosEst] lines appear, the latest
+        fields win — the widget always shows the most recent
+        position, never a stale frame."""
+        self.path.write_text(
+            "2026-04-21 17:48:00,000 INFO   [AntPosEst 10] "
+            "σ=0.500m pos=(40.12, -90.12, 195.0)\n"
+            "2026-04-21 17:48:10,000 INFO   [AntPosEst 20] "
+            "σ=0.023m pos=(40.123456, -90.123456, 198.2)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(
+            lambda: r.state.antenna_position
+            and r.state.antenna_position[2] > 196,
+        )
+        self.assertEqual(r.state.antenna_sigma_m, 0.023)
+        self.assertEqual(r.state.antenna_position[2], 198.2)
+
+    def test_widened_precision_is_preserved(self):
+        """When main lands the precision ask (8 decimals on
+        lat/lon, 3 on altitude), the parser must preserve all of
+        those digits — a regex that accidentally truncated would
+        defeat the point of asking for more precision."""
+        self.path.write_text(
+            "2026-04-21 17:48:07,703 INFO   [AntPosEst 4210] "
+            "σ=0.023m pos=(40.12345678, -90.12345678, 198.247)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.antenna_position is not None)
+        self.assertAlmostEqual(
+            r.state.antenna_position[0], 40.12345678, places=8,
+        )
+        self.assertAlmostEqual(
+            r.state.antenna_position[1], -90.12345678, places=8,
+        )
+        self.assertAlmostEqual(
+            r.state.antenna_position[2], 198.247, places=3,
+        )
+
+
 class PhaseBiasCapabilityTest(unittest.TestCase):
     """``Phase bias lookup`` lines feed nl_capable_constellations.
 
