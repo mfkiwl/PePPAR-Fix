@@ -5746,9 +5746,6 @@ Two-phase operation:
 
     args = ap.parse_args()
     _apply_host_config(args)
-    # --no-do overrides --servo from CLI or host config
-    if args.no_do:
-        args.servo = None
     # Apply defaults for args that are None after CLI + host config.
     # These were made nullable so host config can override them.
     if args.baud is None:
@@ -5768,6 +5765,16 @@ Two-phase operation:
     if args.dac_type is None:
         args.dac_type = "mcp4725"
     apply_ptp_profile(args)
+    # --no-do overrides --servo (including the profile default
+    # restored by apply_ptp_profile above).  Must happen AFTER
+    # apply_ptp_profile — otherwise the profile silently re-
+    # populates args.servo to the receivers.toml default (e.g.
+    # "/dev/ptp0" for the i226 profile), which then crashes the
+    # engine at PPS-open time on any host whose actual PHC lives
+    # at /dev/ptp_i226 (the udev symlink).  See
+    # project_queued_ptp_dev_config_threading_20260422.md.
+    if args.no_do:
+        args.servo = None
     # TICC competes as a source whenever --ticc-port is configured.
     # No separate promotion flag needed.
     if args.pps_pin is None:
