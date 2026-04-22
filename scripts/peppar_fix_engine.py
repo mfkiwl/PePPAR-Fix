@@ -1647,12 +1647,15 @@ class AntPosEstThread(threading.Thread):
             # Reset the ZTD residual state to 0 with inflated
             # covariance — the filter re-estimates ZTD from scratch
             # alongside any new NL fixes.  Other state untouched.
-            if hasattr(filt, 'IDX_ZTD') and filt.x.shape[0] > filt.IDX_ZTD:
-                filt.x[filt.IDX_ZTD] = 0.0
+            # (IDX_ZTD is a module-level constant, not an instance
+            # attribute; getattr falls through to the imported one.)
+            ztd_idx = getattr(filt, 'IDX_ZTD', PPP_IDX_ZTD)
+            if filt.x.shape[0] > ztd_idx:
+                filt.x[ztd_idx] = 0.0
                 # Initial PPPFilter sigma on ZTD residual is 0.5 m
                 # (see PPPFilter.initialize); matching here keeps
                 # the EKF's re-estimation well-posed.
-                filt.P[filt.IDX_ZTD, filt.IDX_ZTD] = 0.5 ** 2
+                filt.P[ztd_idx, ztd_idx] = 0.5 ** 2
             log.info(
                 "ZTD trip recovery: reverted %d NL fixes, reset ZTD"
                 " state, preserved MW/position/clock",
@@ -1859,8 +1862,14 @@ class AntPosEstThread(threading.Thread):
             # (keep WL / MW / position).  See
             # docs/ztd-impossibility-trigger-design.md.
             ppp_ztd = None
-            if hasattr(filt, 'IDX_ZTD') and filt.x.shape[0] > filt.IDX_ZTD:
-                ppp_ztd = float(filt.x[filt.IDX_ZTD])
+            # PPPFilter's IDX_ZTD is a module-level constant, not an
+            # instance/class attribute, so hasattr on the instance
+            # returns False.  Fall through to the imported module
+            # constant — matches the pattern used by the [AntPosEst]
+            # log line below.
+            ppp_ztd_idx = getattr(filt, 'IDX_ZTD', PPP_IDX_ZTD)
+            if filt.x.shape[0] > ppp_ztd_idx:
+                ppp_ztd = float(filt.x[ppp_ztd_idx])
             # Bead 4: stream azimuths for ANCHORING SVs so the
             # promoter can accumulate Δaz toward the 15° threshold.  We
             # compute azimuths only when there's at least one SV in
