@@ -9,15 +9,66 @@ incrementally.
 > fusion, bootstrap-as-seed-verification, and wrapper dissolution plan.
 > Many of the entries below are stepping stones toward that vision.
 
-## Three-source position consensus + self-healing FixedPosFilter
+## Three-source position sanity + self-healing FixedPosFilter
 
-**What**: When the engine is in Phase 2 (FixedPosFilter, position
-locked), maintain *three independent* estimates of the antenna's
-position and use majority consensus to distinguish "antenna physically
-moved" from "internal filter state corrupted".  When the FixedPos
-EKF blows up, reset it from the consensus position and coast on
-PPS+qErr until it reconverges, instead of the current behavior of
-exiting the engine and waiting for a manual restart.
+> **Status 2026-04-22**: Most of this section *landed* as part of the
+> architecture-vision work.  What remains is the explicit three-way
+> vote at the watchdog (today it's 2-way: `known_ecef` vs NAV2), the
+> Case-4 "bg-PPP itself is corrupted" recovery path, and a new idea —
+> **cross-host ensemble NAV2** — that came up 2026-04-22 and isn't
+> part of the original three-source design.  The "consensus"
+> framing below has also been revised: the live PPP-AR solution is
+> *the* best position estimate, not a peer-on-equal-footing with
+> NAV2 or `known_ecef`.  NAV2 and `known_ecef` are **sanity checks /
+> trip-wires**, not consensus inputs.  Over 12 h, the live solution
+> is physically more accurate than either watchdog input (solid
+> earth tides vertical motion of ±10–15 cm per semi-diurnal cycle
+> at mid-latitudes is tracked by PPP phase measurements but
+> averaged out of `known_ecef` by the exponential blend and
+> unresolved by NAV2's coarse single-receiver filter).
+>
+> **Landed**:
+> - Phase 1 PPPFilter kept alive past bootstrap as
+>   `AntPosEstThread` (engine.py:1263) with its own PPPFilter
+>   instance seeded from `known_ecef` (engine.py:1311).
+> - NAV2 engine enabled, NAV2-PVT parsed, `Nav2PositionStore`
+>   with `get_opinion()` returning ECEF + LLA + hAcc/vAcc + pDOP.
+> - FixedPosFilter watchdog consults NAV2 before declaring
+>   "antenna moved" — re-seeds from `known_ecef` if NAV2 agrees.
+> - `known_ecef` is refined by AR via exponential blend
+>   (α = 0.001, τ ≈ 1000 epochs) so transient wrong fixes only
+>   shift it by ~3 mm/epoch.  **Warning**: 100 epochs of wrong
+>   fix = 30 cm = 1 ns of timing error; the blend slows but
+>   doesn't prevent contamination.  This is why the
+>   CONVERGING → ANCHORING → ANCHORED state-transition gates
+>   matter — catching wrong integers *before* commit is
+>   cheaper than catching them after `known_ecef` absorbs the
+>   damage.
+> - Raw NAV2 position logged every 10 epochs alongside
+>   AntPosEst (2026-04-22) — `[NAV2 N] lat=... lon=... alt=...
+>   hAcc=... vAcc=... pDOP=... fix=... sv=... age=...`
+>   — enables cross-host NAV2 analysis and future ensemble work.
+>
+> **Not yet**:
+> - Explicit three-way comparison at the watchdog (AntPosEst
+>   position vs NAV2 vs known_ecef, rather than just NAV2 vs
+>   known_ecef).
+> - Case 4: reset bg-PPP (AntPosEst) state when bg-PPP itself
+>   is corrupted without touching FixedPos.
+> - Cross-host ensemble NAV2 as an independent sanity reference
+>   — shared antenna, three F9Ts, the ensemble-average NAV2 has
+>   ~√3 less random noise than any single host's NAV2.
+>
+> Everything below is the original text, preserved for context
+> but no longer prescriptive.  Rewrite pending.
+
+**What** *(original)*: When the engine is in Phase 2 (FixedPosFilter,
+position locked), maintain *three independent* estimates of the
+antenna's position and use majority consensus to distinguish
+"antenna physically moved" from "internal filter state corrupted".
+When the FixedPos EKF blows up, reset it from the consensus position
+and coast on PPS+qErr until it reconverges, instead of the current
+behavior of exiting the engine and waiting for a manual restart.
 
 **Why**: 2026-04-08 evening, MadHat's overnight died at 51 minutes
 because the FixedPosFilter's residual-RMS watchdog tripped:

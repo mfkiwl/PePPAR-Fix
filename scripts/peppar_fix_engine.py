@@ -1840,10 +1840,11 @@ class AntPosEstThread(threading.Thread):
                 rms = np.sqrt(np.mean(resid ** 2)) if len(resid) > 0 else 0
                 lat, lon, alt = ecef_to_lla(pos_ecef[0], pos_ecef[1], pos_ecef[2])
                 nav2_tag = ""
+                nav2_opinion = None
                 if self._nav2_store is not None:
-                    opinion = self._nav2_store.get_opinion(max_age_s=30.0)
-                    if opinion is not None:
-                        d = float(np.linalg.norm(pos_ecef - opinion['ecef']))
+                    nav2_opinion = self._nav2_store.get_opinion(max_age_s=30.0)
+                    if nav2_opinion is not None:
+                        d = float(np.linalg.norm(pos_ecef - nav2_opinion['ecef']))
                         nav2_tag = f" nav2Δ={d:.1f}m"
                 log.info(
                     "  [AntPosEst %d] σ=%.3fm pos=(%.6f, %.6f, %.1f) "
@@ -1852,6 +1853,31 @@ class AntPosEstThread(threading.Thread):
                     n_used, len(filt.sv_to_idx),
                     mw.summary(), nl.summary(), nav2_tag,
                 )
+                # Full-precision NAV2 log line.  NAV2-PVT's native format is
+                # LLA; lat/lon at 1e-7 deg (~1 cm resolution at our latitude)
+                # and height in mm.  Deriving ECEF from LLA doesn't add
+                # precision, so we emit LLA directly.  Post-hoc analysis of
+                # the cross-host NAV2 ensemble (three F9Ts on the shared
+                # antenna) uses these lines; each log entry is self-
+                # contained so an aligner can join by timestamp.
+                if nav2_opinion is not None:
+                    h_acc = nav2_opinion.get('h_acc_m')
+                    v_acc = nav2_opinion.get('v_acc_m')
+                    pdop = nav2_opinion.get('pdop')
+                    log.info(
+                        "  [NAV2 %d] lat=%.7f lon=%.7f alt=%.3fm "
+                        "hAcc=%s vAcc=%s pDOP=%s fix=%s sv=%d age=%.1fs",
+                        self._n_epochs,
+                        nav2_opinion['lat'],
+                        nav2_opinion['lon'],
+                        nav2_opinion['alt_m'],
+                        f"{h_acc:.3f}m" if h_acc is not None else "n/a",
+                        f"{v_acc:.3f}m" if v_acc is not None else "n/a",
+                        f"{pdop:.2f}" if pdop is not None else "n/a",
+                        nav2_opinion.get('fix_type', '?'),
+                        nav2_opinion.get('num_sv', 0),
+                        nav2_opinion.get('age_s', 0.0),
+                    )
 
             # Periodic SV-state summary (replaces the old PFR per-SV
             # residual dump).  Emits a one-line histogram of states at
