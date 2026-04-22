@@ -456,8 +456,8 @@ class SettingSvDropMonitorTest(unittest.TestCase):
             "regression against the day0421 high-elev anchor-drop "
             "pattern that motivated this gate",
         )
-        # SV stays in NL_SHORT_FIXED, not dropped.
-        self.assertIs(self.t.state("G30"), SvAmbState.NL_SHORT_FIXED)
+        # SV stays in ANCHORING, not dropped.
+        self.assertIs(self.t.state("G30"), SvAmbState.ANCHORING)
 
     def test_drop_allowed_at_ceiling_boundary(self):
         """elev == ceiling still qualifies as the setting band (the
