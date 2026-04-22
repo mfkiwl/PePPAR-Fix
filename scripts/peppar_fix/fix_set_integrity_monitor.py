@@ -164,26 +164,39 @@ class FixSetIntegrityMonitor:
 
     # ── Evaluation ──────────────────────────────────────────────── #
 
-    def evaluate(self, epoch: int) -> dict | None:
+    def evaluate(self, epoch: int, ztd_m: float | None = None) -> dict | None:
         """Return a trip event dict, or None if no trip.
 
         Event dict carries a ``reason`` key so callers can branch on
         trigger type:
           - ``reason='window_rms'`` — traditional PR-residual
             blow-up path (field ``window_rms_m``, ``rms_m``,
-            ``n_samples``).
+            ``n_samples``).  Action: full filter re-init.
           - ``reason='anchor_collapse'`` — filter that has ever
             reached ANCHORED sat with zero long-term anchors for
             ``anchor_collapse_epochs`` (field
-            ``anchor_collapse_epochs``, ``since_epoch``).
+            ``anchor_collapse_epochs``, ``since_epoch``).  Action:
+            full filter re-init.
+          - ``reason='ztd_impossible'`` — filter ZTD residual
+            state past the physical envelope for a sustained
+            window (field ``ztd_m``, ``threshold_m``,
+            ``sustained_epochs``).  **Action: drop NL fixes only,
+            preserve WL / MW / position / clock.**  Wrong NL
+            integers are the likely driver of ZTD corruption —
+            reverting to WL-only stops them from accumulating
+            without discarding the fast-to-acquire state.
 
-        Caller executes re-init and calls `record_trip(epoch)`
-        exactly once per event.
+        Pass ``ztd_m`` (the PPP filter's current ZTD residual in
+        metres) to enable the ZTD trip.  When ``None``, the ZTD
+        check is skipped.
+
+        Caller executes the appropriate recovery and calls
+        `record_trip(epoch)` exactly once per event.
 
         Suppression rules (applied only to the window-RMS path —
-        anchor-collapse isn't suppressible, on the grounds that if
-        we've already lost every anchor on a trusted-position
-        filter, per-SV monitors aren't going to fix it):
+        anchor-collapse and ZTD aren't suppressible, on the grounds
+        that if the filter's own state is corrupt, per-SV monitors
+        aren't going to fix it):
           - fewer than `min_samples_in_window` RMS samples
           - window mean RMS ≤ threshold
           - within `cooldown_epochs` of last trip
@@ -193,7 +206,7 @@ class FixSetIntegrityMonitor:
         """
         if epoch % self._eval_every != 0:
             return None
-        # Cooldown applies to both triggers — the filter just got
+        # Cooldown applies to all triggers — the filter just got
         # re-initialized and needs time to settle before re-evaluating.
         if epoch < self._last_trip_epoch + self._cooldown:
             return None
@@ -225,6 +238,31 @@ class FixSetIntegrityMonitor:
             else:
                 # Anchor back — reset the timer.
                 self._anchor_collapse_since = None
+
+        # ── ZTD-impossibility trigger.  No latch dependency — ZTD
+        # can drift at any lifecycle state.  Sustained-window
+        # suppresses startup transients.  Fires when |ZTD residual|
+        # > threshold for ztd_sustained_epochs.  Action (caller-
+        # side): drop NL fixes, keep WL / MW / position / clock —
+        # wrong NL integers are the likely corruption driver, so
+        # reverting to WL only stops accumulation without
+        # discarding fast-to-acquire state.  Design doc:
+        # docs/ztd-impossibility-trigger-design.md.
+        if ztd_m is not None:
+            if abs(ztd_m) > self._ztd_trip_threshold_m:
+                if self._ztd_above_since is None:
+                    self._ztd_above_since = epoch
+                elif (epoch - self._ztd_above_since
+                        >= self._ztd_sustained_epochs):
+                    return {
+                        'reason': 'ztd_impossible',
+                        'ztd_m': ztd_m,
+                        'threshold_m': self._ztd_trip_threshold_m,
+                        'sustained_epochs':
+                            epoch - self._ztd_above_since,
+                    }
+            else:
+                self._ztd_above_since = None
 
         # ── Window-RMS trigger (legacy).
         if len(self._rms_hist) < self._min_samples:
@@ -270,60 +308,13 @@ class FixSetIntegrityMonitor:
         self._last_trip_epoch = int(epoch)
         self._rms_hist.clear()
         self._anchor_collapse_since = None
+        self._ztd_above_since = None
         if self._ape_sm is not None:
             self._ape_sm.clear_latches(reason="fix_set_integrity_trip")
         # The trip itself is announced by the caller as a single
         # [FIX_SET_INTEGRITY] TRIPPED line with reason + params.  We
         # don't re-announce here — keeps "monitor only speaks on
         # trip, once" as the interface contract.
-
-    # ── ZTD impossibility diagnostic ────────────────────────────── #
-
-    def check_ztd(self, epoch: int, ztd_m: float | None) -> None:
-        """Diagnostic-only ZTD-impossibility check.
-
-        Logs `[ZTD_TRIP_WOULD_FIRE]` when |ZTD residual| exceeds the
-        physical envelope for a sustained window.  Does NOT emit a
-        trip event, does NOT re-init the filter.  Runs in parallel to
-        the real trip logic in `evaluate()`.
-
-        Purpose of the diagnostic-only scoping: calibrate the
-        threshold (700 mm default) against overnight data before
-        committing to the re-init action.  See
-        `docs/ztd-impossibility-trigger-design.md` for the full
-        trip design this diagnostic pre-validates.
-
-        Physical reasoning: the filter's ZTD residual state tracks
-        the delta from a priori Saastamoinen.  Normal weather: ± 100
-        mm.  Extreme fronts: ± 300 mm.  Over ± 500 mm no atmosphere
-        produces — the filter is absorbing position error.  A
-        sustained residual past 700 mm is strong evidence the
-        filter state is corrupted and a re-init would be justified.
-
-        The sustained-epoch window (default 60 at 1 Hz) excludes
-        startup transients.  Log re-arms on each event — if the
-        condition persists, we log again after another sustained
-        window.
-        """
-        if ztd_m is None:
-            return
-        if abs(ztd_m) > self._ztd_trip_threshold_m:
-            if self._ztd_above_since is None:
-                self._ztd_above_since = epoch
-            elif (epoch - self._ztd_above_since
-                    >= self._ztd_sustained_epochs):
-                log.warning(
-                    "[ZTD_TRIP_WOULD_FIRE] ztd=%+.3fm threshold=±%.3fm"
-                    " sustained=%d epochs (diagnostic only — re-init"
-                    " not wired; see"
-                    " docs/ztd-impossibility-trigger-design.md)",
-                    ztd_m, self._ztd_trip_threshold_m,
-                    epoch - self._ztd_above_since,
-                )
-                # Re-arm: next sustained window triggers another log.
-                self._ztd_above_since = None
-        else:
-            self._ztd_above_since = None
 
     # ── Diagnostics ─────────────────────────────────────────────── #
 

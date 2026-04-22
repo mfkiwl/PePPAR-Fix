@@ -1578,28 +1578,27 @@ class AntPosEstThread(threading.Thread):
         # "this SV is bad."  Next arc or re-acquisition re-uses it.
 
     def _apply_integrity_trip(self, filt, mw, nl, ev):
-        """Fix-set integrity monitor tripped — systemic failure.
-        Full filter re-init at current AR position.  Transitions
-        the filter state back to CONVERGING.
+        """Fix-set integrity monitor tripped.  Action depends on
+        ``ev['reason']``:
 
-        The monitor's ``ev`` dict has two shapes depending on trigger:
-          * ``reason='window_rms'`` — keys ``window_rms_m``,
-            ``rms_m``, ``n_samples``.  Mean PR residual across
-            fix-set members stayed elevated.
-          * ``reason='anchor_collapse'`` — keys
-            ``anchor_collapse_epochs``, ``since_epoch``.  Zero
-            anchored SVs for N epochs on a filter that has ever
-            latched ``reached_anchored``.  See
-            ``project_landed_20260421_anchor_collapse_fix.md`` and
-            ``project_day0421b_anchor_loss_trap_20260421.md``.
+          * ``reason='window_rms'`` / ``'anchor_collapse'`` — full
+            filter re-init at current AR position.  Drop NL fixes,
+            reset MW entirely, transition all SVs to FLOATING,
+            re-initialize PPPFilter.  Assumes systemic failure that
+            the per-SV monitors can't fix.
+          * ``reason='ztd_impossible'`` — **NL-only revert.** Drop
+            NL fixes and reset the ZTD state, but **keep MW / WL
+            fixes, keep position state, keep clock/ISB state**.
+            Rationale: wrong NL integers are the likely driver
+            of ZTD corruption; reverting to WL-only stops their
+            accumulation without discarding fast-to-acquire state.
+            ANCHORED / ANCHORING SVs transition to FLOATING (no
+            legal ANCHORING→CONVERGING edge); MW state kept so the
+            SVs can rapidly return to CONVERGING on next observation.
 
         Emits the single [FIX_SET_INTEGRITY] TRIPPED log line
         (monitor itself stays silent per the "monitor only speaks
-        on trip, once" interface contract).  Branch on ``reason``
-        to format the params key-value frag — without this branch
-        the anchor-collapse path would KeyError on missing
-        ``window_rms_m`` (regression fix landed on day0421b
-        15:17 CDT).
+        on trip, once" interface contract).
         """
         pos_ecef = filt.x[:3].copy()
         reason = ev.get('reason', 'window_rms')
@@ -1607,6 +1606,12 @@ class AntPosEstThread(threading.Thread):
             params = (
                 f"anchor_collapse_epochs={ev['anchor_collapse_epochs']} "
                 f"since_epoch={ev['since_epoch']}"
+            )
+        elif reason == 'ztd_impossible':
+            params = (
+                f"ztd_m={ev['ztd_m']:+.3f} "
+                f"threshold_m=±{ev['threshold_m']:.3f} "
+                f"sustained_epochs={ev['sustained_epochs']}"
             )
         else:
             params = (
@@ -1618,6 +1623,51 @@ class AntPosEstThread(threading.Thread):
             "[FIX_SET_INTEGRITY] TRIPPED reason=%s %s at pos=%s",
             reason, params, pos_ecef.tolist(),
         )
+
+        if reason == 'ztd_impossible':
+            # NL-only revert — keep WL, keep position, reset ZTD.
+            # ANCHORED and ANCHORING SVs revert to FLOATING (the
+            # state-machine's only legal exit from the NL-fixed
+            # states); MW state is preserved so the SVs will
+            # rapidly re-enter CONVERGING on their next observation.
+            revert_count = 0
+            for sv in list(nl._fixed.keys()):
+                nl.unfix(sv)
+                revert_count += 1
+                cur = self._sv_state.state(sv)
+                if cur in (SvAmbState.ANCHORING, SvAmbState.ANCHORED):
+                    try:
+                        self._sv_state.transition(
+                            sv, SvAmbState.FLOATING,
+                            epoch=self._n_epochs,
+                            reason="ztd_impossible:revert_to_wl",
+                        )
+                    except Exception:
+                        pass
+            # Reset the ZTD residual state to 0 with inflated
+            # covariance — the filter re-estimates ZTD from scratch
+            # alongside any new NL fixes.  Other state untouched.
+            if hasattr(filt, 'IDX_ZTD') and filt.x.shape[0] > filt.IDX_ZTD:
+                filt.x[filt.IDX_ZTD] = 0.0
+                # Initial PPPFilter sigma on ZTD residual is 0.5 m
+                # (see PPPFilter.initialize); matching here keeps
+                # the EKF's re-estimation well-posed.
+                filt.P[filt.IDX_ZTD, filt.IDX_ZTD] = 0.5 ** 2
+            log.info(
+                "ZTD trip recovery: reverted %d NL fixes, reset ZTD"
+                " state, preserved MW/position/clock",
+                revert_count,
+            )
+            if self._ape_sm.state in (AntPosEstState.ANCHORING,
+                                      AntPosEstState.ANCHORED):
+                self._ape_sm.transition(
+                    AntPosEstState.CONVERGING,
+                    "ztd-impossible trip — NL revert, WL preserved",
+                )
+            self._fix_set_integrity.record_trip(self._n_epochs)
+            return
+
+        # Full re-init path for window_rms and anchor_collapse.
         # Drop all NL fixes (tracker → FLOATING for each via resolver hook),
         # clear MW state entirely (big reset), re-seed filter.
         for sv in list(nl._fixed.keys()):
@@ -1801,13 +1851,16 @@ class AntPosEstThread(threading.Thread):
             self._false_fix.ingest(self._n_epochs, resid, labels)
             self._setting_drop.ingest(self._n_epochs, resid, labels)
             self._fix_set_integrity.ingest(self._n_epochs, resid, labels)
-            # ZTD-impossibility diagnostic (logs when a trip would
-            # fire; no re-init yet — see
-            # docs/ztd-impossibility-trigger-design.md).
+            # ZTD state for the integrity monitor's ztd_impossible
+            # trigger.  PPPFilter carries a ZTD residual state; if
+            # the filter has absorbed position error into ZTD past
+            # the physical envelope, monitor returns an event with
+            # reason='ztd_impossible' and we revert NL fixes only
+            # (keep WL / MW / position).  See
+            # docs/ztd-impossibility-trigger-design.md.
             ppp_ztd = None
             if hasattr(filt, 'IDX_ZTD') and filt.x.shape[0] > filt.IDX_ZTD:
                 ppp_ztd = float(filt.x[filt.IDX_ZTD])
-            self._fix_set_integrity.check_ztd(self._n_epochs, ppp_ztd)
             # Bead 4: stream azimuths for ANCHORING SVs so the
             # promoter can accumulate Δaz toward the 15° threshold.  We
             # compute azimuths only when there's at least one SV in
@@ -1823,7 +1876,8 @@ class AntPosEstThread(threading.Thread):
                 self._apply_false_fix(filt, mw, nl, ev)
             for ev in self._setting_drop.evaluate(self._n_epochs):
                 self._apply_setting_sv_drop(filt, mw, nl, ev)
-            host_ev = self._fix_set_integrity.evaluate(self._n_epochs)
+            host_ev = self._fix_set_integrity.evaluate(
+                self._n_epochs, ztd_m=ppp_ztd)
             if host_ev is not None:
                 self._apply_integrity_trip(filt, mw, nl, host_ev)
             # Elevation-stratified squelch: sweep WAITING records
