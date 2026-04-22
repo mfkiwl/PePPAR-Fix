@@ -413,6 +413,12 @@ initial condition.
 
 ## In-band DO noise estimation from discipline gaps
 
+> **Status 2026-04-22**: LANDED.  `scripts/peppar_fix/noise_estimator.py`
+> implements the in-band noise estimator; used in the engine's
+> servo path.  Verify the memory
+> `project_session_handoff_20260414d` for landing date.  Section
+> retained for design context only.
+
 **What**: Continuously estimate the DO's noise floor (ADEV, TDEV,
 dominant noise type) from free-running samples that occur naturally
 during the adaptive discipline interval, instead of requiring a
@@ -528,6 +534,12 @@ experiments.  Keep them as overrides, not the primary config path.
 
 
 ## ADJ_SETOFFSET for PHC stepping
+
+> **Status 2026-04-22**: LANDED.  Memory
+> `project_adj_setoffset_experiment` confirms the experiment
+> succeeded — E810 residual dropped from −87 µs to ~0 ns with
+> `adj_setoffset(-phase_error_ns)` directly.  Section retained
+> for the experimental record.
 
 **What**: Use `clock_adjtime(ADJ_SETOFFSET)` instead of
 `clock_settime` for the PHC phase step in bootstrap.
