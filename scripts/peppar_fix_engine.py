@@ -1595,6 +1595,18 @@ class AntPosEstThread(threading.Thread):
             ANCHORED / ANCHORING SVs transition to FLOATING (no
             legal ANCHORING→CONVERGING edge); MW state kept so the
             SVs can rapidly return to CONVERGING on next observation.
+          * ``reason='ztd_cycling'`` — **full WL flush, keep
+            position.**  ZTD trip has fired repeatedly without the
+            filter escaping its biased-equilibrium basin — most
+            likely a wrong WL integer somewhere in the fix set is
+            trapping every NL search in the wrong integer
+            subspace (NL is bounded by WL: a wrong N_WL excludes
+            the correct NL integer from LAMBDA's search).  Reset
+            the MW tracker for every SV to force WL re-acquisition
+            through the full pipeline, in addition to everything
+            the ztd_impossible path does.  Position / clock / ISB
+            preserved — the diagnosis is bad ambiguities, not
+            bad position.
 
         Emits the single [FIX_SET_INTEGRITY] TRIPPED log line
         (monitor itself stays silent per the "monitor only speaks
@@ -1607,11 +1619,12 @@ class AntPosEstThread(threading.Thread):
                 f"anchor_collapse_epochs={ev['anchor_collapse_epochs']} "
                 f"since_epoch={ev['since_epoch']}"
             )
-        elif reason == 'ztd_impossible':
+        elif reason in ('ztd_impossible', 'ztd_cycling'):
             params = (
                 f"ztd_m={ev['ztd_m']:+.3f} "
                 f"threshold_m=±{ev['threshold_m']:.3f} "
-                f"sustained_epochs={ev['sustained_epochs']}"
+                f"sustained_epochs={ev['sustained_epochs']} "
+                f"recent_trip_count={ev.get('recent_trip_count', 1)}"
             )
         else:
             params = (
@@ -1623,6 +1636,48 @@ class AntPosEstThread(threading.Thread):
             "[FIX_SET_INTEGRITY] TRIPPED reason=%s %s at pos=%s",
             reason, params, pos_ecef.tolist(),
         )
+
+        if reason == 'ztd_cycling':
+            # Full WL flush — wipe MW tracker for every SV and
+            # every NL fix.  Position / clock / ISB kept (the
+            # basin trap is in the ambiguities, not the position).
+            # After this, every SV is back at FLOATING and must
+            # re-converge WL through MW before any NL attempt.
+            nl_revert = len(nl._fixed)
+            for sv in list(nl._fixed.keys()):
+                nl.unfix(sv)
+            mw_reset = 0
+            for sv in list(mw._state.keys()):
+                mw.reset(sv)
+                mw_reset += 1
+                cur = self._sv_state.state(sv)
+                if cur is not SvAmbState.FLOATING:
+                    try:
+                        self._sv_state.transition(
+                            sv, SvAmbState.FLOATING,
+                            epoch=self._n_epochs,
+                            reason="ztd_cycling:wl_flush",
+                        )
+                    except Exception:
+                        pass
+            ztd_idx = getattr(filt, 'IDX_ZTD', PPP_IDX_ZTD)
+            if filt.x.shape[0] > ztd_idx:
+                filt.x[ztd_idx] = 0.0
+                filt.P[ztd_idx, ztd_idx] = 0.5 ** 2
+            log.info(
+                "ZTD cycling escalation: flushed MW for %d SVs, "
+                "reverted %d NL fixes, reset ZTD state "
+                "(recent ZTD trips=%d); position/clock preserved",
+                mw_reset, nl_revert, ev.get('recent_trip_count', -1),
+            )
+            if self._ape_sm.state in (AntPosEstState.ANCHORING,
+                                      AntPosEstState.ANCHORED):
+                self._ape_sm.transition(
+                    AntPosEstState.CONVERGING,
+                    "ztd-cycling escalation — full WL flush",
+                )
+            self._fix_set_integrity.record_trip(self._n_epochs)
+            return
 
         if reason == 'ztd_impossible':
             # NL-only revert — keep WL, keep position, reset ZTD.

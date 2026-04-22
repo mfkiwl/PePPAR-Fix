@@ -106,6 +106,8 @@ class FixSetIntegrityMonitor:
         anchor_collapse_epochs: int = 60,
         ztd_trip_threshold_m: float = 0.7,
         ztd_sustained_epochs: int = 60,
+        ztd_escalate_threshold: int = 3,
+        ztd_escalate_window_epochs: int = 1200,
     ) -> None:
         self._tracker = tracker
         # Reference to AntPosEst state machine — used to read the
@@ -137,6 +139,21 @@ class FixSetIntegrityMonitor:
         self._ztd_trip_threshold_m = float(ztd_trip_threshold_m)
         self._ztd_sustained_epochs = int(ztd_sustained_epochs)
         self._ztd_above_since: int | None = None
+        # Trip-cycling escalation: if ZTD trips repeatedly without
+        # escape, the NL-only revert is insufficient — likely wrong
+        # WL integer(s) in the fix set, trapping every NL search in
+        # the wrong integer subspace (NL search is bounded by WL:
+        # N1-N5=N_WL, so a wrong N_WL excludes the correct NL
+        # integer from the search).  Escalation fires a full WL
+        # flush via MW reset for every tracked SV.  ``record_trip``
+        # does not clear this history — cycling detection must
+        # persist across the cooldown boundary or the trip-counter
+        # resets before the next trip arrives.  The history is
+        # cleared only when escalation fires (so a fresh count
+        # starts toward any *further* escalation).
+        self._ztd_escalate_threshold = int(ztd_escalate_threshold)
+        self._ztd_escalate_window_epochs = int(ztd_escalate_window_epochs)
+        self._ztd_trip_history: list[int] = []
 
     # ── Data intake ─────────────────────────────────────────────── #
 
@@ -185,6 +202,16 @@ class FixSetIntegrityMonitor:
             integers are the likely driver of ZTD corruption —
             reverting to WL-only stops them from accumulating
             without discarding the fast-to-acquire state.
+          - ``reason='ztd_cycling'`` — ZTD trip has fired
+            ``ztd_escalate_threshold`` times within
+            ``ztd_escalate_window_epochs`` without the filter
+            escaping the biased-equilibrium basin.  The NL-only
+            revert is clearly insufficient — most likely a wrong
+            WL integer in the fix set is trapping every NL
+            search in the wrong integer subspace.  **Action:
+            full WL flush — reset MW tracker for every SV,
+            transition NL-fixed SVs to FLOATING.  Position /
+            clock / ISB preserved.**
 
         Pass ``ztd_m`` (the PPP filter's current ZTD residual in
         metres) to enable the ZTD trip.  When ``None``, the ZTD
@@ -254,12 +281,32 @@ class FixSetIntegrityMonitor:
                     self._ztd_above_since = epoch
                 elif (epoch - self._ztd_above_since
                         >= self._ztd_sustained_epochs):
+                    # Prune trip history to current escalation window.
+                    cutoff = epoch - self._ztd_escalate_window_epochs
+                    self._ztd_trip_history = [
+                        e for e in self._ztd_trip_history if e > cutoff
+                    ]
+                    # This trip counts toward the cycling count.
+                    trips_incl_this = len(self._ztd_trip_history) + 1
+                    reason = 'ztd_impossible'
+                    if trips_incl_this >= self._ztd_escalate_threshold:
+                        # Cycling: NL-only revert is insufficient.
+                        # Escalate to full WL flush and clear the
+                        # history so the *next* escalation again
+                        # needs the full threshold count.
+                        reason = 'ztd_cycling'
+                        self._ztd_trip_history = []
+                    else:
+                        self._ztd_trip_history.append(epoch)
                     return {
-                        'reason': 'ztd_impossible',
+                        'reason': reason,
                         'ztd_m': ztd_m,
                         'threshold_m': self._ztd_trip_threshold_m,
                         'sustained_epochs':
                             epoch - self._ztd_above_since,
+                        'recent_trip_count': trips_incl_this,
+                        'escalate_window_epochs':
+                            self._ztd_escalate_window_epochs,
                     }
             else:
                 self._ztd_above_since = None
