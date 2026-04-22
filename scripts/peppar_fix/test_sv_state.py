@@ -10,6 +10,7 @@ or:   PYTHONPATH=scripts python -m unittest peppar_fix.test_sv_state
 
 from __future__ import annotations
 
+import logging
 import math
 import unittest
 
@@ -556,6 +557,88 @@ class FixSetIntegrityMonitorTest(unittest.TestCase):
         for e in range(11, 21):
             self.alarm.ingest(e, [6.0], labels)
         self.assertIsNone(self.alarm.evaluate(20))
+
+
+class ZtdImpossibilityDiagnosticTest(unittest.TestCase):
+    """check_ztd() diagnostic logs WOULD_FIRE at sustained threshold
+    cross, doesn't trigger a trip, re-arms after logging."""
+
+    def setUp(self):
+        self.t = SvStateTracker()
+        self.m = FixSetIntegrityMonitor(
+            self.t,
+            ztd_trip_threshold_m=0.7,
+            ztd_sustained_epochs=5,
+        )
+
+    def test_logs_at_sustained_above_threshold(self):
+        # ZTD = -986 mm, sustained for 5 epochs — logs WOULD_FIRE.
+        with self.assertLogs(
+            'peppar_fix.fix_set_integrity_monitor', level='WARNING',
+        ) as lm:
+            for e in range(100, 106):
+                self.m.check_ztd(e, -0.986)
+        self.assertTrue(
+            any('ZTD_TRIP_WOULD_FIRE' in r.message for r in lm.records),
+            "sustained |ZTD| > threshold should log WOULD_FIRE",
+        )
+
+    def test_does_not_log_when_below_threshold(self):
+        # |ZTD| = 400 mm < 700 mm — never logs, even sustained.
+        # Use assertNoLogs when available.  Otherwise: just run and
+        # assert that the counter stays None.
+        for e in range(100, 200):
+            self.m.check_ztd(e, -0.400)
+        self.assertIsNone(self.m._ztd_above_since)
+
+    def test_transient_spike_does_not_log(self):
+        # ZTD spikes to -900 mm for 3 epochs (< sustained=5), then back
+        # to nominal.  No log should fire.
+        logged = []
+        class _Collector(logging.Handler):
+            def emit(self, rec):
+                logged.append(rec.getMessage())
+        h = _Collector()
+        logger = logging.getLogger('peppar_fix.fix_set_integrity_monitor')
+        logger.addHandler(h)
+        try:
+            for e in range(100, 103):
+                self.m.check_ztd(e, -0.900)
+            for e in range(103, 110):
+                self.m.check_ztd(e, -0.100)   # back to normal
+        finally:
+            logger.removeHandler(h)
+        self.assertFalse(
+            any('ZTD_TRIP_WOULD_FIRE' in msg for msg in logged),
+            "transient spike shorter than sustained window should not log",
+        )
+
+    def test_rearms_after_log(self):
+        # After firing once, a second sustained window should fire
+        # again — the diagnostic re-arms to continue capturing events.
+        with self.assertLogs(
+            'peppar_fix.fix_set_integrity_monitor', level='WARNING',
+        ) as lm:
+            for e in range(100, 106):
+                self.m.check_ztd(e, -0.986)
+            # Now back to normal briefly to reset the counter.
+            for e in range(106, 110):
+                self.m.check_ztd(e, -0.100)
+            # Another sustained window.
+            for e in range(110, 116):
+                self.m.check_ztd(e, -0.986)
+        trip_logs = [r for r in lm.records
+                     if 'ZTD_TRIP_WOULD_FIRE' in r.message]
+        self.assertEqual(
+            len(trip_logs), 2,
+            "two distinct sustained events should produce two logs",
+        )
+
+    def test_none_ztd_does_nothing(self):
+        # Caller may not always have a ZTD state (filter without IDX_ZTD).
+        for e in range(100, 200):
+            self.m.check_ztd(e, None)
+        self.assertIsNone(self.m._ztd_above_since)
 
 
 if __name__ == "__main__":

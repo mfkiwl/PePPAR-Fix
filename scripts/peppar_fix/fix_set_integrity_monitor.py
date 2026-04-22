@@ -104,6 +104,8 @@ class FixSetIntegrityMonitor:
         cooldown_epochs: int = 300,
         suppress_if_monitors_fired_within: int = 60,
         anchor_collapse_epochs: int = 60,
+        ztd_trip_threshold_m: float = 0.7,
+        ztd_sustained_epochs: int = 60,
     ) -> None:
         self._tracker = tracker
         # Reference to AntPosEst state machine — used to read the
@@ -125,6 +127,16 @@ class FixSetIntegrityMonitor:
         # anchors are present or the filter has never been
         # anchored.  Reset on every trip.
         self._anchor_collapse_since: int | None = None
+        # ZTD-impossibility diagnostic (no trip, no re-init — diagnostic
+        # only).  See docs/ztd-impossibility-trigger-design.md for the
+        # full proposed trip semantics.  This first cut logs when the
+        # trigger *would* fire so we can calibrate the threshold from
+        # overnight data before committing to the actual re-init path.
+        # Cross-filter divergence check deferred pending shared state
+        # between AntPosEstThread and FixedPosFilter.
+        self._ztd_trip_threshold_m = float(ztd_trip_threshold_m)
+        self._ztd_sustained_epochs = int(ztd_sustained_epochs)
+        self._ztd_above_since: int | None = None
 
     # ── Data intake ─────────────────────────────────────────────── #
 
@@ -264,6 +276,54 @@ class FixSetIntegrityMonitor:
         # [FIX_SET_INTEGRITY] TRIPPED line with reason + params.  We
         # don't re-announce here — keeps "monitor only speaks on
         # trip, once" as the interface contract.
+
+    # ── ZTD impossibility diagnostic ────────────────────────────── #
+
+    def check_ztd(self, epoch: int, ztd_m: float | None) -> None:
+        """Diagnostic-only ZTD-impossibility check.
+
+        Logs `[ZTD_TRIP_WOULD_FIRE]` when |ZTD residual| exceeds the
+        physical envelope for a sustained window.  Does NOT emit a
+        trip event, does NOT re-init the filter.  Runs in parallel to
+        the real trip logic in `evaluate()`.
+
+        Purpose of the diagnostic-only scoping: calibrate the
+        threshold (700 mm default) against overnight data before
+        committing to the re-init action.  See
+        `docs/ztd-impossibility-trigger-design.md` for the full
+        trip design this diagnostic pre-validates.
+
+        Physical reasoning: the filter's ZTD residual state tracks
+        the delta from a priori Saastamoinen.  Normal weather: ± 100
+        mm.  Extreme fronts: ± 300 mm.  Over ± 500 mm no atmosphere
+        produces — the filter is absorbing position error.  A
+        sustained residual past 700 mm is strong evidence the
+        filter state is corrupted and a re-init would be justified.
+
+        The sustained-epoch window (default 60 at 1 Hz) excludes
+        startup transients.  Log re-arms on each event — if the
+        condition persists, we log again after another sustained
+        window.
+        """
+        if ztd_m is None:
+            return
+        if abs(ztd_m) > self._ztd_trip_threshold_m:
+            if self._ztd_above_since is None:
+                self._ztd_above_since = epoch
+            elif (epoch - self._ztd_above_since
+                    >= self._ztd_sustained_epochs):
+                log.warning(
+                    "[ZTD_TRIP_WOULD_FIRE] ztd=%+.3fm threshold=±%.3fm"
+                    " sustained=%d epochs (diagnostic only — re-init"
+                    " not wired; see"
+                    " docs/ztd-impossibility-trigger-design.md)",
+                    ztd_m, self._ztd_trip_threshold_m,
+                    epoch - self._ztd_above_since,
+                )
+                # Re-arm: next sustained window triggers another log.
+                self._ztd_above_since = None
+        else:
+            self._ztd_above_since = None
 
     # ── Diagnostics ─────────────────────────────────────────────── #
 

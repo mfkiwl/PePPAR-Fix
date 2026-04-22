@@ -1801,6 +1801,13 @@ class AntPosEstThread(threading.Thread):
             self._false_fix.ingest(self._n_epochs, resid, labels)
             self._setting_drop.ingest(self._n_epochs, resid, labels)
             self._fix_set_integrity.ingest(self._n_epochs, resid, labels)
+            # ZTD-impossibility diagnostic (logs when a trip would
+            # fire; no re-init yet — see
+            # docs/ztd-impossibility-trigger-design.md).
+            ppp_ztd = None
+            if hasattr(filt, 'IDX_ZTD') and filt.x.shape[0] > filt.IDX_ZTD:
+                ppp_ztd = float(filt.x[filt.IDX_ZTD])
+            self._fix_set_integrity.check_ztd(self._n_epochs, ppp_ztd)
             # Bead 4: stream azimuths for ANCHORING SVs so the
             # promoter can accumulate Δaz toward the 15° threshold.  We
             # compute azimuths only when there's at least one SV in
