@@ -68,9 +68,21 @@ class LogState:
 
     #: Current state of the AntPosEst state machine (lowercase string
     #: matching the enum values in scripts/peppar_fix/states.py:
-    #: "unsurveyed", "verifying", "verified", "converging", "resolved",
+    #: "surveying", "verifying", "converging", "anchoring", "anchored",
     #: "moved").  None until the first [STATE] line is observed.
     ant_pos_est_state: Optional[str] = None
+
+    #: AntPosEst latches — have the filter's milestone states been
+    #: reached at least once this run?  Clear only on integrity-
+    #: monitor trip.  Populated from
+    #: ``[STATE] AntPosEst: reached_anchoring + reached_anchored
+    #: cleared (fix_set_integrity_trip)`` log lines (clear on trip)
+    #: and implicitly True on first entry to ANCHORING / ANCHORED
+    #: observed in a ``[STATE] AntPosEst: ... → anchoring / anchored``
+    #: transition.  Drives the RECONVERGING / REANCHORING derived
+    #: labels in AntennaPositionLine.
+    reached_anchoring: bool = False
+    reached_anchored: bool = False
 
     #: Current state of the DOFreqEst state machine (lowercase string:
     #: "uninitialized", "phase_setting", "freq_verifying", "tracking",
@@ -334,15 +346,32 @@ class LogReader:
         self.state.sv_states = new_dict
 
     def _parse_state_line(self, line: str) -> None:
-        """Look for a [STATE] transition and update the relevant field.
+        """Look for a [STATE] transition and update the relevant
+        field, plus AntPosEst latch lines.
 
-        Engine emits two variants (see scripts/peppar_fix/states.py):
-          * initial:    ``[STATE] AntPosEst: → unsurveyed (initial)``
-          * transition: ``[STATE] AntPosEst: unsurveyed → verifying after 12s``
+        Engine emits three relevant variants (see
+        scripts/peppar_fix/states.py):
+          * initial:    ``[STATE] AntPosEst: → surveying (initial)``
+          * transition: ``[STATE] AntPosEst: surveying → verifying after 12s``
+          * latch-clr:  ``[STATE] AntPosEst: reached_anchoring + reached_anchored cleared (fix_set_integrity_trip)``
 
-        Both end with ``→ <new_state>`` followed by either EOL or
-        ``after …``.  The same regex catches both.
+        Transitions end with ``→ <new_state>`` — the regex catches
+        both initial and transition variants.  Latch-clear lines
+        are matched separately via substring check since their
+        structure doesn't fit the arrow regex.
         """
+        # Latch-clear: substring match — the engine emits this once
+        # per FixSetIntegrityMonitor trip and covers whichever of
+        # the two latches were set at the time.  Both fields drop
+        # to False whenever we see this line; subsequent
+        # transitions re-latch as appropriate.
+        if "[STATE] AntPosEst:" in line and "cleared" in line:
+            if "reached_anchored" in line:
+                self.state.reached_anchored = False
+            if "reached_anchoring" in line:
+                self.state.reached_anchoring = False
+            return
+
         m = _STATE_LINE_RE.search(line)
         if m is None:
             return
@@ -354,6 +383,16 @@ class LogReader:
                 self.state.ant_pos_est_visited = (
                     self.state.ant_pos_est_visited + (new_state,)
                 )
+            # Latches follow the engine side (states.py transition):
+            # first entry to ANCHORING sets reached_anchoring; first
+            # entry to ANCHORED sets both.  We never un-latch on a
+            # transition — that only happens on the explicit clear
+            # line handled above.
+            if new_state == "anchoring":
+                self.state.reached_anchoring = True
+            elif new_state == "anchored":
+                self.state.reached_anchoring = True
+                self.state.reached_anchored = True
         elif machine == "DOFreqEst":
             self.state.do_freq_est_state = new_state
             if new_state not in self.state.do_freq_est_visited:
@@ -362,8 +401,8 @@ class LogReader:
                 )
 
 
-# Matches both ``[STATE] AntPosEst: → unsurveyed (initial)`` and
-# ``[STATE] AntPosEst: converging → resolved after 393s (details)``.
+# Matches both ``[STATE] AntPosEst: → surveying (initial)`` and
+# ``[STATE] AntPosEst: converging → anchoring after 393s (details)``.
 # Anchoring on ``[STATE]`` avoids false positives from other log lines
 # that happen to contain an arrow.  The ``from`` group is optional to
 # handle the initial-state log line which has no from-state.
@@ -372,7 +411,7 @@ _STATE_LINE_RE = re.compile(
     r"(?:(?P<from>[\w_]+) )?→ (?P<to>[\w_]+)\b"
 )
 
-# Matches ``[SV_STATE] G05: TRACKING → FLOAT (epoch=…, elev=…, reason=…)``.
+# Matches ``[SV_STATE] G05: TRACKING → FLOATING (epoch=…, elev=…, reason=…)``.
 # SV is the PRN identifier: one alpha (G/E/C/R/J/I), two or three
 # digits.  States are the SvAmbState enum values, all uppercase with
 # underscores.  The parenthesised details are not captured — the

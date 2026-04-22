@@ -53,8 +53,8 @@ _STALE_LOG_THRESHOLD_S = 30.0
 # where it's *going* in one glance.  Keep in sync if the engine side
 # grows a new state.
 _ANT_POS_EST_STATES = (
-    "unsurveyed", "verifying", "verified",
-    "converging", "resolved", "moved",
+    "surveying", "verifying",
+    "converging", "anchoring", "anchored", "moved",
 )
 _DO_FREQ_EST_STATES = (
     "uninitialized", "phase_setting", "freq_verifying",
@@ -194,6 +194,7 @@ class PepparMonApp(App):
             state=s.ant_pos_est_state,
             position=s.antenna_position,
             sigma_m=s.antenna_sigma_m,
+            reached_anchored=s.reached_anchored,
         )
         self.query_one("#second-opinion", SecondOpinionLine).update_delta(
             s.nav2_delta_m,

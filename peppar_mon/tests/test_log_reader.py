@@ -144,10 +144,10 @@ class StateLineParsingTest(unittest.TestCase):
         self.path = Path(self._tmpdir.name) / "engine.log"
 
     def test_initial_state_line_sets_field(self):
-        """`[STATE] AntPosEst: → unsurveyed (initial)` seeds the state."""
+        """`[STATE] AntPosEst: → surveying (initial)` seeds the state."""
         self.path.write_text(
             "2026-04-21 07:00:00,000 INFO [STATE] AntPosEst: → "
-            "unsurveyed (initial)\n"
+            "surveying (initial)\n"
             "2026-04-21 07:00:00,001 INFO [STATE] DOFreqEst: → "
             "uninitialized (initial)\n"
         )
@@ -155,17 +155,17 @@ class StateLineParsingTest(unittest.TestCase):
         _wait_until(
             lambda: r.state.ant_pos_est_state and r.state.do_freq_est_state
         )
-        self.assertEqual(r.state.ant_pos_est_state, "unsurveyed")
+        self.assertEqual(r.state.ant_pos_est_state, "surveying")
         self.assertEqual(r.state.do_freq_est_state, "uninitialized")
-        self.assertEqual(r.state.ant_pos_est_visited, ("unsurveyed",))
+        self.assertEqual(r.state.ant_pos_est_visited, ("surveying",))
         self.assertEqual(r.state.do_freq_est_visited, ("uninitialized",))
 
     def test_transition_line_updates_current_and_visited(self):
         """A transition appends to visited, sets current to the new state."""
         self.path.write_text(
             "2026-04-21 07:00:00,000 INFO [STATE] AntPosEst: → "
-            "unsurveyed (initial)\n"
-            "2026-04-21 07:05:00,000 INFO [STATE] AntPosEst: unsurveyed → "
+            "surveying (initial)\n"
+            "2026-04-21 07:05:00,000 INFO [STATE] AntPosEst: surveying → "
             "verifying after 300s\n"
             "2026-04-21 07:06:00,000 INFO [STATE] AntPosEst: verifying → "
             "converging after 60s\n"
@@ -175,7 +175,7 @@ class StateLineParsingTest(unittest.TestCase):
         self.assertEqual(r.state.ant_pos_est_state, "converging")
         self.assertEqual(
             r.state.ant_pos_est_visited,
-            ("unsurveyed", "verifying", "converging"),
+            ("surveying", "verifying", "converging"),
         )
 
     def test_revisiting_state_doesnt_dup_visited(self):
@@ -186,23 +186,23 @@ class StateLineParsingTest(unittest.TestCase):
             "2026-04-21 07:00:00,000 INFO [STATE] AntPosEst: → "
             "converging (initial)\n"
             "2026-04-21 07:05:00,000 INFO [STATE] AntPosEst: converging → "
-            "resolved after 300s\n"
-            "2026-04-21 07:06:00,000 INFO [STATE] AntPosEst: resolved → "
+            "anchored after 300s\n"
+            "2026-04-21 07:06:00,000 INFO [STATE] AntPosEst: anchored → "
             "converging after 60s\n"
         )
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
         _wait_until(lambda: r.state.ant_pos_est_state == "converging" and
-                    "resolved" in r.state.ant_pos_est_visited)
+                    "anchored" in r.state.ant_pos_est_visited)
         self.assertEqual(r.state.ant_pos_est_state, "converging")
         self.assertEqual(
-            r.state.ant_pos_est_visited, ("converging", "resolved"),
+            r.state.ant_pos_est_visited, ("converging", "anchored"),
         )
 
     def test_machines_are_independent(self):
         """Updating one machine's state leaves the other alone."""
         self.path.write_text(
             "2026-04-21 07:00:00,000 INFO [STATE] AntPosEst: → "
-            "unsurveyed (initial)\n"
+            "surveying (initial)\n"
             "2026-04-21 07:00:00,001 INFO [STATE] DOFreqEst: → "
             "uninitialized (initial)\n"
             "2026-04-21 07:05:00,000 INFO [STATE] DOFreqEst: "
@@ -210,7 +210,7 @@ class StateLineParsingTest(unittest.TestCase):
         )
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
         _wait_until(lambda: r.state.do_freq_est_state == "phase_setting")
-        self.assertEqual(r.state.ant_pos_est_state, "unsurveyed")
+        self.assertEqual(r.state.ant_pos_est_state, "surveying")
         self.assertEqual(r.state.do_freq_est_state, "phase_setting")
 
     def test_non_state_lines_are_ignored(self):
@@ -399,58 +399,58 @@ class SvStateParsingTest(unittest.TestCase):
         self.path = Path(self._tmpdir.name) / "engine.log"
 
     def test_transition_updates_sv_state(self):
-        """Basic case: one SV transitions TRACKING → FLOAT → WL_FIXED,
+        """Basic case: one SV transitions TRACKING → FLOATING → CONVERGING,
         final value in sv_states matches the last transition."""
         self.path.write_text(
             "2026-04-21 07:00:00,000 INFO [SV_STATE] G05: TRACKING → "
-            "FLOAT (epoch=10)\n"
-            "2026-04-21 07:00:30,000 INFO [SV_STATE] G05: FLOAT → "
-            "WL_FIXED (epoch=40)\n"
+            "FLOATING (epoch=10)\n"
+            "2026-04-21 07:00:30,000 INFO [SV_STATE] G05: FLOATING → "
+            "CONVERGING (epoch=40)\n"
         )
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
-        _wait_until(lambda: r.state.sv_states.get("G05") == "WL_FIXED")
-        self.assertEqual(r.state.sv_states.get("G05"), "WL_FIXED")
+        _wait_until(lambda: r.state.sv_states.get("G05") == "CONVERGING")
+        self.assertEqual(r.state.sv_states.get("G05"), "CONVERGING")
 
     def test_multi_sv_independent_tracking(self):
         """Concurrent SVs: each tracked independently, no cross-talk."""
         self.path.write_text(
             "2026-04-21 07:00:00,000 INFO [SV_STATE] G05: TRACKING → "
-            "FLOAT (epoch=10)\n"
+            "FLOATING (epoch=10)\n"
             "2026-04-21 07:00:01,000 INFO [SV_STATE] E21: TRACKING → "
-            "FLOAT (epoch=10)\n"
+            "FLOATING (epoch=10)\n"
             "2026-04-21 07:00:02,000 INFO [SV_STATE] C32: TRACKING → "
-            "FLOAT (epoch=10)\n"
-            "2026-04-21 07:00:03,000 INFO [SV_STATE] E21: FLOAT → "
-            "WL_FIXED (epoch=15)\n"
-            "2026-04-21 07:00:04,000 INFO [SV_STATE] E21: WL_FIXED → "
-            "NL_SHORT_FIXED (epoch=20)\n"
+            "FLOATING (epoch=10)\n"
+            "2026-04-21 07:00:03,000 INFO [SV_STATE] E21: FLOATING → "
+            "CONVERGING (epoch=15)\n"
+            "2026-04-21 07:00:04,000 INFO [SV_STATE] E21: CONVERGING → "
+            "ANCHORING (epoch=20)\n"
         )
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
         _wait_until(
-            lambda: r.state.sv_states.get("E21") == "NL_SHORT_FIXED",
+            lambda: r.state.sv_states.get("E21") == "ANCHORING",
         )
-        self.assertEqual(r.state.sv_states.get("G05"), "FLOAT")
-        self.assertEqual(r.state.sv_states.get("E21"), "NL_SHORT_FIXED")
-        self.assertEqual(r.state.sv_states.get("C32"), "FLOAT")
+        self.assertEqual(r.state.sv_states.get("G05"), "FLOATING")
+        self.assertEqual(r.state.sv_states.get("E21"), "ANCHORING")
+        self.assertEqual(r.state.sv_states.get("C32"), "FLOATING")
 
     def test_squelched_is_captured(self):
         """SVs squelched after false-fix should land with their
-        SQUELCHED state reflected — needed for the table's
-        SQUELCHED column."""
+        WAITING state reflected — needed for the table's
+        WAITING column."""
         self.path.write_text(
-            "2026-04-21 07:00:00,000 INFO [SV_STATE] E21: NL_SHORT_FIXED → "
-            "SQUELCHED (epoch=100, elev=74°, squelch=120s, reason=...)\n"
+            "2026-04-21 07:00:00,000 INFO [SV_STATE] E21: ANCHORING → "
+            "WAITING (epoch=100, elev=74°, squelch=120s, reason=...)\n"
         )
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
-        _wait_until(lambda: r.state.sv_states.get("E21") == "SQUELCHED")
-        self.assertEqual(r.state.sv_states.get("E21"), "SQUELCHED")
+        _wait_until(lambda: r.state.sv_states.get("E21") == "WAITING")
+        self.assertEqual(r.state.sv_states.get("E21"), "WAITING")
 
     def test_non_sv_state_lines_ignored(self):
         """Lines without the [SV_STATE] tag must not leak into
         sv_states — false matches corrupt the table."""
         self.path.write_text(
             "2026-04-21 07:00:00,000 INFO [STATE] AntPosEst: → "
-            "unsurveyed (initial)\n"
+            "surveying (initial)\n"
             "2026-04-21 07:00:00,001 INFO slip: sv=E21 reasons=mw_jump\n"
         )
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
@@ -464,7 +464,7 @@ class SvStateParsingTest(unittest.TestCase):
         the dict in place, that contract would break."""
         self.path.write_text(
             "2026-04-21 07:00:00,000 INFO [SV_STATE] G05: TRACKING → "
-            "FLOAT (epoch=10)\n"
+            "FLOATING (epoch=10)\n"
         )
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
         _wait_until(lambda: "G05" in r.state.sv_states)
@@ -472,15 +472,15 @@ class SvStateParsingTest(unittest.TestCase):
         # Append another transition.
         with self.path.open("a") as f:
             f.write(
-                "2026-04-21 07:00:01,000 INFO [SV_STATE] G05: FLOAT → "
-                "WL_FIXED (epoch=15)\n"
+                "2026-04-21 07:00:01,000 INFO [SV_STATE] G05: FLOATING → "
+                "CONVERGING (epoch=15)\n"
             )
-        _wait_until(lambda: r.state.sv_states.get("G05") == "WL_FIXED")
+        _wait_until(lambda: r.state.sv_states.get("G05") == "CONVERGING")
         snap2 = r.state.sv_states
         # snap1 is frozen in time.  If the reader had mutated in
-        # place, snap1 would now show WL_FIXED too.
-        self.assertEqual(snap1.get("G05"), "FLOAT")
-        self.assertEqual(snap2.get("G05"), "WL_FIXED")
+        # place, snap1 would now show CONVERGING too.
+        self.assertEqual(snap1.get("G05"), "FLOATING")
+        self.assertEqual(snap2.get("G05"), "CONVERGING")
 
 
 if __name__ == "__main__":

@@ -5,11 +5,11 @@ possible state of a state machine, current state highlighted, visited
 states marked so the operator can see the trajectory at a glance.
 
 The two machines we care about right now are AntPosEst (antenna-
-position state: UNSURVEYED → VERIFYING → VERIFIED → CONVERGING →
-RESOLVED → MOVED) and DOFreqEst (DO frequency estimator: UNINITIALIZED
-→ PHASE_SETTING → FREQ_VERIFYING → TRACKING → HOLDOVER).  The values
-come from ``scripts/peppar_fix/states.py`` — keep the enum lists here
-in sync if the engine side changes.
+position filter state: SURVEYING → VERIFYING → CONVERGING → ANCHORING
+→ ANCHORED → MOVED) and DOFreqEst (DO frequency estimator:
+UNINITIALIZED → PHASE_SETTING → FREQ_VERIFYING → TRACKING → HOLDOVER).
+The values come from ``scripts/peppar_fix/states.py`` — keep the
+enum lists here in sync if the engine side changes.
 """
 
 from __future__ import annotations
@@ -28,21 +28,37 @@ from peppar_mon._util import (
 )
 
 # AntPosEstState (engine side, lowercase string) → display label in
-# the AntennaPositionLine row.  Bob's 4-way mapping (2026-04-21):
-#   UNSURVEYED / VERIFYING / VERIFIED → "Surveying"  (pre-PPP)
-#   CONVERGING                        → "Resolving" (in the filter)
-#   RESOLVED                          → "Resolved"  (anchored)
-#   MOVED                             → "Moved"     (displacement)
+# the AntennaPositionLine row.  The raw label below is combined with
+# the ``reached_anchored`` latch in ``_antenna_label()`` to emit the
+# RECONVERGING / REANCHORING derived labels per the lifecycle-
+# vocabulary rename memo's derived-label table.
+#
+# Raw state → label (no latch consulted):
+#   SURVEYING / VERIFYING → "Surveying"  (pre-PPP / Phase 1)
+#   CONVERGING            → "Converging"
+#   ANCHORING             → "Anchoring"  (integer fixes landing)
+#   ANCHORED              → "Anchored"   (≥ 4 geometry-validated)
+#   MOVED                 → "Moved"      (position discontinuity)
+#
 # Anything else (e.g. None before first [STATE] line) falls back to
 # "Waiting" so the row is never blank.
 _ANTPOS_LABEL: dict[Optional[str], str] = {
-    "unsurveyed": "Surveying",
-    "verifying": "Surveying",
-    "verified": "Surveying",
-    "converging": "Resolving",
-    "resolved": "Resolved",
-    "moved": "Moved",
+    "surveying":  "Surveying",
+    "verifying":  "Surveying",
+    "converging": "Converging",
+    "anchoring":  "Anchoring",
+    "anchored":   "Anchored",
+    "moved":      "Moved",
 }
+
+# Derived labels once the filter has ever been ANCHORED and then
+# regressed: operator can distinguish "first anchoring attempt"
+# (ANCHORING, low trust) from "regained anchor quorum after a
+# slip storm" (REANCHORING, high trust — ZTD / clock / position
+# state carried forward).  Composed at render time from
+# ``raw_state × reached_anchored``.
+_ANTPOS_LABEL_RECONV = "Reconverging"    # CONVERGING + reached_anchored=True
+_ANTPOS_LABEL_REANCH = "Reanchoring"     # ANCHORING  + reached_anchored=True
 
 # SV constellation prefix → human label, in display order.
 # Keep GPS first (most satellites), then GAL, then BDS.  Add more
@@ -55,41 +71,52 @@ _CONSTELLATION_ROWS: tuple[tuple[str, str], ...] = (
 )
 
 # Column definitions: (header, aggregated states, needs_nl_capability).
-# Column ORDER is operationally meaningful — it mirrors the usual
-# SV trajectory:
+# Column ORDER is operationally meaningful — mirrors the usual SV
+# trajectory per ``scripts/peppar_fix/sv_state.py``:
 #
-#   Tracked   — receiver sees the SV (SvAmbState.TRACKING), hasn't
-#               yet been admitted to the float PPP filter
-#   Float     — admitted to the float filter (SvAmbState.FLOAT),
-#               no integer fix yet — the difference is "is this
-#               SV contributing to the position solution?"
-#   WL        — Melbourne-Wubbena wide-lane integer fixed
-#   SQUELCHED — cooldown-bound exclusion after a slip / false fix;
-#               placed between WL and NL_SHORT because a squelched
-#               SV typically re-fixes WL off cooldown and then
-#               heads into NL_SHORT next
-#   NL_SHORT  — short-term member of the fix set
-#   NL_LONG   — long-term member (survived ≥ 8° of Δaz)
+#   Tracked    — receiver sees SV (SvAmbState.TRACKING), not yet
+#                admitted to the float PPP filter
+#   Floating   — admitted, MW accumulating, no integer fix yet
+#                (SvAmbState.FLOATING)
+#   Converging — wide-lane integer fixed, narrow-lane pending
+#                (SvAmbState.CONVERGING)
+#   Waiting    — cooldown-bound after a slip / false fix
+#                (SvAmbState.WAITING).  Placed between Converging
+#                and Anchoring because a recovered SV typically
+#                re-fixes WL off cooldown and then heads into
+#                Anchoring next.
+#   Anchoring  — NL integer landed, earning Δaz validation
+#                (SvAmbState.ANCHORING).  Short-term member of the
+#                fix set.
+#   Anchored   — NL integer has survived ≥ 8° Δaz
+#                (SvAmbState.ANCHORED).  Long-term member.
 #
-# Reading left-to-right gives a coherent progression story; the
-# Tracked/Float split (added 2026-04-21) matters during bootstrap
-# where Float lags Tracked as the engine admits SVs to the filter
-# at its own pace.  A persistent gap between the two indicates
-# admission-path issues.
+# Reading left-to-right gives a coherent progression story.  The
+# Tracked/Floating split (added 2026-04-21) matters during
+# bootstrap where Floating lags Tracked as the engine admits SVs
+# to the filter at its own pace.  A persistent gap between the
+# two indicates admission-path issues.
 #
 # Third field flags columns whose values should render as ``-``
 # (architecturally impossible) when the constellation lacks NL
-# capability — i.e. when the receiver's tracked signals don't line
-# up with the correction stream's published phase biases for NL
-# integer fixing.  Only NL_SHORT and NL_LONG need the capability
+# capability — when the receiver's tracked signals don't line up
+# with the correction stream's published phase biases for NL
+# integer fixing.  Only Anchoring and Anchored need the capability
 # check; the rest are reachable on any dual-freq GNSS.
+#
+# Column header strings are kept compact so the SvStateTable rows
+# stay narrow (three-constellation fleet on an 80-col terminal is
+# the target).  "Anchoring" / "Anchored" don't abbreviate cleanly,
+# so we use them in full; "Converging" loses to the shorter "WL"
+# as a compromise — the column's *state* is the phase between WL
+# and NL (narrow-lane pending), which "WL" still communicates.
 _COLUMNS: tuple[tuple[str, frozenset[str], bool], ...] = (
-    ("Tracked",   frozenset({"TRACKING"}),        False),
-    ("Float",     frozenset({"FLOAT"}),           False),
-    ("WL",        frozenset({"WL_FIXED"}),        False),
-    ("SQUELCHED", frozenset({"SQUELCHED"}),       False),
-    ("NL_SHORT",  frozenset({"NL_SHORT_FIXED"}),  True),
-    ("NL_LONG",   frozenset({"NL_LONG_FIXED"}),   True),
+    ("Tracked",   frozenset({"TRACKING"}),   False),
+    ("Floating",  frozenset({"FLOATING"}),   False),
+    ("WL",        frozenset({"CONVERGING"}), False),
+    ("Waiting",   frozenset({"WAITING"}),    False),
+    ("Anchoring", frozenset({"ANCHORING"}),  True),
+    ("Anchored",  frozenset({"ANCHORED"}),   True),
 )
 
 # Rendered in cells that are architecturally impossible given the
@@ -117,12 +144,12 @@ class StateBar(Widget):
 
         bar = StateBar(
             machine_name="AntPosEst",
-            all_states=["unsurveyed", "verifying", ...],
+            all_states=["surveying", "verifying", ...],
         )
         ...
         bar.update_state(
             current="converging",
-            visited=("unsurveyed", "verifying", "converging"),
+            visited=("surveying", "verifying", "converging"),
         )
 
     Why Widget + render() instead of Static: Textual's Static is just
@@ -179,7 +206,7 @@ class StateBar(Widget):
     def render(self) -> Text:  # noqa: D401 — Rich-style, not imperative
         """Build a one-line Text with the machine name + state cells.
 
-        Layout: ``AntPosEst:  unsurveyed  verifying  [converging]  ...``
+        Layout: ``AntPosEst:  surveying  verifying  [converging]  ...``
 
         * The machine name gets a trailing colon and a fixed-width pad
           so the two bars line up vertically when stacked.
@@ -213,14 +240,14 @@ class SvStateTable(Widget):
 
         ::
 
-                    Tracked  WL  NL_SHORT  NL_LONG  SQUELCHED
+                    Tracked  Floating  WL  Waiting  Anchoring  Anchored  WAITING
             GPS         5     3         1        0          1
             GAL         6     4         2        1          0
             BDS         3     2         0        0          0
 
     Columns aggregate across ``SvAmbState`` values — see the
     ``_COLUMNS`` module constant for the exact grouping.  "Tracked"
-    pools TRACKING+FLOAT because at-a-glance the distinction between
+    pools TRACKING+FLOATING because at-a-glance the distinction between
     "receiver sees this SV" and "admitted but no integer" is less
     interesting than "integer-fixed yet?".  The remaining columns
     each correspond to exactly one state.
@@ -361,13 +388,16 @@ class AntennaPositionLine(Widget):
 
     Layout::
 
-        Antenna Position Resolving LAT / LON / ALT ± 2.3 cm
+        Antenna Position Anchoring LAT / LON / ALT ± 2.3 cm
 
     Four pieces separated by spaces:
 
       * ``Antenna Position`` — literal prefix
-      * state label: Surveying / Resolving / Resolved / Moved /
-        Waiting (Bob's 4-way mapping; see ``_ANTPOS_LABEL``)
+      * state label: Surveying / Converging / Anchoring /
+        Anchored / Reconverging / Reanchoring / Moved / Waiting.
+        See ``_ANTPOS_LABEL`` for the raw map and ``_label()``
+        for the ``reached_anchored``-driven derived labels
+        (Reconverging / Reanchoring).
       * ``lat / lon / alt`` — filter's current position.  Format
         matches whatever precision the engine emits in the
         ``[AntPosEst]`` line.  Digits below the σ quantum are
@@ -400,6 +430,7 @@ class AntennaPositionLine(Widget):
         state: Optional[str] = None,
         position: Optional[tuple[float, float, float]] = None,
         sigma_m: Optional[float] = None,
+        reached_anchored: bool = False,
         id: Optional[str] = None,  # noqa: A002
         classes: Optional[str] = None,
     ) -> None:
@@ -407,6 +438,7 @@ class AntennaPositionLine(Widget):
         self._state = state
         self._position = position
         self._sigma_m = sigma_m
+        self._reached_anchored = reached_anchored
 
     def update_position(
         self,
@@ -414,6 +446,7 @@ class AntennaPositionLine(Widget):
         state: Optional[str],
         position: Optional[tuple[float, float, float]],
         sigma_m: Optional[float],
+        reached_anchored: bool = False,
     ) -> None:
         """Record a new snapshot; no-op if nothing display-relevant
         changed (saves repaints when the engine line arrives with
@@ -423,17 +456,34 @@ class AntennaPositionLine(Widget):
             state == self._state
             and position == self._position
             and sigma_m == self._sigma_m
+            and reached_anchored == self._reached_anchored
         ):
             return
         self._state = state
         self._position = position
         self._sigma_m = sigma_m
+        self._reached_anchored = reached_anchored
         self.refresh()
 
     # ── Rendering ───────────────────────────────────────────────── #
 
+    def _label(self) -> str:
+        """Compose the displayed state label.  Consults the
+        ``reached_anchored`` latch to distinguish first-time
+        CONVERGING / ANCHORING (low trust) from regressed
+        CONVERGING / ANCHORING after the filter has earned
+        ANCHORED at least once (high trust — RECONVERGING /
+        REANCHORING).  Table matches the memo's derived-label
+        spec."""
+        if self._reached_anchored:
+            if self._state == "converging":
+                return _ANTPOS_LABEL_RECONV
+            if self._state == "anchoring":
+                return _ANTPOS_LABEL_REANCH
+        return _ANTPOS_LABEL.get(self._state, "Waiting")
+
     def render(self) -> Text:
-        label = _ANTPOS_LABEL.get(self._state, "Waiting")
+        label = self._label()
         t = Text()
         t.append("Antenna Position ", style="bold")
         t.append(label + " ")
