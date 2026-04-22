@@ -436,6 +436,71 @@ class SettingSvDropMonitorTest(unittest.TestCase):
             self.m.ingest(e, [5.0], labels)
         self.assertEqual(self.m.evaluate(10), [])
 
+    def test_no_drop_above_residual_ceiling(self):
+        """High-elev SV with bad residual: setting_sv_drop must NOT
+        fire — that SV isn't physically setting.  Residual issues
+        above the ceiling are FalseFixMonitor's domain, or a
+        filter-health issue.  Dropping a high-elev anchor here
+        sacrifices ZTD/altitude disambiguation geometry."""
+        self._to_short("G30")
+        # elev=60° is above the default 30° residual ceiling.
+        # Residual of 5 m would trigger a drop if below the ceiling
+        # (elev-weighted threshold at 60° is 3.0 m, clamped).
+        labels = [("G30", 'pr', 60.0)]
+        for e in range(3, 13):
+            self.m.ingest(e, [5.0], labels)
+        events = self.m.evaluate(10)
+        self.assertEqual(
+            events, [],
+            "setting_sv_drop fired above the residual ceiling — "
+            "regression against the day0421 high-elev anchor-drop "
+            "pattern that motivated this gate",
+        )
+        # SV stays in NL_SHORT_FIXED, not dropped.
+        self.assertIs(self.t.state("G30"), SvAmbState.NL_SHORT_FIXED)
+
+    def test_drop_allowed_at_ceiling_boundary(self):
+        """elev == ceiling still qualifies as the setting band (the
+        gate is strictly '>', not '≥').  Preserves the existing
+        behavior at elev=30° tested in test_drops_on_elev_weighted_resid."""
+        self._to_short("G31")
+        labels = [("G31", 'pr', 30.0)]   # exactly at the ceiling
+        for e in range(3, 13):
+            self.m.ingest(e, [5.0], labels)
+        events = self.m.evaluate(10)
+        self.assertEqual(len(events), 1)
+
+    def test_repeat_drop_logs_warning(self):
+        """An SV can only truly set once per pass.  A second residual
+        drop on the same SV is diagnostic — log a REPEAT warning so
+        operators can investigate multipath / filter health."""
+        self._to_short("G32")
+        # elev=25° is inside the setting band (between drop_mask=18° and
+        # residual_ceiling=30°).  At 25°, elev-weighted threshold is
+        # 3.0 * sin(45°)/sin(25°) ≈ 5.02 m, so residual=6.0 triggers.
+        labels = [("G32", 'pr', 25.0)]
+        for e in range(3, 13):
+            self.m.ingest(e, [6.0], labels)
+        # First drop — count=1, no REPEAT warning.
+        events1 = self.m.evaluate(10)
+        self.assertEqual(len(events1), 1)
+        self.assertEqual(events1[0]['drop_count_session'], 1)
+
+        # Re-admit and drop again to trigger the repeat warning.
+        self._to_short("G32")
+        for e in range(13, 23):
+            self.m.ingest(e, [6.0], labels)
+        with self.assertLogs(
+            'peppar_fix.setting_sv_drop_monitor', level='WARNING',
+        ) as lm:
+            events2 = self.m.evaluate(20)
+        self.assertEqual(len(events2), 1)
+        self.assertEqual(events2[0]['drop_count_session'], 2)
+        self.assertTrue(
+            any('SETTING_SV_DROP_REPEAT' in r.message for r in lm.records),
+            "second drop should emit the REPEAT warning",
+        )
+
 
 class FixSetIntegrityAlarmTest(unittest.TestCase):
     """Alarm requires RMS threshold sustained, no recent per-SV monitor, no cooldown."""

@@ -12,10 +12,15 @@ the fix set as it descends into multipath-prone elevations.
 
 Two trigger conditions, either one fires:
 
-1. **Elev-weighted PR residual exceeds threshold.**  Base 3.0 m at
-   zenith (looser than the false-fix monitor's 2.0 m because this
-   is the "still correct but getting noisy" case, not "wrong
-   integer"); scaled up by 1/sin(elev) with the same 45° clamp.
+1. **Elev-weighted PR residual exceeds threshold in the setting
+   band.**  Base 3.0 m at `elev_clamp_deg` (45° zenith cap); scaled
+   up by 1/sin(elev) below the clamp.  Only fires when elev is in
+   the setting band — between `drop_mask_deg` (default 18°) and
+   `residual_ceiling_deg` (default 30°).  Above the ceiling an SV
+   is not physically setting — residual issues at high elev are
+   FalseFixMonitor's domain (tighter 2.0 m threshold, designed for
+   wrong integers) or filter-health issues handled by the integrity
+   monitor / join test.
 2. **Elev below absolute drop mask.**  Independent of residual
    quality: below `drop_mask_deg` (default 18°) we drop regardless.
    Keeps stale low-elev integers from polluting the filter when
@@ -31,6 +36,16 @@ The SV transitions to FLOAT on drop, not to an intermediate
 fast re-acquisition if the SV rises again (see slip-retain-freq
 feedback memory).  If the SV has truly set out of tracking, the
 engine forgets its record on the next observation cycle.
+
+Diagnostic: an SV can only physically set once per pass.  A
+second setting_sv_drop event on the same SV within a session
+indicates either (a) a persistent multipath/obstruction at a
+specific sky region, or (b) filter health issues masquerading as
+setting (the filter's position/ZTD state drifted and the anchor's
+PR residual followed).  Neither is real setting.  We track the
+count and log a warning; a future refinement could use the count
+to adjust per-SV behavior (skip the drop, raise the threshold,
+or mark the sky region as multipath-prone).
 """
 
 from __future__ import annotations
@@ -79,6 +94,7 @@ class SettingSvDropMonitor:
         base_threshold_m: float = 3.0,
         elev_clamp_deg: float = 45.0,
         drop_mask_deg: float = 18.0,
+        residual_ceiling_deg: float = 30.0,
         window_epochs: int = 30,
         min_samples: int = 10,
         eval_every: int = 10,
@@ -87,10 +103,15 @@ class SettingSvDropMonitor:
         self._base = float(base_threshold_m)
         self._elev_clamp = float(elev_clamp_deg)
         self._drop_mask = float(drop_mask_deg)
+        self._resid_ceiling = float(residual_ceiling_deg)
         self._window = int(window_epochs)
         self._min_samples = int(min_samples)
         self._eval_every = int(eval_every)
         self._per_sv: dict[str, _SvResidWindow] = {}
+        # Per-SV drop count across this session.  An SV only sets
+        # once; a second drop is diagnostic for multipath or filter
+        # health.  Survives state transitions (not flushed on drop).
+        self._drop_count: dict[str, int] = {}
 
     # ── Data intake ─────────────────────────────────────────────── #
 
@@ -158,7 +179,20 @@ class SettingSvDropMonitor:
                 self._per_sv.pop(sv, None)
                 continue
 
-            # Condition 2: elev-weighted PR residual exceeded.
+            # Condition 2: elev-weighted PR residual exceeded — but
+            # only in the setting band (elev ≤ residual_ceiling_deg).
+            # An SV above the ceiling is not physically setting; a
+            # large mean residual at high elev is either a wrong
+            # integer (FalseFixMonitor handles it with a stricter
+            # 2.0 m base) or a filter-health issue (ZTD/altitude
+            # coupling — integrity monitor or join test handles it).
+            # Dropping a high-elev anchor here sacrifices the
+            # geometry diversity that disentangles ZTD from altitude.
+            if (
+                w.last_elev_deg is not None
+                and w.last_elev_deg > self._resid_ceiling
+            ):
+                continue
             n = len(w.resids)
             if n < self._min_samples:
                 continue
@@ -167,6 +201,18 @@ class SettingSvDropMonitor:
                 self._base, w.last_elev_deg, clamp_deg=self._elev_clamp,
             )
             if mean > thr:
+                n_prior = self._drop_count.get(sv, 0) + 1
+                self._drop_count[sv] = n_prior
+                if n_prior > 1:
+                    log.warning(
+                        "[SETTING_SV_DROP_REPEAT] %s dropped %d× this "
+                        "session (elev=%s°, |PR|=%.2fm > %.2fm); an SV "
+                        "only truly sets once — suspect multipath "
+                        "hotspot or filter-health drift",
+                        sv, n_prior,
+                        f"{w.last_elev_deg:.0f}" if w.last_elev_deg is not None else "?",
+                        mean, thr,
+                    )
                 events.append({
                     'sv': sv,
                     'reason': 'elev_weighted_resid',
@@ -174,6 +220,7 @@ class SettingSvDropMonitor:
                     'mean_resid_m': mean,
                     'threshold_m': thr,
                     'n': n,
+                    'drop_count_session': n_prior,
                 })
                 self._tracker.transition(
                     sv, SvAmbState.FLOAT,
