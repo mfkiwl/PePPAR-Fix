@@ -45,6 +45,7 @@ import numpy as np
 
 from solve_pseudorange import C, ecef_to_lla, lla_to_ecef
 from solve_ppp import PPPFilter, FixedPosFilter, ls_init, N_BASE, SIGMA_P_IF, IDX_ZTD as PPP_IDX_ZTD
+from solid_tide import solid_tide_displacement
 from peppar_fix.bootstrap_gate import (
     residuals_consistent, nav2_agrees, scrub_for_retry,
 )
@@ -1292,11 +1293,20 @@ class AntPosEstThread(threading.Thread):
                  nav2_alarm_count=3, systems=None,
                  nl_diag_enabled=False,
                  join_test_enabled=True,
-                 wl_only=False):
+                 wl_only=False,
+                 solid_tide=True):
         super().__init__(daemon=True, name="AntPosEst")
         # WL-only mode: clamp the lifecycle at CONVERGING, skip NL
         # resolution.  See docs/wl-only-foundation.md.
         self._wl_only = bool(wl_only)
+        # Solid Earth tide (IERS 2010 Step 1).  On by default per
+        # Phase 1 of docs/obs-model-completion-plan.md.  See
+        # scripts/solid_tide.py.  When True, each epoch's filter
+        # update passes the current tide displacement as
+        # receiver_offset_ecef, which adjusts the PREDICTED receiver
+        # position for range calculation without modifying the filter
+        # state.  Expected delta: ~40 mm on clean-geometry hosts.
+        self._solid_tide = bool(solid_tide)
         self.obs_queue = queue.Queue(maxsize=50)
         self._corrections = corrections
         self._stop = stop_event
@@ -1908,9 +1918,23 @@ class AntPosEstThread(threading.Thread):
                 if sv not in current_svs:
                     filt.remove_ambiguity(sv)
 
+            # Solid Earth tide displacement (IERS 2010 Step 1).  Added
+            # to the predicted receiver position for range calculation;
+            # does NOT modify the filter state.  Guard against cold-
+            # start where filt.x[:3] may be near-zero (no position yet)
+            # — the tide module needs a physical Earth-radius station
+            # to compute the r_hat unit vector.  100 km floor is a
+            # comfortable margin above filter init noise.
+            tide_offset = None
+            if self._solid_tide:
+                pos_ecef = filt.x[:3]
+                if float(np.linalg.norm(pos_ecef)) > 100_000.0:
+                    tide_offset = solid_tide_displacement(gps_time, pos_ecef)
+
             # EKF update
             n_used, resid, sys_counts = filt.update(
-                observations, corrections, gps_time, clk_file=corrections)
+                observations, corrections, gps_time, clk_file=corrections,
+                receiver_offset_ecef=tide_offset)
             if n_used < 4:
                 continue
 
@@ -5484,6 +5508,7 @@ def run(args):
             nl_diag_enabled=bool(getattr(args, "nl_diag", False)),
             join_test_enabled=bool(getattr(args, "join_test", True)),
             wl_only=bool(getattr(args, "wl_only", False)),
+            solid_tide=bool(getattr(args, "solid_tide", True)),
         )
         ape_thread.start()
 
@@ -5714,6 +5739,16 @@ Two-phase operation:
                           "AntPosEstState lifecycles are clamped at "
                           "CONVERGING.  Foundation experiment — see "
                           "docs/wl-only-foundation.md.")
+    pos.add_argument("--no-solid-tide", dest="solid_tide",
+                     action="store_false", default=True,
+                     help="Disable the IERS 2010 Step 1 solid Earth "
+                          "tide displacement correction.  On by default: "
+                          "Bravo's harness measured −39 mm improvement on "
+                          "clean GAL+BDS geometry on ABMF 2020/001, "
+                          "matching PRIDE's ablation prediction.  Phase 1 "
+                          "of docs/obs-model-completion-plan.md.  Use "
+                          "this flag to A/B test the correction's impact "
+                          "on lab performance.")
     pos.add_argument("--timeout", type=int, default=3600,
                      help="Bootstrap timeout in seconds (default: 3600)")
     pos.add_argument("--watchdog-threshold", type=float, default=0.5,
