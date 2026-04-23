@@ -1823,6 +1823,44 @@ class AntPosEstThread(threading.Thread):
             )
         self._fix_set_integrity.record_trip(self._n_epochs)
 
+    @staticmethod
+    def _null_mode_sigma_max(filt):
+        """Largest σ (√ of largest eigenvalue) across P's coupled
+        base-state block (position + clock + ISBs + ZTD) in meters.
+
+        Captures the null-mode excitation signal: when
+        (δclk, δZTD·m_wet, δN_common) drift together along the
+        filter's near-rank-deficient direction, the covariance
+        grows along that direction; the block's largest eigenvalue
+        tracks it.  See docs/glossary.md 'null mode' for the
+        mechanism and the 2026-04-23 PRIDE-ablation arc for the
+        empirical characterization.
+
+        Returns max σ in meters, or None when the filter hasn't
+        built enough state for the computation (early cold-start).
+        Diagnostic only — does not drive any filter action.
+        """
+        if filt is None or not hasattr(filt, 'P') or filt.P is None:
+            return None
+        # Base-state block: [X, Y, Z, clk, ISB_GAL, ISB_BDS, ZTD].
+        # Skip ambiguities — interpretation gets murky at dim 20+
+        # and the clock/ZTD part already captures the null-mode
+        # direction per Bravo's state-trajectory data (clock ±12m,
+        # ZTD ±2m co-drift).
+        n = filt.P.shape[0]
+        base_dim = min(N_BASE, n)
+        if base_dim < 4:
+            return None
+        P_block = filt.P[:base_dim, :base_dim]
+        try:
+            # eigvalsh returns ascending; take last for max.
+            max_eig = float(np.linalg.eigvalsh(P_block)[-1])
+        except np.linalg.LinAlgError:
+            return None
+        if max_eig <= 0.0:
+            return 0.0
+        return math.sqrt(max_eig)
+
     def run(self):
         log.info("AntPosEstThread started (resolved_decimation=%d, resolve_threshold=%d)",
                  self._resolved_decimation, self._resolve_threshold)
@@ -2253,13 +2291,20 @@ class AntPosEstThread(threading.Thread):
                 if self._last_tide_3d_mm is not None:
                     tide_tag = (f" tide={self._last_tide_3d_mm:.0f}mm"
                                 f"(U{self._last_tide_up_mm:+.0f})")
+                # Null-mode diagnostic: max σ across P's base-state
+                # block.  Rising value without matching rise in
+                # reported sigma_3d is the null-mode-excitation
+                # signature (Bravo 2026-04-23).  Diagnostic only.
+                nm_sigma = self._null_mode_sigma_max(filt)
+                null_tag = (f" null={nm_sigma:.1f}m"
+                            if nm_sigma is not None else "")
                 log.info(
                     "  [AntPosEst %d] σ=%.3fm pos=(%.6f, %.6f, %.1f) "
-                    "n=%d amb=%d %s %s%s%s%s%s%s",
+                    "n=%d amb=%d %s %s%s%s%s%s%s%s",
                     self._n_epochs, sigma_3d, lat, lon, alt,
                     n_used, len(filt.sv_to_idx),
                     mw.summary(), nl.summary(), nav2_tag, ztd_tag,
-                    strength_tag, readmit_tag, tide_tag,
+                    strength_tag, readmit_tag, tide_tag, null_tag,
                 )
                 # Full-precision NAV2 log line.  NAV2-PVT's native format is
                 # LLA; lat/lon at 1e-7 deg (~1 cm resolution at our latitude)
