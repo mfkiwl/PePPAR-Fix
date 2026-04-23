@@ -2291,20 +2291,27 @@ class AntPosEstThread(threading.Thread):
                 if self._last_tide_3d_mm is not None:
                     tide_tag = (f" tide={self._last_tide_3d_mm:.0f}mm"
                                 f"(U{self._last_tide_up_mm:+.0f})")
-                # Null-mode diagnostic: max σ across P's base-state
-                # block.  Rising value without matching rise in
-                # reported sigma_3d is the null-mode-excitation
-                # signature (Bravo 2026-04-23).  Diagnostic only.
+                # Worst-σ diagnostic: largest σ (√ of largest
+                # eigenvalue) across P's base-state block.  Pairs
+                # with positionσ on this line — they share the same
+                # "σ in meters" semantics but scope differs.
+                # positionσ = position-only uncertainty.
+                # worstσ    = worst-case σ across ALL base states
+                #             including clock, ISBs, ZTD, capturing
+                #             near-rank-deficient coupling.
+                # A rising worstσ without matching rise in positionσ
+                # is the null-mode-excitation signature (Bravo
+                # 2026-04-23 PRIDE arc).  Diagnostic only, no action.
                 nm_sigma = self._null_mode_sigma_max(filt)
-                null_tag = (f" null={nm_sigma:.1f}m"
-                            if nm_sigma is not None else "")
+                worst_tag = (f" worstσ={nm_sigma:.1f}m"
+                             if nm_sigma is not None else "")
                 log.info(
-                    "  [AntPosEst %d] σ=%.3fm pos=(%.6f, %.6f, %.1f) "
+                    "  [AntPosEst %d] positionσ=%.3fm pos=(%.6f, %.6f, %.1f) "
                     "n=%d amb=%d %s %s%s%s%s%s%s%s",
                     self._n_epochs, sigma_3d, lat, lon, alt,
                     n_used, len(filt.sv_to_idx),
                     mw.summary(), nl.summary(), nav2_tag, ztd_tag,
-                    strength_tag, readmit_tag, tide_tag, null_tag,
+                    strength_tag, readmit_tag, tide_tag, worst_tag,
                 )
                 # Full-precision NAV2 log line.  NAV2-PVT's native format is
                 # LLA; lat/lon at 1e-7 deg (~1 cm resolution at our latitude)
