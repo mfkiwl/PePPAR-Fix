@@ -57,6 +57,7 @@ from peppar_fix.false_fix_monitor import FalseFixMonitor
 from peppar_fix.setting_sv_drop_monitor import SettingSvDropMonitor
 from peppar_fix.fix_set_integrity_monitor import FixSetIntegrityMonitor
 from peppar_fix.wl_drift_monitor import WlDriftMonitor
+from peppar_fix.wl_readmission_gate import WlReAdmissionGate
 from peppar_fix.anchoring_sv_promoter import AnchoringSvPromoter
 from peppar_fix.nl_diag import NlDiagLogger
 
@@ -1393,6 +1394,13 @@ class AntPosEstThread(threading.Thread):
         # note_unfix — keeps monitor decoupled from the MW tracker's
         # internals.
         self._wl_drift_prev_fixed: set[str] = set()
+        # Layer 3 of the per-SV trust architecture
+        # (docs/sv-trust-layers.md): after the drift monitor flushes
+        # an SV, this gate blocks MW updates for that SV until its
+        # elevation has moved ≥ 2° from the flush-time elevation.
+        # Breaks the "re-fix the same wrong integer at the same
+        # geometry" pattern.
+        self._wl_readmit = WlReAdmissionGate()
         # Bead 4 — promotes ANCHORING → ANCHORED after Δaz ≥ 15°
         # with a clean false-fix window.  Solution-state RESOLVED count (below) reads
         # ANCHORED from the tracker instead of raw NL-fix count.
@@ -1913,6 +1921,7 @@ class AntPosEstThread(threading.Thread):
             # with a meaningful epoch field.
             mw._current_epoch = self._n_epochs
             nl._epoch = self._n_epochs  # resolver also uses _epoch for logs
+            readmit_blocked: list[str] = []
             for obs in observations:
                 sv = obs['sv']
                 phi1 = obs.get('phi1_cyc')
@@ -1922,6 +1931,13 @@ class AntPosEstThread(threading.Thread):
                 wl1 = obs.get('wl_f1')
                 wl2 = obs.get('wl_f2')
                 if all(v is not None for v in (phi1, phi2, pr1, pr2, wl1, wl2)):
+                    # Layer 3 re-admission gate: skip MW update if the
+                    # drift monitor previously flushed this SV and its
+                    # elevation hasn't moved enough yet.  See
+                    # docs/sv-trust-layers.md.
+                    if self._wl_readmit.is_blocked(sv, elevations.get(sv)):
+                        readmit_blocked.append(sv)
+                        continue
                     f1_hz = C / wl1
                     f2_hz = C / wl2
                     mw.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
@@ -1934,6 +1950,10 @@ class AntPosEstThread(threading.Thread):
             fixed_now = {sv for sv, st in mw._state.items() if st.get('fixed')}
             for sv in fixed_now - self._wl_drift_prev_fixed:
                 self._wl_drift.note_fix(sv)
+                # Newly-fixed SV passed the re-admission gate (or was
+                # never held).  Clear any prior hold so a subsequent
+                # drift-flush-readmit cycle starts fresh.
+                self._wl_readmit.note_admitted(sv)
             for sv in self._wl_drift_prev_fixed - fixed_now:
                 self._wl_drift.note_unfix(sv)
             drift_actions: list[str] = []
@@ -1951,14 +1971,20 @@ class AntPosEstThread(threading.Thread):
                 resid_cyc = st['mw_avg'] / lambda_wl - n_wl
                 ev = self._wl_drift.ingest(sv, resid_cyc)
                 if ev is not None:
+                    flush_elev = elevations.get(sv)
                     log.warning(
                         "[WL_DRIFT] %s drift=%+.3fcyc > ±%.2f (n=%d, window=%dep): "
-                        "flushing MW, demoting to FLOATING",
+                        "flushing MW, demoting to FLOATING, gate@elev=%s",
                         ev['sv'], ev['drift_cyc'], ev['threshold_cyc'],
                         ev['n_samples'], ev['window_epochs'],
+                        f"{flush_elev:.1f}°" if flush_elev is not None else "?",
                     )
                     mw.reset(sv)
                     self._wl_drift.note_unfix(sv)
+                    # Layer 3: take a re-admission hold at the current
+                    # elevation.  MW updates for this SV are skipped
+                    # until elevation moves ≥ 2°.
+                    self._wl_readmit.note_flush(sv, flush_elev)
                     fixed_now.discard(sv)
                     # Demote the per-SV state.  CONVERGING → FLOATING is
                     # a legal edge in the lifecycle; ANCHORING/ANCHORED
@@ -2174,13 +2200,16 @@ class AntPosEstThread(threading.Thread):
                 strength = (float(wl_fixed_count) / sigma_3d
                             if sigma_3d > 0 else 0.0)
                 strength_tag = f" strength={strength:.0f}"
+                readmit_held = self._wl_readmit.n_held()
+                readmit_tag = (f" readmit={readmit_held}"
+                               if readmit_held > 0 else "")
                 log.info(
                     "  [AntPosEst %d] σ=%.3fm pos=(%.6f, %.6f, %.1f) "
-                    "n=%d amb=%d %s %s%s%s%s",
+                    "n=%d amb=%d %s %s%s%s%s%s",
                     self._n_epochs, sigma_3d, lat, lon, alt,
                     n_used, len(filt.sv_to_idx),
                     mw.summary(), nl.summary(), nav2_tag, ztd_tag,
-                    strength_tag,
+                    strength_tag, readmit_tag,
                 )
                 # Full-precision NAV2 log line.  NAV2-PVT's native format is
                 # LLA; lat/lon at 1e-7 deg (~1 cm resolution at our latitude)
