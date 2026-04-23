@@ -1411,6 +1411,13 @@ class AntPosEstThread(threading.Thread):
         # Breaks the "re-fix the same wrong integer at the same
         # geometry" pattern.
         self._wl_readmit = WlReAdmissionGate()
+        # Last-epoch solid Earth tide displacement, cached for the
+        # [AntPosEst] status line.  Pair: 3D magnitude and radial
+        # projection (~ local up), both in mm.  None when solid
+        # tide is disabled or the filter position hasn't converged
+        # enough to compute displacement (cold start guard).
+        self._last_tide_3d_mm: float | None = None
+        self._last_tide_up_mm: float | None = None
         # Bead 4 — promotes ANCHORING → ANCHORED after Δaz ≥ 15°
         # with a clean false-fix window.  Solution-state RESOLVED count (below) reads
         # ANCHORED from the tracker instead of raw NL-fix count.
@@ -1926,10 +1933,21 @@ class AntPosEstThread(threading.Thread):
             # to compute the r_hat unit vector.  100 km floor is a
             # comfortable margin above filter init noise.
             tide_offset = None
+            self._last_tide_3d_mm = None
+            self._last_tide_up_mm = None
             if self._solid_tide:
                 pos_ecef = filt.x[:3]
-                if float(np.linalg.norm(pos_ecef)) > 100_000.0:
+                pos_norm = float(np.linalg.norm(pos_ecef))
+                if pos_norm > 100_000.0:
                     tide_offset = solid_tide_displacement(gps_time, pos_ecef)
+                    # Cache tide magnitude + radial projection for the
+                    # AntPosEst status line.  Radial ≈ local up for a
+                    # near-spherical station position; good to 0.1 mm.
+                    r_hat = pos_ecef / pos_norm
+                    self._last_tide_3d_mm = 1000.0 * float(
+                        np.linalg.norm(tide_offset))
+                    self._last_tide_up_mm = 1000.0 * float(
+                        np.dot(tide_offset, r_hat))
 
             # EKF update
             n_used, resid, sys_counts = filt.update(
@@ -2227,13 +2245,21 @@ class AntPosEstThread(threading.Thread):
                 readmit_held = self._wl_readmit.n_held()
                 readmit_tag = (f" readmit={readmit_held}"
                                if readmit_held > 0 else "")
+                # Solid Earth tide magnitude + radial (approx local up)
+                # component for this epoch.  Radial is signed; total
+                # is magnitude only.  Tag omitted when tide is disabled
+                # or the filter hasn't produced a usable position yet.
+                tide_tag = ""
+                if self._last_tide_3d_mm is not None:
+                    tide_tag = (f" tide={self._last_tide_3d_mm:.0f}mm"
+                                f"(U{self._last_tide_up_mm:+.0f})")
                 log.info(
                     "  [AntPosEst %d] σ=%.3fm pos=(%.6f, %.6f, %.1f) "
-                    "n=%d amb=%d %s %s%s%s%s%s",
+                    "n=%d amb=%d %s %s%s%s%s%s%s",
                     self._n_epochs, sigma_3d, lat, lon, alt,
                     n_used, len(filt.sv_to_idx),
                     mw.summary(), nl.summary(), nav2_tag, ztd_tag,
-                    strength_tag, readmit_tag,
+                    strength_tag, readmit_tag, tide_tag,
                 )
                 # Full-precision NAV2 log line.  NAV2-PVT's native format is
                 # LLA; lat/lon at 1e-7 deg (~1 cm resolution at our latitude)
