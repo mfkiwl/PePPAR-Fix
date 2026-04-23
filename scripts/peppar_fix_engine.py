@@ -1384,11 +1384,24 @@ class AntPosEstThread(threading.Thread):
         and AR is locked.  ANCHORING (any NL fix) is enough; waiting
         for ANCHORED (geometry-validated) would waste CPU during the
         ~minutes between first fix and first Δaz promotion.
+
+        **Currently disabled** (always returns 1).  Variable
+        decimation breaks the implicit "1 epoch == 1 second"
+        assumption used by several monitors
+        (FixSetIntegrityMonitor sustained/cooldown/escalate windows,
+        setting_sv_drop integration, etc.).  Rather than hunt down
+        every place that conflates epoch count with wall-clock
+        seconds, we run 1:1 for now.  Infrastructure preserved
+        (resolved_decimation constructor arg, the state check
+        below) so re-enabling is one line once the epoch-vs-time
+        assumptions are fixed repo-wide.
         """
-        if self._ape_sm.state in (AntPosEstState.ANCHORING,
-                                  AntPosEstState.ANCHORED):
-            return self._resolved_decimation
         return 1
+        # Preserved for re-enable once epoch-vs-time is audited:
+        #   if self._ape_sm.state in (AntPosEstState.ANCHORING,
+        #                             AntPosEstState.ANCHORED):
+        #       return self._resolved_decimation
+        #   return 1
 
     def feed(self, gps_time, observations):
         """Called by steady-state loop to forward an observation.

@@ -650,13 +650,15 @@ class ZtdCyclingEscalationTest(unittest.TestCase):
 
     def setUp(self):
         self.t = SvStateTracker()
-        # Small windows for fast tests.  Threshold=3 trips within
-        # 100 epochs → the 3rd trip inside that window escalates.
+        # Small windows for fast tests.  Threshold=2 trips within
+        # 100 epochs → the 2nd trip inside that window escalates.
+        # Matches the production default tightened 2026-04-22 after
+        # day0422d showed one NL-only revert was sufficient evidence.
         self.m = FixSetIntegrityMonitor(
             self.t,
             ztd_trip_threshold_m=0.7,
             ztd_sustained_epochs=5,
-            ztd_escalate_threshold=3,
+            ztd_escalate_threshold=2,
             ztd_escalate_window_epochs=100,
             eval_every=1,
             cooldown_epochs=0,
@@ -674,41 +676,36 @@ class ZtdCyclingEscalationTest(unittest.TestCase):
         assert ev is not None, f"trip failed to fire at base {base_epoch}"
         return ev
 
-    def test_first_two_trips_are_ztd_impossible(self):
+    def test_first_trip_is_ztd_impossible(self):
         ev1 = self._trip(100)
-        ev2 = self._trip(150)  # within 100-epoch window
         self.assertEqual(ev1['reason'], 'ztd_impossible')
-        self.assertEqual(ev2['reason'], 'ztd_impossible')
         self.assertEqual(ev1['recent_trip_count'], 1)
-        self.assertEqual(ev2['recent_trip_count'], 2)
 
-    def test_third_trip_in_window_escalates_to_cycling(self):
+    def test_second_trip_in_window_escalates_to_cycling(self):
         self._trip(100)
-        self._trip(150)
-        ev3 = self._trip(180)
-        self.assertEqual(ev3['reason'], 'ztd_cycling')
-        self.assertEqual(ev3['recent_trip_count'], 3)
+        ev2 = self._trip(150)  # within 100-epoch window
+        self.assertEqual(ev2['reason'], 'ztd_cycling')
+        self.assertEqual(ev2['recent_trip_count'], 2)
 
     def test_trip_outside_window_does_not_count(self):
         # Two trips spaced 150 epochs apart (> window=100).  The
         # first trip is outside the window when the second evaluates,
-        # so the second trip still reports count=1.
+        # so the second trip reports count=1 and stays ztd_impossible.
         self._trip(100)
-        # Next trip's sustained window starts at 250.
         ev2 = self._trip(250)
         self.assertEqual(ev2['reason'], 'ztd_impossible')
         self.assertEqual(ev2['recent_trip_count'], 1)
 
     def test_escalation_clears_history(self):
         # After escalating once, the count resets to 1 — the next
-        # ztd_cycling again requires 3 trips inside the window.
+        # ztd_cycling again requires a fresh threshold count inside
+        # the window.
         self._trip(100)
-        self._trip(150)
-        ev3 = self._trip(180)
-        self.assertEqual(ev3['reason'], 'ztd_cycling')
-        ev4 = self._trip(230)
-        self.assertEqual(ev4['reason'], 'ztd_impossible')
-        self.assertEqual(ev4['recent_trip_count'], 1)
+        ev2 = self._trip(150)
+        self.assertEqual(ev2['reason'], 'ztd_cycling')
+        ev3 = self._trip(200)
+        self.assertEqual(ev3['reason'], 'ztd_impossible')
+        self.assertEqual(ev3['recent_trip_count'], 1)
 
 
 if __name__ == "__main__":

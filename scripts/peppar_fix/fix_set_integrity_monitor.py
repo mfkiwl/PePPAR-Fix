@@ -106,7 +106,7 @@ class FixSetIntegrityMonitor:
         anchor_collapse_epochs: int = 60,
         ztd_trip_threshold_m: float = 0.7,
         ztd_sustained_epochs: int = 60,
-        ztd_escalate_threshold: int = 3,
+        ztd_escalate_threshold: int = 2,
         ztd_escalate_window_epochs: int = 1200,
     ) -> None:
         self._tracker = tracker
