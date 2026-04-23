@@ -313,6 +313,49 @@ The loss turned out to be NAV2 resets (not wrong integers), but the
 investigation revealed the integrity gap for wrong integers in the
 2–10 m range.
 
+## Weighted position-fix strength metric
+
+**What**: Extend the unweighted strength metric (`WL_fixed / σ_3d_m`,
+see `docs/position-strength-metric.md`) to weight each SV's
+contribution by its elevation, signal band, fix age, and susceptibility
+to correlated failure modes.  Current first-cut treats every fixed WL
+SV identically in the numerator; the weighted form would encode the
+physical reality that not all fixed WL SVs contribute equally to
+resistance against biased-integer pull.
+
+**Why**: The overnight 2026-04-23 run showed hosts with **fewer** SVs
+(TimeHat F9T-10, ptpmon) weathering pre-dawn TEC conditions better than
+hosts with **more** SVs (clkPoC3, MadHat, F9T-20B's).  Per-SV
+resistance `1/N_eff` scales with N, but per-SV failure probability
+isn't uniform and correlated failures evaporate the sqrt-N
+protection.  A weighted metric would reflect that a high-elev L1/L2
+SV contributes more strength during a TEC storm than a low-elev L5
+SV on the same receiver.
+
+**How**: Replace the count in the numerator with `Σ_i w_i` where
+`w_i` encodes:
+
+- **Elevation**: monotone-increasing weight up to ~60°, flat above
+  (e.g., `sin²(elev)` or RTKLIB-style elevation weighting).
+- **Signal band / correlation cohort**: during known TEC-prone
+  periods or flagged storm events, down-weight L5-band fixes; during
+  multipath sweeps, down-weight low-elev fixes; etc.  May need a
+  dynamic layer that responds to current fleet-level evidence of
+  stress.
+- **Fix age / MW averaging confidence**: SVs with longer post-fix
+  averaging windows and tighter residual std get more weight.
+- **SSR correction age / source reliability**: fixes tied to fresh,
+  matched phase biases weight higher than those relying on stale or
+  fallback-inferred biases.
+
+**Dependencies**: first accumulate a week of runtime data with the
+unweighted metric logged, to see which structural features correlate
+most strongly with trap-susceptibility in our actual fleet.  The
+weight axes chosen from that data will beat any a-priori design.
+
+**Discovered**: 2026-04-23 discussion of the overnight WL-only run
+(the ironic "fewer SVs, better survival" finding).
+
 ## MAD-based outlier rejection
 
 **What**: Reject individual PPS error samples that are statistical

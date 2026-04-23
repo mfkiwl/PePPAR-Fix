@@ -56,6 +56,7 @@ from peppar_fix.sv_state import SvAmbState, SvStateTracker
 from peppar_fix.false_fix_monitor import FalseFixMonitor
 from peppar_fix.setting_sv_drop_monitor import SettingSvDropMonitor
 from peppar_fix.fix_set_integrity_monitor import FixSetIntegrityMonitor
+from peppar_fix.wl_drift_monitor import WlDriftMonitor
 from peppar_fix.anchoring_sv_promoter import AnchoringSvPromoter
 from peppar_fix.nl_diag import NlDiagLogger
 
@@ -1378,6 +1379,20 @@ class AntPosEstThread(threading.Thread):
         self._fix_set_integrity = FixSetIntegrityMonitor(
             self._sv_state, ape_state_machine=self._ape_sm,
         )
+        # Per-SV post-fix MW residual drift monitor — catches wrong
+        # WL integer commits in the "pull phase" (minutes to tens of
+        # minutes after a bad integer lands) before the aggregate
+        # filter state has absorbed enough bias to trip the host-
+        # level ztd_impossible monitor.  See
+        # docs/position-strength-metric.md and
+        # docs/wl-only-foundation.md for the motivating overnight
+        # 2026-04-22/23 analysis.
+        self._wl_drift = WlDriftMonitor()
+        # SVs currently tracked as WL-fixed by the drift monitor.
+        # Diffed against mw._state each epoch to drive note_fix /
+        # note_unfix — keeps monitor decoupled from the MW tracker's
+        # internals.
+        self._wl_drift_prev_fixed: set[str] = set()
         # Bead 4 — promotes ANCHORING → ANCHORED after Δaz ≥ 15°
         # with a clean false-fix window.  Solution-state RESOLVED count (below) reads
         # ANCHORED from the tracker instead of raw NL-fix count.
@@ -1911,6 +1926,59 @@ class AntPosEstThread(threading.Thread):
                     f2_hz = C / wl2
                     mw.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
 
+            # WL drift monitor: detect wrong WL integer commits via
+            # sustained post-fix MW residual drift.  Runs after MW
+            # updates so the residuals we ingest are current-epoch.
+            # Acting here (before NL attempt) keeps the NL path
+            # from seeing a suspect WL this epoch.
+            fixed_now = {sv for sv, st in mw._state.items() if st.get('fixed')}
+            for sv in fixed_now - self._wl_drift_prev_fixed:
+                self._wl_drift.note_fix(sv)
+            for sv in self._wl_drift_prev_fixed - fixed_now:
+                self._wl_drift.note_unfix(sv)
+            drift_actions: list[str] = []
+            for sv in list(fixed_now):
+                st = mw._state[sv]
+                f1, f2 = st.get('f1'), st.get('f2')
+                n_wl = st.get('n_wl')
+                if f1 is None or f2 is None or n_wl is None:
+                    continue
+                lambda_wl = C / (f1 - f2)
+                # Post-fix residual: fractional part of (mw_avg / λ_WL − N_WL).
+                # Zero when the integer commitment is consistent with
+                # subsequent observations; drifts away from zero when
+                # the commitment is wrong.
+                resid_cyc = st['mw_avg'] / lambda_wl - n_wl
+                ev = self._wl_drift.ingest(sv, resid_cyc)
+                if ev is not None:
+                    log.warning(
+                        "[WL_DRIFT] %s drift=%+.3fcyc > ±%.2f (n=%d, window=%dep): "
+                        "flushing MW, demoting to FLOATING",
+                        ev['sv'], ev['drift_cyc'], ev['threshold_cyc'],
+                        ev['n_samples'], ev['window_epochs'],
+                    )
+                    mw.reset(sv)
+                    self._wl_drift.note_unfix(sv)
+                    fixed_now.discard(sv)
+                    # Demote the per-SV state.  CONVERGING → FLOATING is
+                    # a legal edge in the lifecycle; ANCHORING/ANCHORED
+                    # shouldn't be reachable in wl-only mode but the
+                    # path is defensive.
+                    try:
+                        cur = self._sv_state.state(sv)
+                        if cur in (SvAmbState.CONVERGING,
+                                   SvAmbState.ANCHORING,
+                                   SvAmbState.ANCHORED):
+                            self._sv_state.transition(
+                                sv, SvAmbState.FLOATING,
+                                epoch=self._n_epochs,
+                                reason=f"wl_drift:{ev['drift_cyc']:+.2f}cyc",
+                            )
+                    except Exception:
+                        pass
+                    drift_actions.append(sv)
+            self._wl_drift_prev_fixed = fixed_now
+
             # NL resolution attempt (after warmup).  Reuse elevations
             # computed earlier this epoch for the slip monitor so the
             # AR elevation mask can gate candidates.
@@ -2097,12 +2165,22 @@ class AntPosEstThread(threading.Thread):
                     dztd_sigma_mm = math.sqrt(max(0.0,
                         filt.P[ztd_idx, ztd_idx])) * 1000.0
                     ztd_tag = f" ZTD={dztd_mm:+.0f}±{dztd_sigma_mm:.0f}mm"
+                # Lock-in strength: WL_fixed / σ_3d.  Unweighted first
+                # cut, per docs/position-strength-metric.md.  Logged
+                # for post-hoc analysis; not used as a decision gate
+                # (strength is orthogonal to correctness — high values
+                # can coincide with the biased-equilibrium trap).
+                wl_fixed_count = mw.n_fixed
+                strength = (float(wl_fixed_count) / sigma_3d
+                            if sigma_3d > 0 else 0.0)
+                strength_tag = f" strength={strength:.0f}"
                 log.info(
                     "  [AntPosEst %d] σ=%.3fm pos=(%.6f, %.6f, %.1f) "
-                    "n=%d amb=%d %s %s%s%s",
+                    "n=%d amb=%d %s %s%s%s%s",
                     self._n_epochs, sigma_3d, lat, lon, alt,
                     n_used, len(filt.sv_to_idx),
                     mw.summary(), nl.summary(), nav2_tag, ztd_tag,
+                    strength_tag,
                 )
                 # Full-precision NAV2 log line.  NAV2-PVT's native format is
                 # LLA; lat/lon at 1e-7 deg (~1 cm resolution at our latitude)
