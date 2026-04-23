@@ -86,6 +86,36 @@ def _put_in_anchored(tracker: SvStateTracker, sv: str,
                        elev_deg=elev_deg)
 
 
+class WlOnlyAttemptEarlyReturnTest(unittest.TestCase):
+    """WL-only mode: NarrowLaneResolver.attempt() must return an
+    empty dict without touching filter / mw_tracker state.
+
+    docs/wl-only-foundation.md: skip NL integer resolution entirely.
+    """
+
+    def test_attempt_returns_empty_dict(self):
+        resolver = NarrowLaneResolver(wl_only=True)
+        # The short-circuit fires before reading any argument, so
+        # None for both args is safe in this mode.  We still pass
+        # non-None stand-ins to mimic the real call shape.
+        result = resolver.attempt(_FakeFilter(n_states=10), mw_tracker=None,
+                                  elevations={'G01': 45.0},
+                                  ar_phase_bias_ok={'G01': True})
+        self.assertEqual(result, {})
+
+    def test_no_state_mutation(self):
+        """The resolver's internal state (_fixed, blacklist, epoch
+        counters) must not change when attempt() short-circuits."""
+        resolver = NarrowLaneResolver(wl_only=True)
+        resolver._epoch = 42
+        before_fixed = dict(resolver._fixed)
+        before_blacklist = dict(resolver._blacklist)
+        resolver.attempt(_FakeFilter(n_states=10), mw_tracker=None)
+        self.assertEqual(resolver._epoch, 42)
+        self.assertEqual(resolver._fixed, before_fixed)
+        self.assertEqual(resolver._blacklist, before_blacklist)
+
+
 class JoinTestTest(unittest.TestCase):
     """The join_test rejects candidates that would break anchors."""
 

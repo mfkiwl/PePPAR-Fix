@@ -642,6 +642,49 @@ class ZtdImpossibilityTripTest(unittest.TestCase):
         self.fail("ZTD trip should fire without a latch set")
 
 
+class WlOnlyClampTest(unittest.TestCase):
+    """WL-only mode: SvStateTracker refuses promotion past CONVERGING.
+
+    The NL resolver is separately gated off in WL-only mode so these
+    transitions shouldn't normally occur; the clamp is belt-and-
+    suspenders for any caller (bootstrap, monitors) that still tries.
+    """
+
+    def test_converging_to_anchoring_refused(self):
+        t = SvStateTracker(wl_only=True)
+        # Walk up to CONVERGING normally.
+        t.transition("G01", SvAmbState.FLOATING, epoch=10, reason="admit")
+        t.transition("G01", SvAmbState.CONVERGING, epoch=20, reason="wl_fix")
+        # Promotion to ANCHORING must be refused without mutation.
+        t.transition("G01", SvAmbState.ANCHORING, epoch=30, reason="nl_fix")
+        self.assertEqual(t.state("G01"), SvAmbState.CONVERGING)
+
+    def test_converging_to_anchored_refused(self):
+        t = SvStateTracker(wl_only=True)
+        t.transition("G01", SvAmbState.FLOATING, epoch=10, reason="admit")
+        t.transition("G01", SvAmbState.CONVERGING, epoch=20, reason="wl_fix")
+        t.transition("G01", SvAmbState.ANCHORED, epoch=30, reason="promoted")
+        self.assertEqual(t.state("G01"), SvAmbState.CONVERGING)
+
+    def test_demotion_still_works(self):
+        # WL-only must not break demotion paths — if a slip or squelch
+        # fires, the SV must still be able to leave CONVERGING.
+        t = SvStateTracker(wl_only=True)
+        t.transition("G01", SvAmbState.FLOATING, epoch=10, reason="admit")
+        t.transition("G01", SvAmbState.CONVERGING, epoch=20, reason="wl_fix")
+        t.transition("G01", SvAmbState.FLOATING, epoch=30, reason="slip")
+        self.assertEqual(t.state("G01"), SvAmbState.FLOATING)
+
+    def test_wl_only_default_off(self):
+        # Without the flag, the legal ANCHORING promotion works.
+        t = SvStateTracker()  # default wl_only=False
+        t.transition("G01", SvAmbState.FLOATING, epoch=10, reason="admit")
+        t.transition("G01", SvAmbState.CONVERGING, epoch=20, reason="wl_fix")
+        t.transition("G01", SvAmbState.ANCHORING, epoch=30,
+                     az_deg=180.0, reason="nl_fix")
+        self.assertEqual(t.state("G01"), SvAmbState.ANCHORING)
+
+
 class ZtdCyclingEscalationTest(unittest.TestCase):
     """When ZTD trip fires repeatedly inside the escalation window
     without the filter escaping, evaluate() escalates the reason

@@ -109,7 +109,7 @@ class AntPosEst(StateMachine):
     The state machine is the natural home.
     """
 
-    def __init__(self):
+    def __init__(self, wl_only: bool = False):
         super().__init__("AntPosEst", AntPosEstState.SURVEYING)
         self.sigma_m = None
         self.n_wl_fixed = 0
@@ -117,8 +117,27 @@ class AntPosEst(StateMachine):
         self.n_sv_total = 0
         self.reached_anchoring = False
         self.reached_anchored = False
+        # WL-only mode: clamp filter lifecycle at CONVERGING.  Any
+        # promotion to ANCHORING / ANCHORED is silently refused
+        # (logged at INFO, returns without mutation).  Both latches
+        # stay False for the life of the run.  See
+        # docs/wl-only-foundation.md.  Default False preserves the
+        # full lifecycle.
+        self._wl_only = bool(wl_only)
 
     def transition(self, new_state, reason=""):
+        # WL-only clamp: silently refuse promotion into the NL-fixed
+        # filter states.  The NL resolver is separately gated in
+        # WL-only mode so this branch should not normally fire; the
+        # clamp is belt-and-suspenders for any residual caller
+        # (bootstrap, monitors) that tries to push past CONVERGING.
+        if self._wl_only and new_state in (AntPosEstState.ANCHORING,
+                                           AntPosEstState.ANCHORED):
+            log.info(
+                "[WL-ONLY] refusing AntPosEst %s → %s (wl_only gate, reason=%s)",
+                self.state.value, new_state.value, reason or "?",
+            )
+            return
         super().transition(new_state, reason)
         # Latch on first entry to each milestone state.  Base-class
         # ``transition`` emits the ``[STATE]`` log line; we don't

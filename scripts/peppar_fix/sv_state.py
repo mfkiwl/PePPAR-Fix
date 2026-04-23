@@ -161,8 +161,14 @@ class SvStateTracker:
     the log line and in the history record.
     """
 
-    def __init__(self):
+    def __init__(self, wl_only: bool = False):
         self._records: dict[str, SvRecord] = {}
+        # WL-only mode: clamp per-SV lifecycle at CONVERGING.  Any
+        # promotion to ANCHORING / ANCHORED is silently refused
+        # (logged at INFO, returns without mutation).  See
+        # docs/wl-only-foundation.md.  Default False preserves the
+        # full lifecycle.
+        self._wl_only = bool(wl_only)
 
     # ── Lookup / iteration ──────────────────────────────────────── #
 
@@ -238,6 +244,17 @@ class SvStateTracker:
         if elev_deg is not None:
             rec.last_elev_deg = float(elev_deg)
         if rec.state == to:
+            return
+        # WL-only clamp: silently refuse promotion into the NL-fixed
+        # states.  The resolver is separately gated off in WL-only
+        # mode so this branch should not normally fire; the clamp is
+        # belt-and-suspenders for any residual caller (monitors,
+        # tests) that tries to push past the WL terminus.
+        if self._wl_only and to in (SvAmbState.ANCHORING, SvAmbState.ANCHORED):
+            log.info(
+                "[WL-ONLY] refusing %s: %s → %s (wl_only gate, reason=%s)",
+                sv, rec.state.value, to.value, reason or "?",
+            )
             return
         edge = (rec.state, to)
         if edge not in _LEGAL_EDGES:

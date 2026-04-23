@@ -276,7 +276,8 @@ class NarrowLaneResolver:
                  strong_anchor_min=3,
                  ape_state_machine=None,
                  sv_state: SvStateTracker | None = None,
-                 nl_diag: NlDiagLogger | None = None):
+                 nl_diag: NlDiagLogger | None = None,
+                 wl_only: bool = False):
         self.frac_threshold = frac_threshold    # |N1_frac| < this to fix
         self.sigma_threshold = sigma_threshold  # sigma_N1 < this to fix
         # AR-specific elevation mask.  Separate from the PPP measurement
@@ -387,6 +388,14 @@ class NarrowLaneResolver:
         # [NL_DIAG] line per SV per attempt + a [NL_DIAG_BATCH] line
         # per LAMBDA attempt.  Caller toggles via --nl-diag.
         self._nl_diag = nl_diag
+        # WL-only mode: ``attempt()`` early-returns without running
+        # LAMBDA, rounding, or re-constraint.  The MW tracker and
+        # FLOATING → CONVERGING promotion still run normally, so
+        # WL ambiguities get fixed and constrain the float IF
+        # solution — just no NL integer commit happens.  See
+        # docs/wl-only-foundation.md for motivation.  Default False
+        # preserves the full NL pipeline.
+        self._wl_only = bool(wl_only)
 
     def tick(self):
         """Advance the resolver's epoch counter — call once per observation epoch.
@@ -438,6 +447,14 @@ class NarrowLaneResolver:
             dict of newly fixed satellites: {sv: n1_int}
         """
         newly_fixed = {}
+        # WL-only mode: skip NL integer resolution entirely.  No
+        # LAMBDA search, no rounding, no re-constraint of already-
+        # fixed ambiguities (none exist).  WL fixes and FLOATING →
+        # CONVERGING promotion happen in the MW path outside this
+        # method, so the float IF solution still benefits from the
+        # WL constraint.  See docs/wl-only-foundation.md.
+        if self._wl_only:
+            return newly_fixed
         elevations = elevations or {}
         elevations_for_diag = elevations  # alias for clarity below
         diag = self._nl_diag

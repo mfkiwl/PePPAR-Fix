@@ -111,7 +111,63 @@ terminal state in WL-only mode; logs still say "CONVERGING".
 
 ## Validation plan
 
-### Stability runs (days, not hours)
+Two independent yardsticks run in parallel: **lab stability**
+(our own ARP, multi-night) and **PRIDE regression** (ITRF14 truth
+on a published IGS dataset).  Passing both means the foundation
+is both stable over time AND accurate against an external
+reference.  Disagreement between them isolates cause: lab-only
+failure = multipath / SSR / antenna; PRIDE-only failure = code
+bug exposed by a geometry or correction profile we don't see in
+the lab.
+
+### PRIDE regression (absolute accuracy)
+
+The regression harness at `scripts/regression/` runs float-PPP
+against PRIDE's bundled ABMF 2020 DOY 001 dataset (ground truth =
+IGS weekly SINEX coordinate).  Current result: **2.66 m 3D @ 16 h**
+with broadcast NAV + float PPP — meets gate 1 (< 5 m) but not
+cm-class.  Critically, **no AR (WL or NL) is wired into the
+harness yet** — the runner header documents `MW + LAMBDA + state
+machine` as explicit TODOs.
+
+WL-only is therefore the **first** AR tier to add to the harness,
+not just a `--wl-only` flag flipping through existing code.  Work
+breakdown:
+
+1. Wire `MelbourneWubbenaTracker` into the per-epoch loop so WL
+   ambiguities get estimated.  ~30 LOC.
+2. Feed fixed WL integers back as equality constraints on the
+   filter's IF ambiguity state.  ~50 LOC.
+3. Add `--wl-only` flag (at this point it's a no-op because
+   NL is never attempted, but keeps CLI shape parallel to the
+   engine).
+4. Gate on WUM OSB biases — already loadable via
+   `bias_sinex_reader`, just not applied in the runner today.
+
+Target once wired: **WL-only IF position on ABMF 2020 DOY 001
+(24 h static) ≤ 20 cm 3D vs ITRF14** with broadcast NAV + WUM
+OSB.  10× better than the current float-only number.
+
+**CI gate** once passing: any PR that regresses the WL-only ABMF
+number by more than 50% fails.
+
+This is a follow-up to the engine-side `--wl-only` flag, not
+part of the same PR.  Lab-stability data is the first yardstick;
+PRIDE accuracy comes online once the harness gets the AR wiring
+it currently lacks.
+
+### Lab stability (over time)
+
+- **Night 1**: 1 host (clkPoC3), shared antenna, `--wl-only
+  --systems gps,gal,bds`.  Monitor: how many SVs stay in CONVERGING
+  through the night?  Any lock drops?  Position stability on the
+  known ARP?
+- **Night 2** (if night 1 clean): 2 hosts (clkPoC3 + MadHat), same
+  antenna via splitter.  Measure cross-host position agreement.
+  Hypothesis: sub-10cm horizontal at all times without any
+  convergence drama.
+- **Night 3+**: full L5 fleet.  48-hour run.  Measure daily cycle
+  effects, SSR outage recovery, cycle slip handling.
 
 - **Night 1**: 1 host (clkPoC3), shared antenna, `--wl-only
   --systems gps,gal,bds`.  Monitor: how many SVs stay in CONVERGING

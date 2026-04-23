@@ -963,6 +963,7 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
     nl_resolver = NarrowLaneResolver(
         ar_elev_mask_deg=args.ar_elev_mask, nl_diag=nl_diag,
         join_test_enabled=bool(getattr(args, "join_test", True)),
+        wl_only=bool(getattr(args, "wl_only", False)),
     )
     slip_monitor = CycleSlipMonitor(
         mw_tracker=mw_tracker, csv_writer=_slip_csv_writer())
@@ -1288,8 +1289,12 @@ class AntPosEstThread(threading.Thread):
                  nav2_store=None, nav2_tension_threshold=5.0,
                  nav2_alarm_count=3, systems=None,
                  nl_diag_enabled=False,
-                 join_test_enabled=True):
+                 join_test_enabled=True,
+                 wl_only=False):
         super().__init__(daemon=True, name="AntPosEst")
+        # WL-only mode: clamp the lifecycle at CONVERGING, skip NL
+        # resolution.  See docs/wl-only-foundation.md.
+        self._wl_only = bool(wl_only)
         self.obs_queue = queue.Queue(maxsize=50)
         self._corrections = corrections
         self._stop = stop_event
@@ -1310,7 +1315,13 @@ class AntPosEstThread(threading.Thread):
                         or NarrowLaneResolver(
                             ar_elev_mask_deg=ar_elev_mask_deg,
                             join_test_enabled=join_test_enabled,
-                            ape_state_machine=self._ape_sm))
+                            ape_state_machine=self._ape_sm,
+                            wl_only=self._wl_only))
+            # If resolver was inherited from bootstrap, honour the
+            # wl_only flag even if bootstrap was built before we
+            # knew about it (belt-and-suspenders).
+            if self._wl_only:
+                self._nl._wl_only = True
             # Resolver inherited from bootstrap: patch in the
             # ape_state_machine reference retroactively so the
             # thin-anchor / strong-anchor regime selection works
@@ -1336,6 +1347,7 @@ class AntPosEstThread(threading.Thread):
                 nl_diag=NlDiagLogger(enabled=bool(nl_diag_enabled)),
                 join_test_enabled=join_test_enabled,
                 ape_state_machine=self._ape_sm,
+                wl_only=self._wl_only,
             )
             log.info("AntPosEstThread: fresh PPPFilter at known position (warm start)")
 
@@ -1347,7 +1359,7 @@ class AntPosEstThread(threading.Thread):
         # Per-SV ambiguity state machine + the three monitors that
         # replace the old PostFixResidualMonitor's L1/L2/L3 ladder.
         # See docs/sv-lifecycle-and-pfr-split.md.
-        self._sv_state = SvStateTracker()
+        self._sv_state = SvStateTracker(wl_only=self._wl_only)
         # MW / NL may be inherited from bootstrap — attach the tracker
         # so their fix-time and unfix-time hooks drive transitions.  For
         # any pre-existing fixes carried over, pre-populate the tracker
@@ -5056,7 +5068,7 @@ def run(args):
     mute_controller.install_signal_handlers()
 
     # State machines for observability (log transitions, don't control flow)
-    ape_sm = AntPosEst()
+    ape_sm = AntPosEst(wl_only=bool(getattr(args, "wl_only", False)))
     dfe_sm = DOFreqEst()
 
     def on_signal(signum, frame):
@@ -5347,6 +5359,7 @@ def run(args):
             ar_elev_mask_deg=args.ar_elev_mask,
             nl_diag_enabled=bool(getattr(args, "nl_diag", False)),
             join_test_enabled=bool(getattr(args, "join_test", True)),
+            wl_only=bool(getattr(args, "wl_only", False)),
         )
         ape_thread.start()
 
@@ -5569,6 +5582,14 @@ Two-phase operation:
                           "isolates the join test's effect from other "
                           "branch-carried changes.  See "
                           "project_to_main_defensive_mechanisms_20260421.md.")
+    pos.add_argument("--wl-only", action="store_true",
+                     help="WL-only mode: skip NL integer resolution "
+                          "entirely.  MW tracker still fixes WL "
+                          "ambiguities; the float IF solution uses "
+                          "WL-fixed + float NL.  SvAmbState and "
+                          "AntPosEstState lifecycles are clamped at "
+                          "CONVERGING.  Foundation experiment — see "
+                          "docs/wl-only-foundation.md.")
     pos.add_argument("--timeout", type=int, default=3600,
                      help="Bootstrap timeout in seconds (default: 3600)")
     pos.add_argument("--watchdog-threshold", type=float, default=0.5,

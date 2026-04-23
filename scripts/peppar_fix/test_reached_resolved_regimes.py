@@ -175,6 +175,48 @@ class ReachedAnchoredLatchTest(unittest.TestCase):
         self.assertFalse(sm.reached_anchored)
 
 
+class WlOnlyAntPosEstClampTest(unittest.TestCase):
+    """WL-only mode: AntPosEst refuses promotion past CONVERGING.
+
+    Both latches must stay False for the life of the run.  See
+    docs/wl-only-foundation.md.
+    """
+
+    def test_anchoring_refused_state_unchanged(self):
+        sm = AntPosEst(wl_only=True)
+        sm.transition(AntPosEstState.VERIFYING, "test")
+        sm.transition(AntPosEstState.CONVERGING, "test")
+        # Attempt to promote past CONVERGING — clamp must refuse.
+        sm.transition(AntPosEstState.ANCHORING, "test")
+        self.assertEqual(sm.state, AntPosEstState.CONVERGING)
+
+    def test_anchored_refused_state_unchanged(self):
+        sm = AntPosEst(wl_only=True)
+        sm.transition(AntPosEstState.VERIFYING, "test")
+        sm.transition(AntPosEstState.CONVERGING, "test")
+        sm.transition(AntPosEstState.ANCHORED, "test")
+        self.assertEqual(sm.state, AntPosEstState.CONVERGING)
+
+    def test_latches_stay_false(self):
+        """Even if callers try every path into ANCHORING/ANCHORED,
+        neither latch should set in WL-only mode."""
+        sm = AntPosEst(wl_only=True)
+        sm.transition(AntPosEstState.VERIFYING, "test")
+        sm.transition(AntPosEstState.CONVERGING, "test")
+        sm.transition(AntPosEstState.ANCHORING, "test")
+        sm.transition(AntPosEstState.ANCHORED, "test")
+        self.assertFalse(sm.reached_anchoring)
+        self.assertFalse(sm.reached_anchored)
+
+    def test_surveying_to_verifying_to_converging_still_works(self):
+        """WL-only must not break the pre-CONVERGING lifecycle."""
+        sm = AntPosEst(wl_only=True)
+        sm.transition(AntPosEstState.VERIFYING, "test")
+        self.assertEqual(sm.state, AntPosEstState.VERIFYING)
+        sm.transition(AntPosEstState.CONVERGING, "test")
+        self.assertEqual(sm.state, AntPosEstState.CONVERGING)
+
+
 # ── Regime selection ─────────────────────────────────────────────── #
 
 class RegimeSelectionTest(unittest.TestCase):
