@@ -13,14 +13,14 @@ class WlDriftMonitorTest(unittest.TestCase):
     def test_no_event_when_not_fixed(self):
         """ingest() on an SV that was never note_fix'd is silent."""
         m = WlDriftMonitor(window_epochs=5, threshold_cyc=0.15,
-                           min_samples=3)
+                           min_samples=3, warmup_epochs=0)
         for _ in range(10):
             self.assertIsNone(m.ingest("G01", 0.30))  # big drift, ignored
 
     def test_no_event_below_min_samples(self):
         """Needs ≥ min_samples before any event can fire."""
         m = WlDriftMonitor(window_epochs=10, threshold_cyc=0.10,
-                           min_samples=5)
+                           min_samples=5, warmup_epochs=0)
         m.note_fix("G01")
         for _ in range(4):
             # Persistent +0.3 cyc drift — well above threshold —
@@ -29,7 +29,7 @@ class WlDriftMonitorTest(unittest.TestCase):
 
     def test_fires_when_rolling_mean_exceeds_threshold(self):
         m = WlDriftMonitor(window_epochs=10, threshold_cyc=0.10,
-                           min_samples=5)
+                           min_samples=5, warmup_epochs=0)
         m.note_fix("G01")
         ev = None
         # Five samples at 0.30 cycles → rolling mean = 0.30 > 0.10.
@@ -43,7 +43,7 @@ class WlDriftMonitorTest(unittest.TestCase):
     def test_does_not_fire_when_samples_near_zero(self):
         """Correct WL integer: MW residual hovers near 0, no event."""
         m = WlDriftMonitor(window_epochs=10, threshold_cyc=0.10,
-                           min_samples=5)
+                           min_samples=5, warmup_epochs=0)
         m.note_fix("G01")
         samples = [0.02, -0.03, 0.01, -0.02, 0.04, -0.01, 0.02]
         for s in samples:
@@ -53,7 +53,7 @@ class WlDriftMonitorTest(unittest.TestCase):
         """Single large sample averaged with many near-zero samples
         stays within threshold — drift must be sustained."""
         m = WlDriftMonitor(window_epochs=10, threshold_cyc=0.10,
-                           min_samples=5)
+                           min_samples=5, warmup_epochs=0)
         m.note_fix("G01")
         # One +1.0 spike + several zero samples: rolling mean ≈ 0.10.
         # With window 10 and five zeros + one spike, mean=1/6 ≈ 0.17.
@@ -65,7 +65,7 @@ class WlDriftMonitorTest(unittest.TestCase):
         # Just below threshold is safe; just above fires.  Construct
         # a case where mean is well below:
         m2 = WlDriftMonitor(window_epochs=20, threshold_cyc=0.10,
-                            min_samples=5)
+                            min_samples=5, warmup_epochs=0)
         m2.note_fix("G02")
         for _ in range(19):
             ev = m2.ingest("G02", 0.0)
@@ -80,7 +80,7 @@ class WlDriftMonitorTest(unittest.TestCase):
         the drift saturates.
         """
         m = WlDriftMonitor(window_epochs=30, threshold_cyc=0.15,
-                           min_samples=15)
+                           min_samples=15, warmup_epochs=0)
         m.note_fix("E01")
         # Simulate gradual drift from 0 → 0.5 cycles over 20 epochs,
         # then hold.  Monitor should catch it partway through.
@@ -96,11 +96,11 @@ class WlDriftMonitorTest(unittest.TestCase):
 
     def test_note_fix_is_idempotent(self):
         """Re-notifying an already-tracked SV clears its history
-        (fresh window after re-fix).  This models the case where
-        MW was reset externally and re-fixed without going through
-        the monitor's note_unfix path."""
+        and restarts the warmup count (fresh window after re-fix).
+        Models the case where MW was reset externally and re-fixed
+        without going through the monitor's note_unfix path."""
         m = WlDriftMonitor(window_epochs=10, threshold_cyc=0.10,
-                           min_samples=5)
+                           min_samples=5, warmup_epochs=0)
         m.note_fix("G01")
         for _ in range(5):
             m.ingest("G01", 0.30)
@@ -111,7 +111,7 @@ class WlDriftMonitorTest(unittest.TestCase):
 
     def test_note_unfix_stops_tracking(self):
         m = WlDriftMonitor(window_epochs=10, threshold_cyc=0.10,
-                           min_samples=5)
+                           min_samples=5, warmup_epochs=0)
         m.note_fix("G01")
         m.ingest("G01", 0.30)
         m.note_unfix("G01")
@@ -121,7 +121,7 @@ class WlDriftMonitorTest(unittest.TestCase):
 
     def test_multiple_svs_independent(self):
         m = WlDriftMonitor(window_epochs=5, threshold_cyc=0.10,
-                           min_samples=3)
+                           min_samples=3, warmup_epochs=0)
         m.note_fix("G01")
         m.note_fix("G02")
         # G01 drifts, G02 stays clean.
@@ -134,11 +134,107 @@ class WlDriftMonitorTest(unittest.TestCase):
 
     def test_summary_reports_tracked_count(self):
         m = WlDriftMonitor(window_epochs=30, threshold_cyc=0.15,
-                           min_samples=15)
+                           min_samples=15, warmup_epochs=0)
         self.assertIn("tracking 0", m.summary())
         m.note_fix("G01")
         m.note_fix("E05")
         self.assertIn("tracking 2", m.summary())
+
+
+class WarmupBehaviorTest(unittest.TestCase):
+    """Warmup period suppresses the first N ingest calls post-fix.
+
+    The MW tracker's EMA (tau ≈ 60) takes ~30 epochs to settle to
+    the post-fix mean even when the integer commitment is correct
+    (fixes happen at |frac| < 0.15, not exactly 0).  Ingesting
+    during settling produces drift signals from correct integers
+    that the monitor cannot distinguish from wrong-integer drift.
+    Warmup suppresses that ambiguity.  Day0423a showed ~270 drift
+    events per host in 1h20m without warmup — 90% false positives.
+    """
+
+    def test_default_warmup_is_30(self):
+        """Default value matches MW EMA settling time."""
+        m = WlDriftMonitor()
+        self.assertEqual(m._warmup, 30)
+
+    def test_default_threshold_is_0_25(self):
+        """Loosened from 0.15 after day0423a false-positive pattern.
+        Still far below wrong-by-1 cyc (1.0 cyc) but tolerant of
+        MW residual noise during settling."""
+        m = WlDriftMonitor()
+        self.assertAlmostEqual(m._threshold, 0.25)
+
+    def test_warmup_suppresses_drift_during_settling(self):
+        """During the warmup window, even a 1.0 cyc drift returns
+        no event.  Monitor starts ingesting after warmup."""
+        m = WlDriftMonitor(window_epochs=10, threshold_cyc=0.20,
+                           min_samples=5, warmup_epochs=10)
+        m.note_fix("G01")
+        # Ten large-drift samples during warmup: no event.
+        for _ in range(10):
+            self.assertIsNone(m.ingest("G01", 1.0))
+
+    def test_fires_after_warmup_if_drift_persists(self):
+        """A persistent wrong-integer drift past the warmup period
+        fires as expected once min_samples accumulate post-warmup."""
+        m = WlDriftMonitor(window_epochs=10, threshold_cyc=0.20,
+                           min_samples=5, warmup_epochs=10)
+        m.note_fix("G01")
+        # Warmup: first 10 samples ignored.
+        for _ in range(10):
+            self.assertIsNone(m.ingest("G01", 1.0))
+        # Post-warmup: first 5 samples fill min_samples.
+        ev = None
+        for _ in range(5):
+            ev = m.ingest("G01", 1.0)
+        self.assertIsNotNone(ev)
+        self.assertAlmostEqual(ev['drift_cyc'], 1.0)
+
+    def test_settling_followed_by_stability_no_event(self):
+        """Realistic correct-integer scenario: large residual during
+        warmup (fix at frac=0.14, EMA settling), then near-zero once
+        settled.  Monitor must NOT fire.  This is the false-positive
+        case the warmup addresses."""
+        m = WlDriftMonitor(window_epochs=10, threshold_cyc=0.20,
+                           min_samples=5, warmup_epochs=15)
+        m.note_fix("G01")
+        # Settling: residual decays from 0.14 toward 0 over 15 epochs.
+        for i in range(15):
+            s = 0.14 - 0.14 * (i / 14)  # 0.14 → 0
+            self.assertIsNone(m.ingest("G01", s))
+        # Post-warmup: residuals hover near 0, no event.
+        for _ in range(10):
+            self.assertIsNone(m.ingest("G01", 0.02))
+
+    def test_warmup_resets_on_re_note_fix(self):
+        """note_fix after an earlier fix restarts warmup.  Prior
+        samples don't carry over."""
+        m = WlDriftMonitor(window_epochs=10, threshold_cyc=0.20,
+                           min_samples=5, warmup_epochs=5)
+        m.note_fix("G01")
+        # Run through warmup + collect samples.
+        for _ in range(5):
+            m.ingest("G01", 0.0)
+        for _ in range(5):
+            m.ingest("G01", 0.05)
+        # Re-fix — warmup restarts.
+        m.note_fix("G01")
+        # First 5 samples after re-fix are ignored again.
+        for _ in range(5):
+            self.assertIsNone(m.ingest("G01", 1.0))
+
+    def test_note_unfix_clears_ingest_count(self):
+        """note_unfix must clean up the ingest counter too, not just
+        the history deque — otherwise a later note_fix followed by
+        ingest could read a stale count."""
+        m = WlDriftMonitor(window_epochs=10, threshold_cyc=0.20,
+                           min_samples=5, warmup_epochs=5)
+        m.note_fix("G01")
+        for _ in range(3):
+            m.ingest("G01", 0.0)
+        m.note_unfix("G01")
+        self.assertNotIn("G01", m._ingest_count)
 
 
 if __name__ == "__main__":

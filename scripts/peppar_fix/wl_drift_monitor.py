@@ -81,29 +81,51 @@ class WlDriftMonitor:
     def __init__(
         self,
         window_epochs: int = 30,
-        threshold_cyc: float = 0.15,
+        threshold_cyc: float = 0.25,
         min_samples: int = 15,
+        warmup_epochs: int = 30,
     ) -> None:
         self._window = int(window_epochs)
         self._threshold = float(threshold_cyc)
         self._min_samples = int(min_samples)
+        # Post-fix warmup: don't feed the rolling window for this
+        # many ingest calls after ``note_fix``.  The MW tracker's EMA
+        # (tau ≈ 60 epochs) takes ~30 epochs to settle to the
+        # post-fix mean even when the integer commitment is correct,
+        # because fixes happen at ``|frac| < 0.15`` rather than
+        # exactly zero.  Ingesting during that settling window
+        # produces correct-integer residuals that legitimately
+        # drift from 0.14 → 0 — indistinguishable from wrong-
+        # integer drift without context.  Warmup suppresses the
+        # ambiguity.  Day0423a showed ~270 drift events per host
+        # in 1h20m without warmup (3.4/min) — 90% false positives
+        # kicking marginal-frac fixes out of the set faster than
+        # they could re-acquire.
+        self._warmup = int(warmup_epochs)
         # sv → deque of cycles.  Present ⇔ SV is being monitored
         # (fixed, post-note_fix, pre-note_unfix).
         self._hist: dict[str, deque[float]] = {}
+        # sv → count of ingest calls received since note_fix.  Used
+        # to skip the warmup window.  Reset on note_fix, cleared on
+        # note_unfix.
+        self._ingest_count: dict[str, int] = {}
 
     # ── Lifecycle ───────────────────────────────────────────────── #
 
     def note_fix(self, sv: str) -> None:
         """Start tracking ``sv`` — call when its WL integer is
         committed.  Idempotent: re-notifying an already-tracked SV
-        clears its history (fresh window after re-fix)."""
+        clears its history and restarts the warmup count (fresh
+        window after re-fix)."""
         self._hist[sv] = deque(maxlen=self._window)
+        self._ingest_count[sv] = 0
 
     def note_unfix(self, sv: str) -> None:
         """Stop tracking ``sv`` — call when its MW state is reset,
         the SV is dropped, or the drift monitor itself flagged it
         and the caller acted."""
         self._hist.pop(sv, None)
+        self._ingest_count.pop(sv, None)
 
     # ── Observation intake ──────────────────────────────────────── #
 
@@ -124,6 +146,12 @@ class WlDriftMonitor:
         """
         h = self._hist.get(sv)
         if h is None:
+            return None
+        # Warmup: count the call, but don't feed it to the window
+        # until the EMA has had time to settle past the fix-time
+        # fractional offset.
+        self._ingest_count[sv] = self._ingest_count.get(sv, 0) + 1
+        if self._ingest_count[sv] <= self._warmup:
             return None
         h.append(float(residual_cyc))
         if len(h) < self._min_samples:
