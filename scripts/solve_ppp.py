@@ -59,7 +59,19 @@ IF_WL = {
 
 # Measurement noise (meters)
 SIGMA_P_IF = 3.0
-SIGMA_PHI_IF = 0.03
+# σ_phi_IF 0.03 → 0.30 on 2026-04-23 following Bravo's harness tuning
+# sweep on ABMF 2020/001 (project_to_main_filter_tuning_result_20260423).
+# 0.03 is thermal-noise-only; real observation-model residuals (PCVs,
+# wind-up, GMF mapping, tides) inflate effective phase variance by an
+# order of magnitude.  0.30 brings GAL+BDS Q2 ratio (reported σ /
+# empirical error) from 5.8× (overconfident) to 1.28× (near-honest),
+# with no final-accuracy regression in any geometry tested.  Engine Q2
+# measurement on today's lab data showed 10-250× overconfidence at
+# σ_phi=0.03 (project_to_bravo_engine_q2_fyi_20260423); expected drop
+# to single digits after this change.  See
+# docs/position-strength-metric.md and
+# feedback_math_check_and_set_ceiling.md for why σ-honesty matters.
+SIGMA_PHI_IF = 0.30
 
 ELEV_MASK = 10.0  # degrees.  Tried 15° on 2026-04-17: with GAL-only the SV count dropped to 6/epoch (from ~8–10 at 10°) and LAMBDA couldn't fix NL at all — all three hosts went into persistent NAV2-reset cycling.  Low-elevation SVs do cause wrong-integer poisoning, but the remedy can't be a harder hard cut on SV-limited runs.  Next try: elevation-dependent measurement weighting (already partially present via `cno_factor * elev_factor` in SIGMA_P_IF weighting) or per-SV exclusion in the NL resolver rather than the observation stream.
 BDS_MIN_PRN = 19  # Exclude BDS-2 GEO/IGSO
