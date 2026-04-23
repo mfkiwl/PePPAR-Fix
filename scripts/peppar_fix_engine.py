@@ -5155,6 +5155,23 @@ def run(args):
     from peppar_fix.receiver import ensure_receiver_ready
     port_type = getattr(args, 'port_type', 'USB') or 'USB'
     systems_for_check = set(args.systems.split(',')) if args.systems else {'gps', 'gal'}
+    # Single-constellation + smooth-precise-clocks filter degeneracy
+    # warning.  See project_to_main_pride_gps_filter_degeneracy_20260423
+    # and the --systems help text.  The filter's (rx_clk, ZTD,
+    # common-ambiguity) mode is near-singular under these conditions;
+    # a second constellation's separate clock state breaks it.
+    # Broadcast-only runs are not susceptible because NAV page-
+    # boundary clock discontinuities inject the rank information
+    # that SSR smooth interpolation lacks.
+    if len(systems_for_check) < 2 and args.ssr_mount:
+        log.warning(
+            "Single-constellation run (%s) with SSR corrections (%s) is "
+            "subject to a near-singular filter mode where rx_clk, ZTD, and "
+            "common-ambiguity drift together.  Recommend ≥ 2 constellations "
+            "(gps,gal or gps,gal,bds).  Continuing per explicit --systems "
+            "request; monitor ZTD and altitude for drift.",
+            ','.join(sorted(systems_for_check)), args.ssr_mount,
+        )
     # If --receiver was explicitly set, force that driver (skip auto-detect).
     # args.receiver is None when unset (default applied later in main()).
     forced = get_driver(args.receiver) if args.receiver is not None else None
@@ -5723,7 +5740,18 @@ Two-phase operation:
     # GNSS
     gnss = ap.add_argument_group("GNSS")
     gnss.add_argument("--systems", default=None,
-                      help="GNSS systems (default: gps,gal,bds)")
+                      help="GNSS systems (default: gps,gal,bds).  Comma-"
+                           "separated list drawn from {gps,gal,bds}.  "
+                           "WARNING: single-constellation runs with smooth "
+                           "precise clocks (SSR-orbit+clock or SP3+CLK) are "
+                           "subject to a near-singular filter mode where "
+                           "(rx_clk, ZTD, common-ambiguity) drift together "
+                           "with zero residual.  At least 2 constellations "
+                           "provide the separate clock state needed to break "
+                           "the degeneracy.  Broadcast-only (no SSR) is not "
+                           "affected — NAV page-boundary clock discontinuities "
+                           "inject the rank information.  See "
+                           "project_to_main_pride_gps_filter_degeneracy_20260423.")
     gnss.add_argument("--leap", type=int, default=18,
                       help="GPS-UTC leap seconds (default: 18)")
     gnss.add_argument("--tai-minus-gps", type=int, default=19,
