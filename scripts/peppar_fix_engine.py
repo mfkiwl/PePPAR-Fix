@@ -6662,17 +6662,15 @@ Two-phase operation:
     # σ_phi / σ_pr overrides — set the module-level globals in
     # solve_ppp before any PPPFilter is constructed.  Cherry-picked
     # from harness commit 43e25d7; same consumer hooks.  See Bravo's
-    # ABMF sweep memo for the diagnostic motivation.
+    # ABMF sweep memo for the diagnostic motivation.  No log here —
+    # logging.basicConfig hasn't fired yet at this point in main();
+    # the visible confirmation log line lives after basicConfig below.
     if args.sigma_phi_if is not None:
         import solve_ppp as _spp
         _spp._SIGMA_PHI_IF_OVERRIDE = float(args.sigma_phi_if)
-        log.info(f"σ_phi_IF override: {args.sigma_phi_if:g} m "
-                 f"(default 0.03 m)")
     if args.sigma_pr_if is not None:
         import solve_ppp as _spp
         _spp._SIGMA_P_IF_OVERRIDE = float(args.sigma_pr_if)
-        log.info(f"σ_pr_IF override: {args.sigma_pr_if:g} m "
-                 f"(default 3.0 m)")
     if args.ar_elev_mask is None:
         args.ar_elev_mask = 25.0
     if args.do_type is None:
@@ -6750,6 +6748,15 @@ Two-phase operation:
 
     if getattr(args, '_host_config_path', None):
         log.info("Host config: %s", args._host_config_path)
+
+    # σ_phi / σ_pr override visibility (the override itself fires
+    # earlier in main(), before basicConfig).
+    if args.sigma_phi_if is not None:
+        log.info(f"σ_phi_IF override: {args.sigma_phi_if:g} m "
+                 f"(default 0.03 m)")
+    if args.sigma_pr_if is not None:
+        log.info(f"σ_pr_IF override: {args.sigma_pr_if:g} m "
+                 f"(default 3.0 m)")
 
     # Peer-bus initialization (optional).  Publishes no-op until the
     # first call site fires; stays no-op for entire run when
