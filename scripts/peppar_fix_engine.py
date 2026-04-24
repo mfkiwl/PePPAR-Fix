@@ -2357,7 +2357,7 @@ class AntPosEstThread(threading.Thread):
                 worst_tag = (f" worstσ={nm_sigma:.1f}m"
                              if nm_sigma is not None else "")
                 log.info(
-                    "  [AntPosEst %d] positionσ=%.3fm pos=(%.6f, %.6f, %.1f) "
+                    "  [AntPosEst %d] positionσ=%.3fm pos=(%.8f, %.8f, %.3f) "
                     "n=%d amb=%d %s %s%s%s%s%s%s%s%s",
                     self._n_epochs, sigma_3d, lat, lon, alt,
                     n_used, len(filt.sv_to_idx),
