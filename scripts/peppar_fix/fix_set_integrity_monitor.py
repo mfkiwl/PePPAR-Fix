@@ -108,6 +108,10 @@ class FixSetIntegrityMonitor:
         ztd_sustained_epochs: int = 60,
         ztd_escalate_threshold: int = 2,
         ztd_escalate_window_epochs: int = 1200,
+        pos_consensus_threshold_m: float = 0.20,
+        pos_consensus_sustained_epochs: int = 30,
+        ztd_consensus_threshold_m: float = 0.10,
+        ztd_consensus_sustained_epochs: int = 60,
     ) -> None:
         self._tracker = tracker
         # Reference to AntPosEst state machine — used to read the
@@ -154,6 +158,24 @@ class FixSetIntegrityMonitor:
         self._ztd_escalate_threshold = int(ztd_escalate_threshold)
         self._ztd_escalate_window_epochs = int(ztd_escalate_window_epochs)
         self._ztd_trip_history: list[int] = []
+        # Fleet consensus triggers (Part 2 of
+        # docs/fleet-consensus-monitors.md).  Fire earlier than the
+        # single-host physical-envelope monitors (ztd_impossible at
+        # 700 mm absolute vs. ztd_consensus at 100 mm relative to the
+        # cohort median) — tens-of-mm vs. hundreds-of-mm scale, so
+        # we catch null-mode excursions minutes to tens of minutes
+        # earlier on shared-antenna / shared-site cohorts.  Null
+        # when the delta is None (no cohort available — either no
+        # peers, or single-host run); monitor silently skips those
+        # paths and the engine behaves exactly as before.
+        self._pos_consensus_threshold_m = float(pos_consensus_threshold_m)
+        self._pos_consensus_sustained_epochs = int(
+            pos_consensus_sustained_epochs)
+        self._pos_consensus_above_since: int | None = None
+        self._ztd_consensus_threshold_m = float(ztd_consensus_threshold_m)
+        self._ztd_consensus_sustained_epochs = int(
+            ztd_consensus_sustained_epochs)
+        self._ztd_consensus_above_since: int | None = None
 
     # ── Data intake ─────────────────────────────────────────────── #
 
@@ -181,7 +203,9 @@ class FixSetIntegrityMonitor:
 
     # ── Evaluation ──────────────────────────────────────────────── #
 
-    def evaluate(self, epoch: int, ztd_m: float | None = None) -> dict | None:
+    def evaluate(self, epoch: int, ztd_m: float | None = None,
+                 pos_consensus_delta_m: float | None = None,
+                 ztd_consensus_delta_m: float | None = None) -> dict | None:
         """Return a trip event dict, or None if no trip.
 
         Event dict carries a ``reason`` key so callers can branch on
@@ -212,10 +236,36 @@ class FixSetIntegrityMonitor:
             full WL flush — reset MW tracker for every SV,
             transition NL-fixed SVs to FLOATING.  Position /
             clock / ISB preserved.**
+          - ``reason='pos_consensus'`` — this host's position
+            differs from the shared-ARP cohort median by more
+            than ``pos_consensus_threshold_m`` for
+            ``pos_consensus_sustained_epochs``.  Fires earlier
+            (tens of cm) than ``anchor_collapse`` or
+            ``ztd_impossible`` (meters), catching null-mode
+            drift before it corrupts ZTD.  **Action: full filter
+            re-init, same as anchor_collapse.**  Cohort is the
+            reference when self disagrees.
+          - ``reason='ztd_consensus'`` — this host's ZTD residual
+            differs from the shared-atmosphere cohort median by
+            more than ``ztd_consensus_threshold_m`` for
+            ``ztd_consensus_sustained_epochs``.  Fires earlier
+            (10 cm relative) than ``ztd_impossible``
+            (700 mm absolute).  **Action: NL-drop + ZTD reset,
+            same as ztd_impossible.**
 
         Pass ``ztd_m`` (the PPP filter's current ZTD residual in
         metres) to enable the ZTD trip.  When ``None``, the ZTD
         check is skipped.
+
+        Pass ``pos_consensus_delta_m`` (self-minus-cohort-median
+        3D distance in metres) to enable the position-consensus
+        trip.  None (no cohort available, single-host run, etc.)
+        silently skips this check.
+
+        Pass ``ztd_consensus_delta_m`` (self-minus-cohort-median
+        ZTD residual in metres, signed or absolute — we take the
+        absolute value here) to enable the ZTD-consensus trip.
+        None silently skips.
 
         Caller executes the appropriate recovery and calls
         `record_trip(epoch)` exactly once per event.
@@ -265,6 +315,44 @@ class FixSetIntegrityMonitor:
             else:
                 # Anchor back — reset the timer.
                 self._anchor_collapse_since = None
+
+        # ── Fleet-consensus triggers.  Skipped silently when the
+        # delta is None (no cohort, single-host run).  Checked
+        # ahead of the single-host physical-envelope monitors
+        # because they fire at the tens-of-mm scale vs. hundreds-of-
+        # mm, so they'd pre-empt anyway if both would fire.
+        if pos_consensus_delta_m is not None:
+            if pos_consensus_delta_m > self._pos_consensus_threshold_m:
+                if self._pos_consensus_above_since is None:
+                    self._pos_consensus_above_since = epoch
+                elif (epoch - self._pos_consensus_above_since
+                        >= self._pos_consensus_sustained_epochs):
+                    return {
+                        'reason': 'pos_consensus',
+                        'delta_m': pos_consensus_delta_m,
+                        'threshold_m': self._pos_consensus_threshold_m,
+                        'sustained_epochs': (
+                            epoch - self._pos_consensus_above_since),
+                    }
+            else:
+                self._pos_consensus_above_since = None
+
+        if ztd_consensus_delta_m is not None:
+            delta_abs = abs(ztd_consensus_delta_m)
+            if delta_abs > self._ztd_consensus_threshold_m:
+                if self._ztd_consensus_above_since is None:
+                    self._ztd_consensus_above_since = epoch
+                elif (epoch - self._ztd_consensus_above_since
+                        >= self._ztd_consensus_sustained_epochs):
+                    return {
+                        'reason': 'ztd_consensus',
+                        'delta_m': ztd_consensus_delta_m,
+                        'threshold_m': self._ztd_consensus_threshold_m,
+                        'sustained_epochs': (
+                            epoch - self._ztd_consensus_above_since),
+                    }
+            else:
+                self._ztd_consensus_above_since = None
 
         # ── ZTD-impossibility trigger.  No latch dependency — ZTD
         # can drift at any lifecycle state.  Sustained-window
@@ -356,6 +444,8 @@ class FixSetIntegrityMonitor:
         self._rms_hist.clear()
         self._anchor_collapse_since = None
         self._ztd_above_since = None
+        self._pos_consensus_above_since = None
+        self._ztd_consensus_above_since = None
         if self._ape_sm is not None:
             self._ape_sm.clear_latches(reason="fix_set_integrity_trip")
         # The trip itself is announced by the caller as a single

@@ -1754,6 +1754,18 @@ class AntPosEstThread(threading.Thread):
                 f"sustained_epochs={ev['sustained_epochs']} "
                 f"recent_trip_count={ev.get('recent_trip_count', 1)}"
             )
+        elif reason == 'pos_consensus':
+            params = (
+                f"delta_m={ev['delta_m']:.3f} "
+                f"threshold_m={ev['threshold_m']:.3f} "
+                f"sustained_epochs={ev['sustained_epochs']}"
+            )
+        elif reason == 'ztd_consensus':
+            params = (
+                f"delta_m={ev['delta_m']:+.3f} "
+                f"threshold_m=±{ev['threshold_m']:.3f} "
+                f"sustained_epochs={ev['sustained_epochs']}"
+            )
         else:
             params = (
                 f"window_rms_m={ev['window_rms_m']:.2f} "
@@ -1807,8 +1819,12 @@ class AntPosEstThread(threading.Thread):
             self._fix_set_integrity.record_trip(self._n_epochs)
             return
 
-        if reason == 'ztd_impossible':
+        if reason in ('ztd_impossible', 'ztd_consensus'):
             # NL-only revert — keep WL, keep position, reset ZTD.
+            # Consensus path fires earlier (tens of mm vs. hundreds)
+            # but same remediation: wrong NL integers are the likely
+            # corruption driver, so reverting to WL only stops
+            # accumulation without discarding fast-to-acquire state.
             # ANCHORED and ANCHORING SVs revert to FLOATING (the
             # state-machine's only legal exit from the NL-fixed
             # states); MW state is preserved so the SVs will
@@ -2222,6 +2238,46 @@ class AntPosEstThread(threading.Thread):
             ppp_ztd_idx = getattr(filt, 'IDX_ZTD', PPP_IDX_ZTD)
             if filt.x.shape[0] > ppp_ztd_idx:
                 ppp_ztd = float(filt.x[ppp_ztd_idx])
+            # Fleet-consensus deltas (Part 2 of
+            # docs/fleet-consensus-monitors.md).  Computed every
+            # epoch so the monitor's sustained-epoch counter
+            # increments at the right rate.  None when no cohort
+            # is available (peer_subscriber inactive, no peers
+            # with matching antenna_ref/site_ref, or <2 members);
+            # the monitor silently skips those paths.
+            _cohort_pos_delta_m = None
+            _cohort_ztd_delta_m = None
+            try:
+                import peer_subscriber
+                if peer_subscriber.is_active():
+                    _ant_ref = peer_subscriber.get_local_antenna_ref()
+                    _site_ref = peer_subscriber.get_local_site_ref()
+                    _self_pos_ecef = filt.x[:3]
+                    _self_lat, _self_lon, _self_alt = ecef_to_lla(
+                        _self_pos_ecef[0], _self_pos_ecef[1],
+                        _self_pos_ecef[2])
+                    _self_snap = peer_subscriber.build_self_snapshot(
+                        antenna_ref=_ant_ref, site_ref=_site_ref,
+                        lat_deg=_self_lat, lon_deg=_self_lon,
+                        alt_m=_self_alt, ztd_m=ppp_ztd,
+                    )
+                    if _ant_ref:
+                        _pm = peer_subscriber.cohort_median_position(
+                            _ant_ref, self_snapshot=_self_snap)
+                        if _pm is not None:
+                            from peppar_bus.cohort import ecef_distance_m
+                            _ml, _mo, _ma, _ = _pm
+                            _, _cohort_pos_delta_m = ecef_distance_m(
+                                _self_lat, _self_lon, _self_alt,
+                                _ml, _mo, _ma)
+                    if _site_ref and ppp_ztd is not None:
+                        _zm = peer_subscriber.cohort_median_ztd(
+                            _site_ref, self_snapshot=_self_snap)
+                        if _zm is not None:
+                            _med_ztd, _ = _zm
+                            _cohort_ztd_delta_m = ppp_ztd - _med_ztd
+            except Exception:
+                log.exception("cohort delta compute failed (non-fatal)")
             # Bead 4: stream azimuths for ANCHORING SVs so the
             # promoter can accumulate Δaz toward the 15° threshold.  We
             # compute azimuths only when there's at least one SV in
@@ -2238,7 +2294,9 @@ class AntPosEstThread(threading.Thread):
             for ev in self._setting_drop.evaluate(self._n_epochs):
                 self._apply_setting_sv_drop(filt, mw, nl, ev)
             host_ev = self._fix_set_integrity.evaluate(
-                self._n_epochs, ztd_m=ppp_ztd)
+                self._n_epochs, ztd_m=ppp_ztd,
+                pos_consensus_delta_m=_cohort_pos_delta_m,
+                ztd_consensus_delta_m=_cohort_ztd_delta_m)
             if host_ev is not None:
                 self._apply_integrity_trip(filt, mw, nl, host_ev)
             # Elevation-stratified squelch: sweep WAITING records
