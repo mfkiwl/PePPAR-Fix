@@ -11,3 +11,7 @@ smbus2
 allantools
 matplotlib
 pandas
+
+# peppar-mon (status display) deps live in requirements-mon.txt so the
+# engine's dependency surface stays tight — lab hosts that never run the
+# monitor don't need Textual or its rich/markdown-it dep chain.
