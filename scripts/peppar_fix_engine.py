@@ -1380,8 +1380,24 @@ class AntPosEstThread(threading.Thread):
                  receiver_antenna_type=None,
                  pcv_enabled=True,
                  clock_model="random_walk",
-                 rx_tcxo_adev_1s=None):
+                 rx_tcxo_adev_1s=None,
+                 phase_windup_enabled=False,
+                 gmf_enabled=False):
         super().__init__(daemon=True, name="AntPosEst")
+        # Phase 3 wind-up (Wu 1993): per-SV cumulative wind-up tracker
+        # + carrier-phase correction applied before filter.update().
+        # Phase 4 GMF (Boehm 2006): hydrostatic + wet mapping functions
+        # via PPPFilter._GMF_PROVIDER; the filter's tropo/wet_mapping
+        # methods consult it when set (commit c00a6dd).  Both default
+        # off to preserve bit-exact pre-port behaviour.
+        self._phase_windup_enabled = bool(phase_windup_enabled)
+        self._windup_tracker = None
+        if self._phase_windup_enabled:
+            from peppar_fix.phase_windup import PhaseWindupTracker
+            self._windup_tracker = PhaseWindupTracker()
+        self._gmf_enabled = bool(gmf_enabled)
+        self._gmf_provider = None  # built lazily on first epoch with
+                                    # usable position (needs rcv lat/lon)
         # ANTEX parser + receiver antenna type (Phase 2 of obs-model
         # completion plan).  PCV correction applies only when BOTH
         # parser and antenna type are provided AND pcv_enabled is
@@ -2070,6 +2086,11 @@ class AntPosEstThread(threading.Thread):
                     sv_state=self._sv_state,
                     confidence=ev.confidence,
                     reason="|".join(ev.reasons), epoch=self._n_epochs)
+                # Wind-up tracker state is per-SV cumulative; drop it
+                # on slip so the next update seeds fresh (absolute
+                # zero absorbed into the re-floating ambiguity).
+                if self._windup_tracker is not None:
+                    self._windup_tracker.reset(ev.sv)
                 log.info("slip: sv=%s reasons=%s conf=%s lock=%.0fms"
                          " cno=%.1f elev=%s az=%s ipp_sza=%s gap=%s gf=%s mw=%s",
                          ev.sv, ",".join(ev.reasons), ev.confidence,
@@ -2126,6 +2147,34 @@ class AntPosEstThread(threading.Thread):
                 self._last_tide_up_mm = 1000.0 * float(
                     np.dot(tide_offset, r_hat))
 
+            # GMF update (Phase 4 of obs-model plan).  The filter's
+            # tropo/wet_mapping methods consult
+            # PPPFilter._GMF_PROVIDER when set (commit c00a6dd).
+            # Build the provider lazily on first epoch with a usable
+            # position — needs receiver lat/lon.  Update its epoch
+            # every tick.
+            if self._gmf_enabled and pos_usable:
+                if self._gmf_provider is None:
+                    from peppar_fix.gmf import GMFProvider
+                    from solve_ppp import PPPFilter as _PF
+                    lat_deg, lon_deg, height_m = ecef_to_lla(
+                        pos_ecef[0], pos_ecef[1], pos_ecef[2])
+                    lat_r = math.radians(lat_deg)
+                    lon_r = math.radians(lon_deg)
+                    self._gmf_provider = GMFProvider(
+                        lat_r, lon_r, height_m)
+                    _PF._GMF_PROVIDER = self._gmf_provider
+                    log.info(
+                        "[GMF] provider built (lat=%.4f° lon=%.4f° h=%.0f m)",
+                        math.degrees(lat_r), math.degrees(lon_r), height_m)
+                # Compute MJD from gps_time.  GPS epoch 1980-01-06 →
+                # MJD 44244.  gps_time is a UTC-aware datetime; MJD
+                # is a UT1 time tag but UTC-vs-UT1 gap < 1s doesn't
+                # affect GMF's day-of-year interpolation.
+                _unix = gps_time.timestamp()
+                _mjd = 40587.0 + _unix / 86400.0
+                self._gmf_provider.update_epoch(_mjd)
+
             # PCV correction (Phase 2 of obs-model plan).  Per-SV
             # antenna phase-center correction applied to obs pr_if +
             # phi_if_m in-place.  Requires ANTEX parser + receiver
@@ -2133,8 +2182,40 @@ class AntPosEstThread(threading.Thread):
             # with solid tide (computed once per epoch).
             self._last_pcv_applied = 0
             self._last_pcv_skipped = 0
+            # Wind-up + PCV share sun_ecef, computed once per epoch.
+            _sun_ecef_cached = None
+            if (self._pcv_enabled or self._phase_windup_enabled) and pos_usable:
+                _sun_ecef_cached = sun_pos_ecef(gps_time)
+
+            # Phase wind-up (Phase 3 of obs-model plan).  Per-SV
+            # cumulative wind-up tracker; apply correction to
+            # phi_if_m in-place before filter.update().  Formula +
+            # sign convention in peppar_fix/phase_windup.py;
+            # lambda_eff for IF is c / (f1 + f2).
+            if self._phase_windup_enabled and pos_usable and _sun_ecef_cached is not None:
+                for obs in observations:
+                    sv = obs['sv']
+                    if obs.get('phi_if_m') is None:
+                        continue
+                    wl_f1 = obs.get('wl_f1')
+                    wl_f2 = obs.get('wl_f2')
+                    if not wl_f1 or not wl_f2:
+                        continue
+                    sat_pos, _ = corrections.sat_position(sv, gps_time)
+                    if sat_pos is None:
+                        continue
+                    self._windup_tracker.update(
+                        sv, np.asarray(sat_pos),
+                        np.asarray(_sun_ecef_cached),
+                        np.asarray(pos_ecef))
+                    f1 = C / wl_f1
+                    f2 = C / wl_f2
+                    lambda_eff_m = C / (f1 + f2)
+                    obs['phi_if_m'] += (
+                        self._windup_tracker.correction_m(sv, lambda_eff_m))
+
             if self._pcv_enabled and pos_usable:
-                sun_ecef = sun_pos_ecef(gps_time)
+                sun_ecef = _sun_ecef_cached
                 for obs in observations:
                     sv = obs['sv']
                     sat_pos, _ = corrections.sat_position(sv, gps_time)
@@ -5974,6 +6055,8 @@ def run(args):
             pcv_enabled=bool(getattr(args, "pcv", True)),
             clock_model=getattr(args, "clock_model", "random_walk"),
             rx_tcxo_adev_1s=getattr(args, "rx_tcxo_adev_1s", None),
+            phase_windup_enabled=bool(getattr(args, "phase_windup", False)),
+            gmf_enabled=bool(getattr(args, "gmf", False)),
         )
         ape_thread.start()
 
@@ -6281,6 +6364,28 @@ Two-phase operation:
                           "solve_ppp.SIGMA_P_IF (3.0 m).  Companion "
                           "knob to --sigma-phi-if for end-to-end "
                           "filter-trust calibration.")
+    pos.add_argument("--phase-windup", action="store_true",
+                     help="Apply Wu 1993 carrier-phase wind-up "
+                          "correction per SV per epoch.  Default "
+                          "off.  On clean PRIDE/ABMF data the "
+                          "effect is ~1-5 mm per obs-model plan "
+                          "(Bravo 2026-04-24, cb6e806).  Folded "
+                          "into the engine to see whether lab "
+                          "dirty inputs respond differently. "
+                          "See docs/obs-model-completion-plan.md "
+                          "Phase 3.")
+    pos.add_argument("--gmf", action="store_true",
+                     help="Use Boehm 2006 GMF hydrostatic + wet "
+                          "mapping functions instead of the default "
+                          "1/sin(elev) tropospheric mapping.  "
+                          "Default off.  On clean data at joint-best "
+                          "tuning, crosses sub-meter final-H for the "
+                          "first time (0.993 m vs 1.157 m without). "
+                          "Default 1/sin(e) is wrong by 3 m slant "
+                          "delay at 5° elev — GMF closes that and "
+                          "lets low-elev observations contribute "
+                          "honestly.  See "
+                          "docs/obs-model-completion-plan.md Phase 4.")
     pos.add_argument("--q-pos-converged", type=float, default=None,
                      help="Override the converged-mode position process "
                           "noise (m²/s).  Default 1e-4.  Tighter values "
@@ -6780,6 +6885,10 @@ Two-phase operation:
     if args.q_pos_converged is not None:
         log.info(f"Q_pos_converged override: {args.q_pos_converged:g} "
                  f"(default 1e-4)")
+    if getattr(args, "phase_windup", False):
+        log.info("Phase wind-up correction: enabled (Wu 1993)")
+    if getattr(args, "gmf", False):
+        log.info("GMF tropospheric mapping: enabled (Boehm 2006)")
 
     # Peer-bus initialization (optional).  Publishes no-op until the
     # first call site fires; stays no-op for entire run when
