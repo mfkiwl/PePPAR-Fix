@@ -365,7 +365,13 @@ class PPPFilter:
         elif pos_sigma > 1.0:
             q_pos = 0.01         # Converging: moderate
         else:
-            q_pos = 1e-4         # Converged: static with breathing room
+            # Converged: static with breathing room.  Override via
+            # PPPFilter.Q_POS_CONVERGED (set by the regression
+            # harness's --q-pos-converged flag) for filter-tuning
+            # experiments — looser values let the trajectory recover
+            # from earlier-accumulated bias instead of locking it in;
+            # tighter values pin the position harder once converged.
+            q_pos = getattr(self, "Q_POS_CONVERGED", 1e-4)
         for i in range(3):
             Q[i, i] = q_pos * dt
         Q[IDX_CLK, IDX_CLK] = self._q_clk() * dt
