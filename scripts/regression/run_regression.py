@@ -716,6 +716,45 @@ def run(args) -> int:
     else:
         windup_tracker = None
 
+    # GMF tropospheric mapping — Phase 4 of the obs-model
+    # completion plan.  Boehm 2006 hydrostatic + wet mapping
+    # functions replace the harness's default ``1/sin(elev)`` when
+    # --gmf is set.  Expected impact concentrated at low elev
+    # (5–15°) where 1/sin(e) is wrong by ~0.1–3 m of slant delay
+    # and the meter-scale phase residuals on PRIDE/ABMF live.
+    if getattr(args, "gmf", False):
+        from regression.gmf import GMFProvider
+        from solve_ppp import PPPFilter as _PF
+        # Truth coords as the GMF reference station — the lat/lon
+        # affect coefficients smoothly enough that meter-scale
+        # position uncertainty in the filter doesn't matter.
+        # ECEF → geodetic via the standard Bowring iteration
+        # (5 iterations is overkill for surface stations but cheap).
+        import math as _m
+        x, y, z = truth_ecef
+        lon_rad = _m.atan2(y, x)
+        r_xy = _m.sqrt(x * x + y * y)
+        # Iterative ellipsoid lat/height (sub-mm at first iter for
+        # surface stations); 5 iterations is overkill but cheap.
+        a_wgs = 6378137.0
+        f_wgs = 1.0 / 298.257223563
+        e2 = f_wgs * (2.0 - f_wgs)
+        lat_rad = _m.atan2(z, r_xy * (1.0 - e2))
+        for _ in range(5):
+            sin_lat = _m.sin(lat_rad)
+            n = a_wgs / _m.sqrt(1.0 - e2 * sin_lat * sin_lat)
+            h = r_xy / _m.cos(lat_rad) - n
+            lat_rad = _m.atan2(z, r_xy * (1.0 - e2 * n / (n + h)))
+        sin_lat = _m.sin(lat_rad)
+        n = a_wgs / _m.sqrt(1.0 - e2 * sin_lat * sin_lat)
+        height_m = r_xy / _m.cos(lat_rad) - n
+        gmf_provider = GMFProvider(lat_rad, lon_rad, height_m)
+        _PF._GMF_PROVIDER = gmf_provider
+        log.info("GMF mapping enabled at lat=%.4f° lon=%.4f° h=%.1fm",
+                 _m.degrees(lat_rad), _m.degrees(lon_rad), height_m)
+    else:
+        gmf_provider = None
+
     # Iterate epochs
     prev_t = None
     n_processed = 0
@@ -736,6 +775,13 @@ def run(args) -> int:
             break
 
         t = ep.ts.replace(tzinfo=timezone.utc)
+        # GMF tropo provider — refresh seasonal cosines once per
+        # epoch.  Cheap (~few μs); keeps PPPFilter.tropo_delay /
+        # wet_mapping calls O(1) per SV.
+        if gmf_provider is not None:
+            from regression.solid_tide import _jd_from_datetime as _jd_fn
+            _mjd = _jd_fn(t) - 2400000.5
+            gmf_provider.update_epoch(_mjd)
         sv_obs_list = extract_dual_freq(
             ep, profile=profile, interval_s=interval_s,
             lock_accum=lock_accum,
@@ -1316,6 +1362,17 @@ def main():
                          "project_to_main_pride_ablation_20260423.  "
                          "Harness-side only; engine impact requires "
                          "porting the solid_tide module there too.")
+    ap.add_argument("--gmf", action="store_true",
+                    help="Use Boehm 2006 Global Mapping Function "
+                         "for tropospheric mapping (hydrostatic + "
+                         "wet) instead of the default 1/sin(elev). "
+                         "Phase 4 of "
+                         "docs/obs-model-completion-plan.md.  "
+                         "Effect concentrated at low elevations: "
+                         "1/sin(e) is wrong by ~3 m of slant delay "
+                         "at 5° elev, ~0.5 m at 10° — these biases "
+                         "amplify into meter-scale phase residuals "
+                         "through the filter's null-mode.")
     ap.add_argument("--phase-windup", action="store_true",
                     help="Apply Wu 1993 carrier-phase wind-up "
                          "correction to phi_if_m before the filter "

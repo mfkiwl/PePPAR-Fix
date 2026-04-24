@@ -488,15 +488,39 @@ class PPPFilter:
             az += 360.0
         return az
 
+    # Optional GMF mapping provider (Boehm 2006).  When set on the
+    # CLASS (not the instance), the tropo / wet mapping methods
+    # consult it instead of using the trivial ``1/sin(elev)``
+    # default.  Provider must expose ``m_hydrostatic(elev_rad)`` and
+    # ``m_wet(elev_rad)`` returning unitless mapping factors, plus
+    # ``update_epoch(mjd)`` which the caller invokes once per epoch.
+    # Set by the regression harness's --gmf flag; engine integration
+    # follows the same pattern.  None preserves the previous trivial
+    # mapping bit-exact.
+    _GMF_PROVIDER = None
+
     def tropo_delay(self, elevation_deg):
         if elevation_deg < 5.0:
             elevation_deg = 5.0
+        if PPPFilter._GMF_PROVIDER is not None:
+            # 2.3 m a-priori dry zenith delay × hydrostatic mapping.
+            # The wet residual rides on the ZTD state and is mapped
+            # separately via wet_mapping().
+            return 2.3 * PPPFilter._GMF_PROVIDER.m_hydrostatic(
+                math.radians(elevation_deg))
         return 2.3 / math.sin(math.radians(elevation_deg))
 
     @staticmethod
     def wet_mapping(elevation_deg):
-        """Wet tropospheric mapping function: 1/sin(e)."""
+        """Wet tropospheric mapping function.
+
+        Default ``1/sin(e)``; replaced by Boehm 2006 GMF wet mapping
+        when ``PPPFilter._GMF_PROVIDER`` is installed.  Static method
+        so existing callers don't need to change call shape.
+        """
         e = max(elevation_deg, 5.0)
+        if PPPFilter._GMF_PROVIDER is not None:
+            return PPPFilter._GMF_PROVIDER.m_wet(math.radians(e))
         return 1.0 / math.sin(math.radians(e))
 
     def isb_index(self, sys_name):
