@@ -15,6 +15,64 @@ This doc defines:
 Companion to `docs/wl-only-foundation.md` (WL on top of float) and
 `docs/fleet-consensus-monitors.md` (runtime cohort self-agreement).
 
+## Correction note (2026-04-24 afternoon)
+
+Earlier drafts of this doc framed the basin-trap problem as a
+*wrong-integer* trap that a `--float-only` flag would escape.
+Tracing the code falsified that framing:
+
+`--wl-only` mode already runs pure float PPP for the EKF
+ambiguity states.  The MW tracker commits its internal `N_WL`
+flag (`state['fixed'] = True`) when `frac < fix_threshold`, but
+`NarrowLaneResolver.attempt()` returns early in `wl_only` mode
+**before** the `_apply_fix` loop that would constrain the filter.
+Nothing else in the code path applies WL integers to the filter
+state.  So the filter's ambiguity states are continuous real
+numbers throughout the entire `--wl-only` run.
+
+The basins we observe — 4–7 m altitude bias, ZTD swinging from
+−5 m to +100 mm, `ztd_impossible` / `ztd_cycling` trips — are
+therefore **not** wrong-integer traps.  They are the honest
+float-PPP EKF converging to its single geometric optimum, and
+that optimum is biased because there is a systematic bias in the
+**observation model** on F9T-20B.  Candidate sources, to be
+investigated:
+
+- **Phase bias mismatches** — CNES phase biases may not match
+  the L5Q signal the F9T-20B tracks; earlier CNES-phase-bias
+  analysis (`project_cnes_phase_bias_signals.md`) noted GPS L2W
+  vs L2L mismatches that blocked GAL-free AR on ptpmon.
+- **PCV/PCO entry mismatch** — the `SFESPK6618H` UFO1 entry in
+  `ngs20.atx` may be coarse or wrong.
+- **Code bias residuals** — OSB corrections on F9T-20B's signal
+  mix (L1C + L5Q + L2W) may leave 1–3 m of residual that the
+  float filter absorbs into altitude / ZTD.
+- **Hardware or firmware difference** — F9T-20B (TIM 2.25) tracks
+  a different signal set than F9T-10 (TIM 2.20) on the same
+  antenna, yet only the F9T-20B hosts hit this basin.  Strong
+  hint.
+- **Multipath** — shared across all three hosts on the same
+  antenna and therefore less likely to explain the F9T-20B-only
+  basin, but not excluded.
+
+What this means for the Foundation design:
+
+- The three-gate structure below is **still correct** — the
+  question "is float-PPP converging to the right place?" is
+  exactly what we need to answer before WL can help.
+- The `--float-only` flag idea is retired.  We already ARE
+  float-only in wl-only mode.
+- The missing piece is now clearer: Gate #2 (independent anchor
+  agreement) is the ONLY thing that can detect fleet-wide float
+  bias.  Without it, a biased fleet can pass Gates #1 and #3
+  simultaneously and still be wrong by meters.
+- A separate diagnostic improvement: log what WL integers the
+  MW tracker WOULD commit (it has the info, but today only logs
+  at the moment of commit).  A periodic `[WL_INTEGRALITY]` snap
+  lets us see fix-eligibility across the fleet even without
+  committing.  Confidence in WL integers is a proxy for how
+  badly the observation-model bias is showing through.
+
 ## Motivation
 
 Observed on day0424b/c (2026-04-24):

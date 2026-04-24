@@ -253,6 +253,48 @@ class MelbourneWubbenaTracker:
         n_total = len(self._state)
         return f"WL: {self.n_fixed}/{n_total} fixed"
 
+    def integrality_snapshot(self):
+        """Per-SV integrality snapshot for diagnostic logging.
+
+        Returns a list of dicts, one per tracked SV, capturing what
+        ``MelbourneWubbenaTracker`` "would fix" right now:
+
+        - ``sv``: satellite ID
+        - ``n_wl_float``: current float estimate of N_WL (cycles)
+        - ``frac``: |n_wl_float − round(n_wl_float)| — how close to
+          integer; internal fix gate triggers when this goes below
+          ``fix_threshold`` AND n_epochs ≥ ``min_epochs``
+        - ``n_epochs``: samples averaged into ``mw_avg``
+        - ``fixed``: True iff the tracker has committed this SV's N_WL
+          internally (note: in ``--wl-only`` mode, this commit is NOT
+          applied to the PPPFilter state — the filter stays float)
+        - ``resid_std_cyc``: rolling std of MW residuals in cycles, or
+          None if < 8 samples yet.  Proxy for MW noise health.
+
+        Used by the engine to emit a periodic `[WL_INTEGRALITY]` line
+        — it shows fix eligibility across the fleet so operators can
+        see how confidently the MW tracker would lock WL integers
+        *even when those integers are not being applied*.  See
+        `docs/pre-wl-foundation.md` — observation-model bias makes
+        float PPP land at a wrong place; WL integrality is one
+        diagnostic for how badly that bias is showing through.
+        """
+        out = []
+        for sv, s in self._state.items():
+            f1, f2 = s['f1'], s['f2']
+            lambda_wl = C / (f1 - f2)
+            n_wl_float = s['mw_avg'] / lambda_wl
+            frac = abs(n_wl_float - round(n_wl_float))
+            out.append({
+                'sv': sv,
+                'n_wl_float': n_wl_float,
+                'frac': frac,
+                'n_epochs': int(s['n_epochs']),
+                'fixed': bool(s['fixed']),
+                'resid_std_cyc': s.get('resid_std_cyc'),
+            })
+        return out
+
 
 class NarrowLaneResolver:
     """Resolve narrow-lane integer N1 from float IF ambiguity + fixed N_WL.

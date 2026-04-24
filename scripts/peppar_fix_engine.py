@@ -2529,6 +2529,34 @@ class AntPosEstThread(threading.Thread):
                     mw.summary(), nl.summary(), nav2_tag, ztd_tag,
                     strength_tag, readmit_tag, tide_tag, pcv_tag, worst_tag,
                 )
+                # WL integrality snapshot every 60 epochs (~1/min).  Shows
+                # what WL integers the MW tracker would commit — even in
+                # wl-only mode where those commits aren't applied to the
+                # filter.  Per-SV: frac (|n_wl - round(n_wl)|), epochs
+                # averaged, fixed-flag (* suffix), MW residual std.
+                # Diagnostic only — no effect on filter.  See
+                # docs/pre-wl-foundation.md for the reframe that
+                # motivated this.
+                if self._n_epochs % 60 == 0:
+                    snap = mw.integrality_snapshot()
+                    if snap:
+                        # Sort by frac ascending — lowest-frac SVs (most
+                        # fix-eligible) first.
+                        snap.sort(key=lambda s: s['frac'])
+                        parts = []
+                        for s in snap:
+                            star = "*" if s['fixed'] else " "
+                            rstd = s['resid_std_cyc']
+                            rstd_str = (f"{rstd:.2f}"
+                                        if rstd is not None else "—")
+                            parts.append(
+                                f"{s['sv']}:{s['frac']:.2f}"
+                                f"/{s['n_epochs']}ep/{rstd_str}{star}")
+                        n_would = sum(1 for s in snap if s['fixed'])
+                        log.info(
+                            "  [WL_INTEGRALITY %d] %d SVs, %d would-fix: %s",
+                            self._n_epochs, len(snap), n_would,
+                            " ".join(parts))
                 # Peer-bus publish — mirrors the [AntPosEst] log line's
                 # fields to any subscribers.  All three helpers no-op
                 # when --peer-bus is disabled.
