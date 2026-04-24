@@ -1410,6 +1410,12 @@ class AntPosEstThread(threading.Thread):
                 if rx_tcxo_adev_1s is not None:
                     ppp_kwargs["rx_tcxo_adev_1s"] = float(rx_tcxo_adev_1s)
             self._filt = PPPFilter(**ppp_kwargs)
+            log.info(
+                "AntPosEstThread: fresh PPPFilter at known position "
+                "(warm start) clock_model=%s%s",
+                self._filt.clock_model,
+                "" if self._filt.clock_model == "random_walk"
+                else f" rx_tcxo_adev_1s={self._filt.rx_tcxo_adev_1s:g}")
             self._filt.initialize(known_ecef, 0.0, systems=self._systems)
             self._mw = MelbourneWubbenaTracker()
             self._nl = NarrowLaneResolver(
@@ -1419,7 +1425,6 @@ class AntPosEstThread(threading.Thread):
                 ape_state_machine=self._ape_sm,
                 wl_only=self._wl_only,
             )
-            log.info("AntPosEstThread: fresh PPPFilter at known position (warm start)")
 
         self._n_epochs = 0
         self._prev_t = None
