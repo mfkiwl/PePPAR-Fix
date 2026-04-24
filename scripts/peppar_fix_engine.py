@@ -6260,6 +6260,27 @@ Two-phase operation:
                           "values: 5e-11 to 1e-10.  Our lab-measured "
                           "DO TCXO maps to σ_y(1s)≈2e-9 (see "
                           "docs/ticc-baseline-2026-04-01.md).")
+    pos.add_argument("--sigma-phi-if", type=float, default=None,
+                     help="Override the IF carrier-phase measurement "
+                          "noise sigma (meters).  Default uses "
+                          "solve_ppp.SIGMA_PHI_IF (0.03 m).  Looser "
+                          "values (e.g. 1.0) tell the filter to "
+                          "trust phase observations less — useful "
+                          "when the observation model has unmodeled "
+                          "biases (CNES L5I-vs-F9T-L5Q phase bias, "
+                          "missing wind-up / GMF / sat attitude).  "
+                          "Tighter σ_phi + biased model amplifies "
+                          "null-mode coupling into position / ZTD.  "
+                          "Bravo's PRIDE/ABMF sweep (2026-04-24) "
+                          "showed σ_phi=1.0-3.0 reduces 24h mean |H| "
+                          "by 50% on clean reference data.  See "
+                          "project_to_main_sigma_phi_sweep_20260424.md.")
+    pos.add_argument("--sigma-pr-if", type=float, default=None,
+                     help="Override the IF pseudorange measurement "
+                          "noise sigma (meters).  Default uses "
+                          "solve_ppp.SIGMA_P_IF (3.0 m).  Companion "
+                          "knob to --sigma-phi-if for end-to-end "
+                          "filter-trust calibration.")
     pos.add_argument("--timeout", type=int, default=3600,
                      help="Bootstrap timeout in seconds (default: 3600)")
     pos.add_argument("--watchdog-threshold", type=float, default=0.5,
@@ -6637,6 +6658,21 @@ Two-phase operation:
         args.port_type = "USB"
     if args.systems is None:
         args.systems = "gps,gal,bds"
+
+    # σ_phi / σ_pr overrides — set the module-level globals in
+    # solve_ppp before any PPPFilter is constructed.  Cherry-picked
+    # from harness commit 43e25d7; same consumer hooks.  See Bravo's
+    # ABMF sweep memo for the diagnostic motivation.
+    if args.sigma_phi_if is not None:
+        import solve_ppp as _spp
+        _spp._SIGMA_PHI_IF_OVERRIDE = float(args.sigma_phi_if)
+        log.info(f"σ_phi_IF override: {args.sigma_phi_if:g} m "
+                 f"(default 0.03 m)")
+    if args.sigma_pr_if is not None:
+        import solve_ppp as _spp
+        _spp._SIGMA_P_IF_OVERRIDE = float(args.sigma_pr_if)
+        log.info(f"σ_pr_IF override: {args.sigma_pr_if:g} m "
+                 f"(default 3.0 m)")
     if args.ar_elev_mask is None:
         args.ar_elev_mask = 25.0
     if args.do_type is None:
