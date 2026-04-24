@@ -126,6 +126,51 @@ class TidePayload:
 
 
 @dataclass
+class SlipEventPayload:
+    """One cycle-slip detection event on one SV.
+
+    Topic: ``peppar-fix.<host>.slip-event.<sv>``
+    Cadence: on-event — published the moment
+    ``CycleSlipMonitor`` fires a slip on an SV.
+
+    Shared-antenna fleet deployment opens the door to *ensemble
+    slip discrimination*: log analysis on day0423j shows 45-50%
+    of slip events are "solo" — only one host sees them within
+    ±2 s on the same SV.  Solo events are almost certainly
+    receiver-level glitches (tracking-loop noise, internal
+    disturbances) that the antenna didn't produce.  By
+    publishing slip events, peers can cross-check: if no peer
+    saw it, skip the MW flush and preserve wide-lane state.
+
+    Fields mirror the engine's ``slip: sv=... reasons=...
+    conf=...`` log line.  ``reasons`` is one or more of
+    ``ubx_locktime_drop`` / ``arc_gap`` / ``gf_jump`` /
+    ``mw_jump``; the jump magnitudes (``gf_jump_m``,
+    ``mw_jump_cyc``) are populated only when the respective
+    detector fired.
+
+    Confidence (``conf``) grading from the engine is either
+    LOW (exactly one detector fired) or HIGH (two or more, or
+    a `locktime=0` UBX indicator).  Peers use this to decide
+    how seriously to take a solo event: a solo HIGH-confidence
+    slip is still likely real; a solo LOW-confidence is much
+    more likely a glitch.  See ``scripts/peppar_fix/cycle_slip.py``
+    for the detector cascade and ``project_to_bravo_phase2a_plus_slipevent_schema_20260424``
+    for the ensemble-discrimination rationale.
+    """
+
+    schema_version: int = SCHEMA_VERSION
+    ts_mono_ns: int = 0
+    sv: str = ""
+    reasons: list = field(default_factory=list)
+    conf: str = "LOW"           # "LOW" | "HIGH"
+    elev_deg: Optional[float] = None
+    lock_duration_ms: Optional[int] = None
+    gf_jump_m: Optional[float] = None
+    mw_jump_cyc: Optional[float] = None
+
+
+@dataclass
 class StreamsPayload:
     """NTRIP correction stream identifiers.
 

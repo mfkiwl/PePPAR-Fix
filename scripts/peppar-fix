@@ -29,7 +29,11 @@ if [[ -x "$REPO_ROOT/venv/bin/python" ]]; then
 elif [[ -x "$HOME/pygpsclient/bin/python" ]]; then
     PYTHON_BIN="$HOME/pygpsclient/bin/python"
 fi
-export PYTHONPATH="$REPO_ROOT/scripts${PYTHONPATH:+:$PYTHONPATH}"
+# PYTHONPATH: engine modules live in scripts/; peppar_bus/ lives at
+# repo root so it's importable by both the engine and peppar-mon.
+# Ordering is scripts/ first so engine-internal modules take
+# precedence in name collisions (shouldn't happen, but defensive).
+export PYTHONPATH="$REPO_ROOT/scripts:$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 # ── One-time DO characterization ───────────────────────────────────────── #
 # Run a 30-minute --freerun once per host to capture the DO's noise floor.

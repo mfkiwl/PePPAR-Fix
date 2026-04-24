@@ -46,6 +46,7 @@ import numpy as np
 from solve_pseudorange import C, ecef_to_lla, lla_to_ecef
 from solve_ppp import PPPFilter, FixedPosFilter, ls_init, N_BASE, SIGMA_P_IF, IDX_ZTD as PPP_IDX_ZTD
 from solid_tide import solid_tide_displacement, sun_pos_ecef
+import peer_publisher
 from antex import ANTEXParser, compute_pcv_correction
 from peppar_fix.bootstrap_gate import (
     residuals_consistent, nav2_agrees, scrub_for_retry,
@@ -870,6 +871,10 @@ def start_ntrip_threads(args, beph, ssr, stop_event):
         t.start()
         threads.append(t)
         log.info(f"SSR stream: {ssr_host}:{ssr_p}/{args.ssr_mount}")
+        peer_publisher.publish_streams(
+            ssr_mount=args.ssr_mount,
+            eph_mount=getattr(args, 'eph_mount', None),
+        )
 
     # Optional secondary SSR mount that contributes PHASE BIASES ONLY.
     # Orbit/clock/code-bias/ephemeris all come from the primary mount;
@@ -1079,6 +1084,12 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
                      f"{ev.gap_s:.2f}s" if ev.gap_s is not None else "-",
                      f"{ev.gf_jump_m*100:.1f}cm" if ev.gf_jump_m is not None else "-",
                      f"{ev.mw_jump_cyc:.2f}c" if ev.mw_jump_cyc is not None else "-")
+            peer_publisher.publish_slip_event(
+                sv=ev.sv, reasons=ev.reasons, conf=ev.confidence,
+                elev_deg=ev.elevation_deg,
+                lock_duration_ms=int(ev.lock_ms) if ev.lock_ms is not None else None,
+                gf_jump_m=ev.gf_jump_m, mw_jump_cyc=ev.mw_jump_cyc,
+            )
 
         for obs in observations:
             sv = obs['sv']
@@ -1965,6 +1976,12 @@ class AntPosEstThread(threading.Thread):
                          f"{ev.gap_s:.2f}s" if ev.gap_s is not None else "-",
                          f"{ev.gf_jump_m*100:.1f}cm" if ev.gf_jump_m is not None else "-",
                          f"{ev.mw_jump_cyc:.2f}c" if ev.mw_jump_cyc is not None else "-")
+                peer_publisher.publish_slip_event(
+                    sv=ev.sv, reasons=ev.reasons, conf=ev.confidence,
+                    elev_deg=ev.elevation_deg,
+                    lock_duration_ms=int(ev.lock_ms) if ev.lock_ms is not None else None,
+                    gf_jump_m=ev.gf_jump_m, mw_jump_cyc=ev.mw_jump_cyc,
+                )
 
             for obs in observations:
                 sv = obs['sv']
@@ -2363,6 +2380,39 @@ class AntPosEstThread(threading.Thread):
                     n_used, len(filt.sv_to_idx),
                     mw.summary(), nl.summary(), nav2_tag, ztd_tag,
                     strength_tag, readmit_tag, tide_tag, pcv_tag, worst_tag,
+                )
+                # Peer-bus publish — mirrors the [AntPosEst] log line's
+                # fields to any subscribers.  All three helpers no-op
+                # when --peer-bus is disabled.
+                peer_publisher.publish_position(
+                    ant_pos_est_state=self._ape_sm.state.value,
+                    lat_deg=lat, lon_deg=lon, alt_m=alt,
+                    position_sigma_m=sigma_3d,
+                    worst_sigma_m=nm_sigma,
+                    reached_anchored=self._ape_sm.reached_anchored,
+                )
+                if filt.x.shape[0] > ztd_idx:
+                    peer_publisher.publish_ztd(
+                        ztd_m=float(filt.x[ztd_idx]),
+                        ztd_sigma_mm=int(round(dztd_sigma_mm)),
+                    )
+                if self._last_tide_3d_mm is not None:
+                    peer_publisher.publish_tide(
+                        total_mm=int(round(self._last_tide_3d_mm)),
+                        u_mm=int(round(self._last_tide_up_mm)),
+                    )
+                # SV state snapshot piggybacks the AntPosEst cadence.
+                # Adopts the same name convention (uppercase enum value)
+                # peppar-mon already parses.
+                sv_states_snapshot = {
+                    sv: rec.state.name
+                    for sv, rec in self._sv_state.all_records()
+                }
+                peer_publisher.publish_sv_state(
+                    sv_states=sv_states_snapshot,
+                    nl_capable="".join(sorted(
+                        getattr(self, '_nl_capable_constellations', set()) or set(),
+                    )),
                 )
                 # Full-precision NAV2 log line.  NAV2-PVT's native format is
                 # LLA; lat/lon at 1e-7 deg (~1 cm resolution at our latitude)
@@ -6253,6 +6303,36 @@ Two-phase operation:
     out.add_argument("--gate-stats", help="Optional JSON output for strict sink gate statistics")
     out.add_argument("-v", "--verbose", action="store_true")
 
+    peer = ap.add_argument_group("Peer state sharing")
+    peer.add_argument(
+        "--peer-bus", default="none",
+        help=(
+            "Publish state to a peer bus for fleet monitoring + "
+            "(Phase 2b) peer integer-fix adoption.  Values: "
+            "'none' (default, no publishing); "
+            "'udp-multicast' (default LAN group 239.18.8.13:12468); "
+            "'udp-multicast:GROUP:PORT' (override).  "
+            "See docs/peer-state-sharing.md."
+        ),
+    )
+    peer.add_argument(
+        "--peer-antenna-ref", default="",
+        metavar="NAME",
+        help=(
+            "Antenna identifier (e.g. 'UFO1') published in this "
+            "host's heartbeat.  Peers with matching antenna_ref get "
+            "cross-antenna fleet comparison.  Empty = don't claim."
+        ),
+    )
+    peer.add_argument(
+        "--peer-host", default=None,
+        metavar="NAME",
+        help=(
+            "Hostname published on the peer bus.  Defaults to "
+            "socket.gethostname().  Must be unique in the fleet."
+        ),
+    )
+
     args = ap.parse_args()
     _apply_host_config(args)
     # Apply defaults for args that are None after CLI + host config.
@@ -6342,6 +6422,20 @@ Two-phase operation:
 
     if getattr(args, '_host_config_path', None):
         log.info("Host config: %s", args._host_config_path)
+
+    # Peer-bus initialization (optional).  Publishes no-op until the
+    # first call site fires; stays no-op for entire run when
+    # --peer-bus is 'none' (default).  Intentionally early in main()
+    # so ``peer_publisher.publish_*`` calls anywhere downstream see
+    # a properly initialised bus.
+    import socket as _s
+    _peer_host = getattr(args, 'peer_host', None) or _s.gethostname()
+    peer_publisher.initialize(
+        getattr(args, 'peer_bus', 'none') or 'none',
+        host=_peer_host,
+        antenna_ref=getattr(args, 'peer_antenna_ref', '') or '',
+        version="peppar-fix-engine",
+    )
 
     if not args.serial:
         log.error("--serial is required (via CLI or host config)")

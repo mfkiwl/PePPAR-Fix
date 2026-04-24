@@ -11,6 +11,7 @@ from peppar_bus.schemas import (
     IntegerFixPayload,
     PositionPayload,
     SCHEMA_VERSION,
+    SlipEventPayload,
     StreamsPayload,
     SvStatePayload,
     TidePayload,
@@ -53,6 +54,31 @@ class RoundtripTest(unittest.TestCase):
         got = from_bytes(IntegerFixPayload, to_bytes(p))
         self.assertEqual(got, p)
 
+    def test_slip_event_multi_detector(self):
+        """A HIGH-confidence slip (two detectors fired) carries a
+        reasons list + both jump magnitudes."""
+        p = SlipEventPayload(
+            ts_mono_ns=5, sv="G08",
+            reasons=["gf_jump", "mw_jump"], conf="HIGH",
+            elev_deg=45.2, lock_duration_ms=12000,
+            gf_jump_m=0.08, mw_jump_cyc=1.3,
+        )
+        got = from_bytes(SlipEventPayload, to_bytes(p))
+        self.assertEqual(got, p)
+        self.assertEqual(got.reasons, ["gf_jump", "mw_jump"])
+
+    def test_slip_event_low_conf_minimal(self):
+        """LOW-confidence solo events set only the fields their
+        detector populates — others stay None."""
+        p = SlipEventPayload(
+            ts_mono_ns=10, sv="E13", reasons=["mw_jump"], conf="LOW",
+            mw_jump_cyc=0.9,
+        )
+        got = from_bytes(SlipEventPayload, to_bytes(p))
+        self.assertEqual(got, p)
+        self.assertIsNone(got.gf_jump_m)
+        self.assertIsNone(got.elev_deg)
+
 
 class CompatibilityTest(unittest.TestCase):
     def test_forward_compat_ignores_unknown_keys(self):
@@ -86,7 +112,8 @@ class CompatibilityTest(unittest.TestCase):
 class SmokeTest(unittest.TestCase):
     def test_every_payload_has_schema_version(self):
         for cls in (HeartbeatPayload, PositionPayload, SvStatePayload,
-                    IntegerFixPayload, ZTDPayload, TidePayload, StreamsPayload):
+                    IntegerFixPayload, ZTDPayload, TidePayload,
+                    SlipEventPayload, StreamsPayload):
             p = cls()
             self.assertEqual(p.schema_version, SCHEMA_VERSION,
                              msg=f"{cls.__name__} schema_version wrong")

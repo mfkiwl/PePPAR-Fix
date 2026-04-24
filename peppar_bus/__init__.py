@@ -19,18 +19,19 @@ when fleet scales.  All share this interface.  See
 ``docs/peer-state-sharing.md`` for the design context.
 """
 
-from peppar_bus._abc import PeerBus, PeerMessage, PeerIdentity
+from peppar_bus._abc import PeerBus, PeerIdentity, PeerMessage, mono_ns
 from peppar_bus._envelope import encode, decode
 from peppar_bus._udp_multicast import UDPMulticastBus
 from peppar_bus import schemas
 
 __all__ = [
     "PeerBus",
-    "PeerMessage",
     "PeerIdentity",
+    "PeerMessage",
     "UDPMulticastBus",
-    "encode",
     "decode",
+    "encode",
+    "mono_ns",
     "schemas",
 ]
 
