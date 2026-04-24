@@ -935,6 +935,29 @@ def run(args) -> int:
                     f"{float(r):.4f}",
                 ])
 
+        # [RESID_PR] / [RESID_PHI] log-line emission, every 60 epochs.
+        # Mirrors `peppar_fix_engine.py` so `scripts/diag_resid_histogram.py`
+        # can run on harness logs the same way it runs on engine logs.
+        # Tokens are sorted by |residual| descending so the worst
+        # offenders appear at the head of each line.
+        if ep_idx % 60 == 0 and resid is not None and len(resid) > 0:
+            _labels = getattr(filt, "last_residual_labels", [])
+            tagged = [
+                (lab[0], lab[1], float(r))
+                for lab, r in zip(_labels, resid)
+            ]
+            tagged.sort(key=lambda t: -abs(t[2]))
+            pr_parts = [f"{sv}:{v:+.2f}" for sv, k, v in tagged
+                        if k == 'pr']
+            phi_parts = [f"{sv}:{v:+.3f}" for sv, k, v in tagged
+                         if k == 'phi']
+            if pr_parts:
+                log.info("  [RESID_PR %d] %d: %s",
+                         ep_idx, len(pr_parts), " ".join(pr_parts))
+            if phi_parts:
+                log.info("  [RESID_PHI %d] %d: %s",
+                         ep_idx, len(phi_parts), " ".join(phi_parts))
+
         # Per-epoch error tracking.  ENU decomposition anchored at
         # the truth point (not the filter estimate) so the ENU
         # values are the true east / north / up components of our
