@@ -691,5 +691,153 @@ class SvStateParsingTest(unittest.TestCase):
         self.assertEqual(snap2.get("G05"), "CONVERGING")
 
 
+class CohortLineParsingTest(unittest.TestCase):
+    """``[COHORT]`` line carries this host's position + ZTD delta
+    from the shared-ARP / shared-atmosphere cohort median.  Part
+    of the fleet consensus observability layer; we surface it in
+    the monitor so an operator can see divergence before the
+    FixSetIntegrityMonitor trips."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "engine.log"
+
+    def test_both_segments(self):
+        self.path.write_text(
+            "2026-04-24 10:00:00,000 INFO   [COHORT] "
+            "pos_cohort_n=3 Δh=2mm Δ3d=4mm  "
+            "ztd_cohort_n=4 Δztd=+12.3mm\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.cohort_pos_n is not None)
+        self.assertEqual(r.state.cohort_pos_n, 3)
+        self.assertEqual(r.state.cohort_delta_h_mm, 2)
+        self.assertEqual(r.state.cohort_delta_3d_mm, 4)
+        self.assertEqual(r.state.cohort_ztd_n, 4)
+        self.assertAlmostEqual(r.state.cohort_delta_ztd_mm, 12.3)
+
+    def test_pos_only(self):
+        """Single-ARP run without a site_ref — engine emits pos
+        segment only; ztd fields must stay None."""
+        self.path.write_text(
+            "2026-04-24 10:00:00,000 INFO   [COHORT] "
+            "pos_cohort_n=2 Δh=5mm Δ3d=8mm\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.cohort_pos_n is not None)
+        self.assertEqual(r.state.cohort_pos_n, 2)
+        self.assertIsNone(r.state.cohort_ztd_n)
+        self.assertIsNone(r.state.cohort_delta_ztd_mm)
+
+    def test_ztd_only(self):
+        """Shared-atmosphere-only host — ztd segment present, pos
+        absent."""
+        self.path.write_text(
+            "2026-04-24 10:00:00,000 INFO   [COHORT] "
+            "ztd_cohort_n=4 Δztd=-5.5mm\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.cohort_ztd_n is not None)
+        self.assertIsNone(r.state.cohort_pos_n)
+        self.assertEqual(r.state.cohort_ztd_n, 4)
+        self.assertAlmostEqual(r.state.cohort_delta_ztd_mm, -5.5)
+
+    def test_later_ztd_only_line_clears_stale_pos(self):
+        """If a subsequent [COHORT] line drops the pos segment (cohort
+        lost a peer mid-run), stale pos fields must not linger —
+        they'd misrepresent the current cohort shape."""
+        self.path.write_text(
+            "2026-04-24 10:00:00,000 INFO   [COHORT] "
+            "pos_cohort_n=3 Δh=2mm Δ3d=4mm  "
+            "ztd_cohort_n=3 Δztd=+1.0mm\n"
+            "2026-04-24 10:00:10,000 INFO   [COHORT] "
+            "ztd_cohort_n=2 Δztd=-0.5mm\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.cohort_ztd_n == 2)
+        self.assertIsNone(r.state.cohort_pos_n)
+        self.assertEqual(r.state.cohort_ztd_n, 2)
+
+    def test_non_cohort_line_ignored(self):
+        """A line mentioning ``cohort`` in some other context must
+        not match."""
+        self.path.write_text(
+            "2026-04-24 10:00:00,000 INFO some other message "
+            "mentioning pos_cohort_n=99 without the tag\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.lines_read >= 1)
+        self.assertIsNone(r.state.cohort_pos_n)
+
+
+class FixSetIntegrityTripParsingTest(unittest.TestCase):
+    """``[FIX_SET_INTEGRITY] TRIPPED`` lines are rare but critical.
+    The monitor emits one per trip (edge-triggered); the widget
+    will render reason + elapsed so an operator can see "a trip
+    happened 4 minutes ago" at a glance."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "engine.log"
+
+    def test_pos_consensus_trip_captured(self):
+        self.path.write_text(
+            "2026-04-24 14:30:00,000 WARNING [FIX_SET_INTEGRITY] TRIPPED "
+            "reason=pos_consensus delta_m=0.234 threshold_m=0.200 "
+            "sustained_epochs=30 at pos=[-4.58e+05, 3.91e+06, 4.47e+06]\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(
+            lambda: r.state.fix_set_integrity_last_trip is not None)
+        ev = r.state.fix_set_integrity_last_trip
+        self.assertEqual(ev.reason, "pos_consensus")
+        self.assertIn("delta_m=0.234", ev.params)
+        self.assertIn("sustained_epochs=30", ev.params)
+        self.assertEqual(ev.timestamp, datetime(2026, 4, 24, 14, 30, 0, 0))
+        self.assertEqual(r.state.fix_set_integrity_trip_count, 1)
+
+    def test_ztd_consensus_trip_captured(self):
+        self.path.write_text(
+            "2026-04-24 14:30:00,000 WARNING [FIX_SET_INTEGRITY] TRIPPED "
+            "reason=ztd_consensus delta_m=+0.123 threshold_m=±0.100 "
+            "sustained_epochs=60 at pos=[1.0, 2.0, 3.0]\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(
+            lambda: r.state.fix_set_integrity_last_trip is not None)
+        ev = r.state.fix_set_integrity_last_trip
+        self.assertEqual(ev.reason, "ztd_consensus")
+        self.assertIn("delta_m=+0.123", ev.params)
+
+    def test_multiple_trips_update_latest_and_count(self):
+        """Two trips in the same session — last_trip reflects the
+        newer one, count goes to 2."""
+        self.path.write_text(
+            "2026-04-24 10:00:00,000 WARNING [FIX_SET_INTEGRITY] TRIPPED "
+            "reason=anchor_collapse anchor_collapse_epochs=60 "
+            "since_epoch=4100 at pos=[1,2,3]\n"
+            "2026-04-24 11:00:00,000 WARNING [FIX_SET_INTEGRITY] TRIPPED "
+            "reason=window_rms window_rms_m=6.20 rms_m=6.80 "
+            "n_samples=25 at pos=[1,2,3]\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(
+            lambda: r.state.fix_set_integrity_trip_count >= 2)
+        self.assertEqual(r.state.fix_set_integrity_trip_count, 2)
+        self.assertEqual(
+            r.state.fix_set_integrity_last_trip.reason, "window_rms")
+
+    def test_unrelated_line_ignored(self):
+        self.path.write_text(
+            "2026-04-24 10:00:00,000 INFO not a trip at all\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.lines_read >= 1)
+        self.assertIsNone(r.state.fix_set_integrity_last_trip)
+        self.assertEqual(r.state.fix_set_integrity_trip_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

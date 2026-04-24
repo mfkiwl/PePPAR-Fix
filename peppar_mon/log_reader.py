@@ -218,6 +218,67 @@ class LogState:
     #: produced by engines without ``--peer-bus``.
     engine_peer_bus_active: bool = False
 
+    #: Last observed ``[COHORT]`` line's position-cohort size —
+    #: number of peers (including self) that contributed to the
+    #: shared-ARP median.  Part of the consensus-monitor
+    #: observability layer; see ``docs/fleet-consensus-monitors.md``.
+    #: None when the engine has never logged a [COHORT] line with
+    #: a position cohort (no peer-bus, cohort < 2, or no
+    #: ``--peer-antenna-ref`` at launch).
+    cohort_pos_n: Optional[int] = None
+
+    #: Last observed horizontal distance from this host to the
+    #: position cohort median, in millimetres.  Engine reports this
+    #: at ~0 mm on a clean shared-antenna fleet; large values mean
+    #: this host disagrees with the cohort (wrong integers, null-
+    #: mode drift, etc.).
+    cohort_delta_h_mm: Optional[int] = None
+
+    #: Last observed 3-D distance from this host to the position
+    #: cohort median, in millimetres.
+    cohort_delta_3d_mm: Optional[int] = None
+
+    #: Last observed ``[COHORT]`` line's ZTD-cohort size — number
+    #: of peers (including self) that contributed to the shared-
+    #: atmosphere median.
+    cohort_ztd_n: Optional[int] = None
+
+    #: Last observed signed ZTD delta (this host minus the ZTD
+    #: cohort median) in millimetres.  Float because engine emits
+    #: one decimal.  Positive = this host's residual is wetter
+    #: than the cohort.
+    cohort_delta_ztd_mm: Optional[float] = None
+
+    #: Most recent ``[FIX_SET_INTEGRITY] TRIPPED`` event observed.
+    #: Carries (timestamp, reason, params-string) so the widget can
+    #: render "last trip: pos_consensus 4:32 ago" and keep the full
+    #: param string for drill-down.  None until the first trip
+    #: observed this session.
+    fix_set_integrity_last_trip: Optional["FixSetIntegrityTrip"] = None
+
+    #: Running count of integrity-monitor trips observed since the
+    #: reader started (includes replayed history).  Useful for
+    #: sanity-checking "one trip per day" expectation at a glance.
+    fix_set_integrity_trip_count: int = 0
+
+
+@dataclass(frozen=True)
+class FixSetIntegrityTrip:
+    """One ``[FIX_SET_INTEGRITY] TRIPPED`` event parsed out of the log.
+
+    Reason is the trip type (``window_rms``, ``anchor_collapse``,
+    ``ztd_impossible``, ``ztd_cycling``, ``pos_consensus``,
+    ``ztd_consensus``).  Params is the raw param substring as
+    emitted by the engine (e.g. ``delta_m=0.234 threshold_m=0.200
+    sustained_epochs=30``) — kept unparsed so the widget can render
+    it verbatim without losing engine-side precision or format
+    changes.  Timestamp comes from the log line's own prefix.
+    """
+
+    timestamp: datetime
+    reason: str
+    params: str
+
 
 class LogReader:
     """Threaded engine-log consumer.
@@ -328,6 +389,8 @@ class LogReader:
         self._parse_antposest_line(line)
         self._parse_stream_lines(line)
         self._parse_peer_bus_active(line)
+        self._parse_cohort_line(line)
+        self._parse_fix_set_integrity_trip(line)
 
     def _parse_antposest_line(self, line: str) -> None:
         """Extract position + σ + nav2Δ from ``[AntPosEst N] ...``.
@@ -401,6 +464,78 @@ class LogReader:
         if tide_mm is not None:
             self.state.earth_tide_mm = int(tide_mm)
             self.state.earth_tide_u_mm = int(m.group("tide_u_mm"))
+
+    def _parse_cohort_line(self, line: str) -> None:
+        """Parse ``  [COHORT] pos_cohort_n=3 Δh=2mm Δ3d=4mm  ztd_cohort_n=4 Δztd=+12.3mm``.
+
+        The engine emits one of these at the AntPosEst 10-epoch
+        cadence whenever peer_subscriber is active and at least
+        one cohort (pos or ztd) has ≥ 2 members.  The pos and ztd
+        segments are independently optional — a single-antenna
+        cohort may produce only the pos segment or only the ztd
+        segment depending on whether ``--peer-antenna-ref`` and/or
+        ``--peer-site-ref`` are set.
+
+        Each segment updates its corresponding state fields; a line
+        that carries only the pos segment leaves the ztd fields
+        untouched (and vice-versa), so stale values don't linger
+        when coverage temporarily drops.  When a segment IS
+        present, we overwrite the last snapshot — the widget only
+        cares about "latest".
+        """
+        if "[COHORT]" not in line:
+            return
+        pos = _COHORT_POS_RE.search(line)
+        if pos is not None:
+            self.state.cohort_pos_n = int(pos.group("n"))
+            self.state.cohort_delta_h_mm = int(pos.group("dh"))
+            self.state.cohort_delta_3d_mm = int(pos.group("d3"))
+        else:
+            # Segment absent on this line — clear so the widget
+            # doesn't render a stale "pos cohort" next to a new
+            # ztd-only line.
+            self.state.cohort_pos_n = None
+            self.state.cohort_delta_h_mm = None
+            self.state.cohort_delta_3d_mm = None
+        ztd = _COHORT_ZTD_RE.search(line)
+        if ztd is not None:
+            self.state.cohort_ztd_n = int(ztd.group("n"))
+            self.state.cohort_delta_ztd_mm = float(ztd.group("d"))
+        else:
+            self.state.cohort_ztd_n = None
+            self.state.cohort_delta_ztd_mm = None
+
+    def _parse_fix_set_integrity_trip(self, line: str) -> None:
+        """Parse ``[FIX_SET_INTEGRITY] TRIPPED reason=X params=... at pos=[...]``.
+
+        Engine emits exactly one of these per trip (edge-triggered
+        per the monitor's interface contract).  We capture the
+        reason token and the raw param substring; the widget
+        renders them alongside "X ago" elapsed from the log line's
+        own timestamp.
+
+        Six possible reasons today (see
+        ``scripts/peppar_fix/fix_set_integrity_monitor.py``):
+        ``window_rms``, ``anchor_collapse``, ``ztd_impossible``,
+        ``ztd_cycling``, ``pos_consensus``, ``ztd_consensus``.  We
+        don't enumerate them here — a future reason auto-surfaces
+        in the widget the moment engine code emits it.
+        """
+        m = _FIX_SET_INTEGRITY_TRIP_RE.search(line)
+        if m is None:
+            return
+        ts = parse_log_timestamp(line)
+        if ts is None:
+            # Trip line with no parseable timestamp — drop the event
+            # rather than fabricate one, since elapsed-since-trip is
+            # the whole point of storing the timestamp.
+            return
+        self.state.fix_set_integrity_last_trip = FixSetIntegrityTrip(
+            timestamp=ts,
+            reason=m.group("reason"),
+            params=m.group("params").strip(),
+        )
+        self.state.fix_set_integrity_trip_count += 1
 
     def _parse_stream_lines(self, line: str) -> None:
         """Capture the NTRIP correction-stream identifiers.
@@ -717,3 +852,34 @@ _SSR_STREAM_RE = re.compile(
 # native publishing.
 # Engine source: scripts/peer_publisher.py
 _PEER_BUS_ACTIVE_RE = re.compile(r"peer-bus active:")
+
+# Matches the ``pos_cohort_n=3 Δh=2mm Δ3d=4mm`` segment of a
+# ``[COHORT]`` line.  Δh / Δ3d come from ``ecef_distance_m`` which
+# is non-negative, but we tolerate a leading sign for safety.
+# Sit loose on whitespace between the three fields — engine joins
+# them with single spaces, but the whole [COHORT] line uses double
+# spaces between the two segments so ``\s+`` handles both.
+_COHORT_POS_RE = re.compile(
+    r"pos_cohort_n=(?P<n>\d+)\s+"
+    r"Δh=(?P<dh>-?\d+)mm\s+"
+    r"Δ3d=(?P<d3>-?\d+)mm"
+)
+
+# Matches the ``ztd_cohort_n=4 Δztd=+12.3mm`` segment.  Δztd is
+# signed with one decimal per the engine's ``:+.1f`` format
+# specifier.
+_COHORT_ZTD_RE = re.compile(
+    r"ztd_cohort_n=(?P<n>\d+)\s+"
+    r"Δztd=(?P<d>[-+]?\d+\.\d+)mm"
+)
+
+# Matches ``[FIX_SET_INTEGRITY] TRIPPED reason=<r> <params> at pos=[...]``.
+# The params substring is whatever the engine formatted for this
+# reason — per-reason layout is in
+# ``scripts/peppar_fix_engine.py::_apply_integrity_trip`` but we
+# don't parse it here; we just capture the whole thing for
+# display.  Non-greedy capture so ``at pos=`` anchors the end.
+_FIX_SET_INTEGRITY_TRIP_RE = re.compile(
+    r"\[FIX_SET_INTEGRITY\] TRIPPED reason=(?P<reason>\w+)\s+"
+    r"(?P<params>.+?)\s+at pos="
+)

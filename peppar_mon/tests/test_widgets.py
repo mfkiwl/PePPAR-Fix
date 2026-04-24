@@ -615,5 +615,139 @@ class SecondOpinionLineTest(unittest.TestCase):
         self.assertEqual(calls["n"], 1)
 
 
+class CohortLineTest(unittest.TestCase):
+    """``CohortLine`` shows cohort delta + last integrity trip on
+    one row.  Tests exercise the pure ``build_cohort_line``
+    renderer — the widget wraps it with textual plumbing but the
+    label logic lives in the pure function."""
+
+    def _make_trip(self, reason: str):
+        """Build a FixSetIntegrityTrip stand-in (attribute-compatible
+        duck type — build_cohort_line reads ``.reason`` only)."""
+        class _T:
+            pass
+        t = _T()
+        t.reason = reason
+        return t
+
+    def test_no_data_shows_em_dash(self):
+        from peppar_mon.widgets import build_cohort_line
+        out = build_cohort_line(
+            cohort_pos_n=None, cohort_delta_h_mm=None,
+            cohort_delta_3d_mm=None, cohort_ztd_n=None,
+            cohort_delta_ztd_mm=None,
+            last_trip=None, elapsed_since_trip_s=None,
+        )
+        self.assertIn("Cohort", out.plain)
+        self.assertIn("—", out.plain)
+
+    def test_pos_only(self):
+        from peppar_mon.widgets import build_cohort_line
+        out = build_cohort_line(
+            cohort_pos_n=3, cohort_delta_h_mm=2,
+            cohort_delta_3d_mm=4, cohort_ztd_n=None,
+            cohort_delta_ztd_mm=None,
+            last_trip=None, elapsed_since_trip_s=None,
+        )
+        plain = out.plain
+        self.assertIn("pos=3", plain)
+        self.assertIn("Δh=2mm", plain)
+        self.assertIn("Δ3d=4mm", plain)
+        self.assertNotIn("ztd=", plain)
+        self.assertNotIn("last trip", plain)
+
+    def test_ztd_only(self):
+        from peppar_mon.widgets import build_cohort_line
+        out = build_cohort_line(
+            cohort_pos_n=None, cohort_delta_h_mm=None,
+            cohort_delta_3d_mm=None, cohort_ztd_n=4,
+            cohort_delta_ztd_mm=-5.5,
+            last_trip=None, elapsed_since_trip_s=None,
+        )
+        plain = out.plain
+        self.assertIn("ztd=4", plain)
+        self.assertIn("Δztd=-5.5mm", plain)
+        self.assertNotIn("pos=", plain)
+
+    def test_both_segments(self):
+        from peppar_mon.widgets import build_cohort_line
+        out = build_cohort_line(
+            cohort_pos_n=3, cohort_delta_h_mm=2,
+            cohort_delta_3d_mm=4, cohort_ztd_n=4,
+            cohort_delta_ztd_mm=12.3,
+            last_trip=None, elapsed_since_trip_s=None,
+        )
+        plain = out.plain
+        self.assertIn("pos=3", plain)
+        self.assertIn("ztd=4", plain)
+        # Signed format — positive renders with explicit +
+        self.assertIn("Δztd=+12.3mm", plain)
+
+    def test_last_trip_appended_in_red(self):
+        from peppar_mon.widgets import build_cohort_line
+        out = build_cohort_line(
+            cohort_pos_n=3, cohort_delta_h_mm=210,
+            cohort_delta_3d_mm=230, cohort_ztd_n=None,
+            cohort_delta_ztd_mm=None,
+            last_trip=self._make_trip("pos_consensus"),
+            elapsed_since_trip_s=272.0,  # 4m 32s
+        )
+        plain = out.plain
+        self.assertIn("last trip:", plain)
+        self.assertIn("pos_consensus", plain)
+        self.assertIn("4m 32s ago", plain)
+        # Reason + elapsed must be styled so the eye finds them.
+        red_found = any("red" in str(span.style)
+                        for span in out.spans
+                        if span.start <= plain.index("pos_consensus")
+                        < span.end)
+        self.assertTrue(red_found, f"expected red on pos_consensus; "
+                                    f"spans={out.spans}")
+
+    def test_trip_without_cohort_data_still_renders(self):
+        """Single-host run that's had an integrity trip must still
+        show the trip — don't hide it behind "no cohort data"."""
+        from peppar_mon.widgets import build_cohort_line
+        out = build_cohort_line(
+            cohort_pos_n=None, cohort_delta_h_mm=None,
+            cohort_delta_3d_mm=None, cohort_ztd_n=None,
+            cohort_delta_ztd_mm=None,
+            last_trip=self._make_trip("window_rms"),
+            elapsed_since_trip_s=60.0,
+        )
+        plain = out.plain
+        self.assertIn("—", plain)
+        self.assertIn("last trip:", plain)
+        self.assertIn("window_rms", plain)
+
+    def test_update_no_op_when_unchanged(self):
+        from peppar_mon.widgets import CohortLine
+        w = CohortLine(
+            cohort_pos_n=3, cohort_delta_h_mm=2,
+            cohort_delta_3d_mm=4,
+            cohort_ztd_n=None, cohort_delta_ztd_mm=None,
+            last_trip=None, elapsed_since_trip_s=None,
+        )
+        calls = {"n": 0}
+
+        def fake_refresh():
+            calls["n"] += 1
+        w.refresh = fake_refresh  # type: ignore[method-assign]
+
+        w.update_state(
+            cohort_pos_n=3, cohort_delta_h_mm=2,
+            cohort_delta_3d_mm=4,
+            cohort_ztd_n=None, cohort_delta_ztd_mm=None,
+            last_trip=None, elapsed_since_trip_s=None,
+        )  # no-op
+        w.update_state(
+            cohort_pos_n=3, cohort_delta_h_mm=5,  # changed!
+            cohort_delta_3d_mm=4,
+            cohort_ztd_n=None, cohort_delta_ztd_mm=None,
+            last_trip=None, elapsed_since_trip_s=None,
+        )  # should fire
+        self.assertEqual(calls["n"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

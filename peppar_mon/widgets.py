@@ -22,6 +22,7 @@ from rich.table import Table
 from rich.text import Text
 
 from peppar_mon._util import (
+    format_elapsed_short,
     format_uncertainty,
     uncertain_decimals_deg,
     uncertain_decimals_m,
@@ -737,6 +738,157 @@ class FilterStateLine(Widget):
         t.append("   EPH ", style="bold")
         t.append(self._eph_mount if self._eph_mount else "—")
         return t
+
+
+class CohortLine(Widget):
+    """Single-line cohort-consensus indicator + last integrity trip.
+
+    Layout when engine is participating in a cohort::
+
+        Cohort pos=3 Δh=2mm Δ3d=4mm   ztd=4 Δztd=+12.3mm
+
+    With a recent FixSetIntegrityMonitor trip appended::
+
+        Cohort pos=3 Δh=2mm Δ3d=4mm   last trip: pos_consensus 4m 32s ago
+
+    Two kinds of information on one row — they share the "how does
+    this host compare to the cohort?" question, and both come from
+    the fleet consensus Part 1+2 plumbing:
+
+      * ``pos / ztd`` — this host's distance from the shared-ARP
+        (pos) and shared-atmosphere (ztd) cohort medians as reported
+        by the engine's ``[COHORT]`` log line.  Source: Bravo's Part
+        1 (``7a7ad12``).  Updates every ~10 epochs.
+      * ``last trip`` — most recent ``[FIX_SET_INTEGRITY] TRIPPED``
+        reason + elapsed.  Fires at most once per trip (edge-
+        triggered) so the elapsed-since-trip is the live signal:
+        a trip 30 s ago is an active concern, a trip 6 h ago is
+        historical.  Source: all integrity-monitor reasons
+        (``pos_consensus``, ``ztd_consensus``, ``anchor_collapse``,
+        ``window_rms``, ``ztd_impossible``, ``ztd_cycling``).
+        Rendered in red so it draws the eye even when the cohort
+        row is otherwise fine.
+
+    When no cohort is available (no peer-bus, single-host run,
+    cohort < 2) the line shows ``Cohort —``.  When no trip has
+    ever been observed this session, the trip segment is absent.
+    """
+
+    DEFAULT_CSS = """
+    CohortLine {
+        height: 1;
+        width: auto;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        cohort_pos_n: Optional[int] = None,
+        cohort_delta_h_mm: Optional[int] = None,
+        cohort_delta_3d_mm: Optional[int] = None,
+        cohort_ztd_n: Optional[int] = None,
+        cohort_delta_ztd_mm: Optional[float] = None,
+        last_trip: Optional[object] = None,
+        elapsed_since_trip_s: Optional[float] = None,
+        id: Optional[str] = None,  # noqa: A002
+        classes: Optional[str] = None,
+    ) -> None:
+        super().__init__(id=id, classes=classes)
+        self._pos_n = cohort_pos_n
+        self._dh_mm = cohort_delta_h_mm
+        self._d3_mm = cohort_delta_3d_mm
+        self._ztd_n = cohort_ztd_n
+        self._dztd_mm = cohort_delta_ztd_mm
+        self._last_trip = last_trip
+        self._elapsed_s = elapsed_since_trip_s
+
+    def update_state(
+        self,
+        *,
+        cohort_pos_n: Optional[int],
+        cohort_delta_h_mm: Optional[int],
+        cohort_delta_3d_mm: Optional[int],
+        cohort_ztd_n: Optional[int],
+        cohort_delta_ztd_mm: Optional[float],
+        last_trip: Optional[object],
+        elapsed_since_trip_s: Optional[float],
+    ) -> None:
+        if (
+            cohort_pos_n == self._pos_n
+            and cohort_delta_h_mm == self._dh_mm
+            and cohort_delta_3d_mm == self._d3_mm
+            and cohort_ztd_n == self._ztd_n
+            and cohort_delta_ztd_mm == self._dztd_mm
+            and last_trip == self._last_trip
+            and elapsed_since_trip_s == self._elapsed_s
+        ):
+            return
+        self._pos_n = cohort_pos_n
+        self._dh_mm = cohort_delta_h_mm
+        self._d3_mm = cohort_delta_3d_mm
+        self._ztd_n = cohort_ztd_n
+        self._dztd_mm = cohort_delta_ztd_mm
+        self._last_trip = last_trip
+        self._elapsed_s = elapsed_since_trip_s
+        self.refresh()
+
+    def render(self) -> Text:
+        return build_cohort_line(
+            cohort_pos_n=self._pos_n,
+            cohort_delta_h_mm=self._dh_mm,
+            cohort_delta_3d_mm=self._d3_mm,
+            cohort_ztd_n=self._ztd_n,
+            cohort_delta_ztd_mm=self._dztd_mm,
+            last_trip=self._last_trip,
+            elapsed_since_trip_s=self._elapsed_s,
+        )
+
+
+def build_cohort_line(
+    *,
+    cohort_pos_n: Optional[int],
+    cohort_delta_h_mm: Optional[int],
+    cohort_delta_3d_mm: Optional[int],
+    cohort_ztd_n: Optional[int],
+    cohort_delta_ztd_mm: Optional[float],
+    last_trip: Optional[object],
+    elapsed_since_trip_s: Optional[float],
+) -> Text:
+    """Pure renderer for ``CohortLine``.
+
+    Split out so unit tests exercise the label logic without
+    instantiating a Textual widget.  ``last_trip`` is a
+    ``FixSetIntegrityTrip`` from ``peppar_mon.log_reader``
+    but declared as ``object`` here to keep the widgets module
+    free of a back-import on a dataclass defined in log_reader.
+    """
+    t = Text()
+    t.append("Cohort ", style="bold")
+    has_pos = cohort_pos_n is not None
+    has_ztd = cohort_ztd_n is not None
+    if not has_pos and not has_ztd:
+        t.append("—")
+    if has_pos:
+        t.append(f"pos={cohort_pos_n} ")
+        t.append(f"Δh={cohort_delta_h_mm}mm ")
+        t.append(f"Δ3d={cohort_delta_3d_mm}mm")
+    if has_ztd:
+        if has_pos:
+            t.append("   ")
+        t.append(f"ztd={cohort_ztd_n} ")
+        # Keep the signed 1-decimal format from the engine side so
+        # the display reads the same as the log line it came from.
+        t.append(f"Δztd={cohort_delta_ztd_mm:+.1f}mm")
+    if last_trip is not None and elapsed_since_trip_s is not None:
+        if has_pos or has_ztd:
+            t.append("   ")
+        t.append("last trip: ", style="bold red")
+        reason = getattr(last_trip, "reason", "?")
+        t.append(reason, style="red")
+        t.append(f" {format_elapsed_short(elapsed_since_trip_s)} ago",
+                 style="red")
+    return t
 
 
 class FleetStateLine(Widget):

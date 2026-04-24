@@ -35,7 +35,7 @@ from textual.widgets import Static, Header, Footer
 from peppar_mon._util import format_elapsed_short, format_uptime
 from peppar_mon.log_reader import LogReader
 from peppar_mon.widgets import (
-    AntennaPositionLine, FilterStateLine, FleetStateLine,
+    AntennaPositionLine, CohortLine, FilterStateLine, FleetStateLine,
     SecondOpinionLine, StateBar, SvStateTable,
 )
 
@@ -167,6 +167,19 @@ class PepparMonApp(App):
                 yield FilterStateLine(
                     id="filter-state", classes="top-row-right",
                 )
+            # Row 3½: cohort delta + last integrity trip.  The
+            # [COHORT] / [FIX_SET_INTEGRITY] log lines are a
+            # different flavour of fleet observability than the
+            # FleetStateLine below: these are what the engine sees
+            # about its own cohort, whereas FleetStateLine is what
+            # peppar-mon sees aggregating its own peer-bus feed.
+            # Both are useful, both fit on a single row, so we
+            # show both.
+            with Horizontal(classes="top-row"):
+                yield Static("", classes="top-row-left")
+                yield CohortLine(
+                    id="cohort", classes="top-row-right",
+                )
             # Row 4 (fleet mode only): cross-host summary.
             if self._fleet_mode:
                 with Horizontal(classes="top-row"):
@@ -265,6 +278,27 @@ class PepparMonApp(App):
             earth_tide_u_mm=s.earth_tide_u_mm,
             ssr_mount=s.ssr_mount,
             eph_mount=s.eph_mount,
+        )
+        elapsed_since_trip_s = None
+        if s.fix_set_integrity_last_trip is not None:
+            # Compute elapsed against the engine's wall clock that
+            # the log line's timestamp carries.  datetime.now() with
+            # .astimezone() would drag in tz conversions that the
+            # log parse doesn't do — the parsed timestamp is naive-
+            # local matching the log format, and now_tz above is the
+            # current wall clock in the same frame.
+            elapsed = (
+                datetime.now() - s.fix_set_integrity_last_trip.timestamp
+            ).total_seconds()
+            elapsed_since_trip_s = max(0.0, elapsed)
+        self.query_one("#cohort", CohortLine).update_state(
+            cohort_pos_n=s.cohort_pos_n,
+            cohort_delta_h_mm=s.cohort_delta_h_mm,
+            cohort_delta_3d_mm=s.cohort_delta_3d_mm,
+            cohort_ztd_n=s.cohort_ztd_n,
+            cohort_delta_ztd_mm=s.cohort_delta_ztd_mm,
+            last_trip=s.fix_set_integrity_last_trip,
+            elapsed_since_trip_s=elapsed_since_trip_s,
         )
         if self._aggregator is not None:
             from peppar_mon.fleet import compute_summary
