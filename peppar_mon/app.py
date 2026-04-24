@@ -35,7 +35,8 @@ from textual.widgets import Static, Header, Footer
 from peppar_mon._util import format_elapsed_short, format_uptime
 from peppar_mon.log_reader import LogReader
 from peppar_mon.widgets import (
-    AntennaPositionLine, SecondOpinionLine, StateBar, SvStateTable,
+    AntennaPositionLine, FilterStateLine, SecondOpinionLine,
+    StateBar, SvStateTable,
 )
 
 # If no new timestamped line has landed in the log within this many
@@ -144,6 +145,13 @@ class PepparMonApp(App):
                 yield SecondOpinionLine(
                     id="second-opinion", classes="top-row-right",
                 )
+            # Row 3: ZTD + correction-stream mounts (right-aligned so
+            # it hugs the same edge as the position readouts above).
+            with Horizontal(classes="top-row"):
+                yield Static("", classes="top-row-left")
+                yield FilterStateLine(
+                    id="filter-state", classes="top-row-right",
+                )
             yield StateBar(
                 machine_name="AntPosEst",
                 all_states=_ANT_POS_EST_STATES,
@@ -194,10 +202,17 @@ class PepparMonApp(App):
             state=s.ant_pos_est_state,
             position=s.antenna_position,
             sigma_m=s.antenna_sigma_m,
+            worst_sigma_m=s.worst_sigma_m,
             reached_anchored=s.reached_anchored,
         )
         self.query_one("#second-opinion", SecondOpinionLine).update_delta(
             s.nav2_delta_m,
+        )
+        self.query_one("#filter-state", FilterStateLine).update_state(
+            ztd_m=s.ztd_m,
+            ztd_sigma_mm=s.ztd_sigma_mm,
+            ssr_mount=s.ssr_mount,
+            eph_mount=s.eph_mount,
         )
 
     def _uptime_line(self) -> str:

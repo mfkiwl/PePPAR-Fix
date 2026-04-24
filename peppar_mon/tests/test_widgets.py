@@ -189,7 +189,7 @@ class SvStateTableRenderTest(unittest.TestCase):
         All three constellations are NL-capable here so the NL
         cells render counts (not ``-``) — isolates partitioning
         from the capability signal tested separately below.
-        Columns: Tracked, Floating, WL, Waiting, Anchoring, Anchored.
+        Columns: Tracked, Waiting, Floating, Converging, Anchoring, Anchored.
         """
         self.table.update(
             sv_states={
@@ -204,19 +204,20 @@ class SvStateTableRenderTest(unittest.TestCase):
         console.print(self.table.render())
         out = console.export_text()
         gps_line = next(line for line in out.splitlines() if "GPS" in line)
-        # GPS: 2×FLOATING, 1×CONVERGING → 0 tracked, 2 float, 1 wl.
+        # GPS: 2×FLOATING, 1×CONVERGING → tracked=0, waiting=0,
+        # float=2, converging=1, anchoring=0, anchored=0.
         self.assertEqual(
-            gps_line.split(), ["GPS", "0", "2", "1", "0", "0", "0"],
+            gps_line.split(), ["GPS", "0", "0", "2", "1", "0", "0"],
         )
         gal_line = next(line for line in out.splitlines() if "GAL" in line)
-        # GAL: 1×NL_SHORT, 1×NL_LONG.
+        # GAL: 1×ANCHORING (short), 1×ANCHORED (long).
         self.assertEqual(
             gal_line.split(), ["GAL", "0", "0", "0", "0", "1", "1"],
         )
         bds_line = next(line for line in out.splitlines() if "BDS" in line)
         # BDS: 1×WAITING.
         self.assertEqual(
-            bds_line.split(), ["BDS", "0", "0", "0", "1", "0", "0"],
+            bds_line.split(), ["BDS", "0", "1", "0", "0", "0", "0"],
         )
 
     def test_squelched_is_its_own_column(self):
@@ -234,9 +235,10 @@ class SvStateTableRenderTest(unittest.TestCase):
         console.print(self.table.render())
         out = console.export_text()
         gps_line = next(line for line in out.splitlines() if "GPS" in line)
-        # Tracked=0, Float=1 (G17), WL=0, WAITING=2, NL_S=0, NL_L=0.
+        # tracked=0, waiting=2 (G05+G10), float=1 (G17),
+        # converging=0, anchoring=0, anchored=0.
         self.assertEqual(
-            gps_line.split(), ["GPS", "0", "1", "0", "2", "0", "0"],
+            gps_line.split(), ["GPS", "0", "2", "1", "0", "0", "0"],
         )
 
     def test_tracking_and_float_are_separate_columns(self):
@@ -255,9 +257,10 @@ class SvStateTableRenderTest(unittest.TestCase):
         console.print(self.table.render())
         out = console.export_text()
         gps_line = next(line for line in out.splitlines() if "GPS" in line)
-        # Tracked=1 (G05 TRACKING), Float=1 (G10 FLOATING), rest zero.
+        # tracked=1 (G05 TRACKING), waiting=0, float=1 (G10 FLOATING),
+        # converging=0, anchoring=0, anchored=0.
         self.assertEqual(
-            gps_line.split(), ["GPS", "1", "1", "0", "0", "0", "0"],
+            gps_line.split(), ["GPS", "1", "0", "1", "0", "0", "0"],
         )
 
     def test_update_no_op_when_counts_unchanged(self):
@@ -319,9 +322,9 @@ class SvStateTableCapabilityTest(unittest.TestCase):
         )
         out = self._render(table)
         gps_line = next(line for line in out.splitlines() if "GPS" in line)
-        # Tracked=0, Float=1, WL=1, WAITING=0, NL_S=-, NL_L=-.
+        # tracked=0, waiting=0, float=1, converging=1, NL_S=-, NL_L=-.
         self.assertEqual(
-            gps_line.split(), ["GPS", "0", "1", "1", "0", "-", "-"],
+            gps_line.split(), ["GPS", "0", "0", "1", "1", "-", "-"],
         )
 
     def test_nl_cells_zero_when_capable_but_empty(self):
@@ -336,9 +339,9 @@ class SvStateTableCapabilityTest(unittest.TestCase):
         )
         out = self._render(table)
         gal_line = next(line for line in out.splitlines() if "GAL" in line)
-        # Tracked=0, Float=1, WL=1, WAITING=0, NL_S=0, NL_L=0.
+        # tracked=0, waiting=0, float=1, converging=1, NL_S=0, NL_L=0.
         self.assertEqual(
-            gal_line.split(), ["GAL", "0", "1", "1", "0", "0", "0"],
+            gal_line.split(), ["GAL", "0", "0", "1", "1", "0", "0"],
         )
 
     def test_ptpmon_scenario(self):
@@ -347,10 +350,10 @@ class SvStateTableCapabilityTest(unittest.TestCase):
         some counts in each state; BDS not present.  All SVs here
         come from the FLOATING state (admitted to the filter), not
         TRACKING (pre-admit).  Expected rendering
-        (columns: Tracked, Floating, WL, Waiting, Anchoring, Anchored):
+        (columns: Tracked, Waiting, Floating, Converging, Anchoring, Anchored):
 
-            GPS  0  3  6  0  -  -
-            GAL  0  3  4  2  1  0
+            GPS  0  0  3  6  -  -
+            GAL  0  2  3  4  1  0
             BDS  -  -  -  -  -  -
         """
         sv_states = {
@@ -372,10 +375,10 @@ class SvStateTableCapabilityTest(unittest.TestCase):
         gal_line = next(line for line in out.splitlines() if "GAL" in line)
         bds_line = next(line for line in out.splitlines() if "BDS" in line)
         self.assertEqual(
-            gps_line.split(), ["GPS", "0", "3", "6", "0", "-", "-"],
+            gps_line.split(), ["GPS", "0", "0", "3", "6", "-", "-"],
         )
         self.assertEqual(
-            gal_line.split(), ["GAL", "0", "3", "4", "2", "1", "0"],
+            gal_line.split(), ["GAL", "0", "2", "3", "4", "1", "0"],
         )
         self.assertEqual(
             bds_line.split(), ["BDS", "-", "-", "-", "-", "-", "-"],

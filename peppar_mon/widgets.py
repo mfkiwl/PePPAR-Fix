@@ -70,32 +70,59 @@ _CONSTELLATION_ROWS: tuple[tuple[str, str], ...] = (
     ("C", "BDS"),
 )
 
-# Column definitions: (header, aggregated states, needs_nl_capability).
-# Column ORDER is operationally meaningful — mirrors the usual SV
-# trajectory per ``scripts/peppar_fix/sv_state.py``:
+# Column definitions: (header, per-SV position-res estimate,
+# aggregated states, needs_nl_capability).  Column ORDER is
+# operationally meaningful — left-to-right roughly tracks SV
+# trust, starting from "observed but not contributing" on the
+# left and ending with the anchored fix set on the right:
 #
 #   Tracked    — receiver sees SV (SvAmbState.TRACKING), not yet
 #                admitted to the float PPP filter
+#   Waiting    — cooldown-bound after a slip / false fix
+#                (SvAmbState.WAITING).  Placed to the LEFT of
+#                Floating (updated 2026-04-23) so the two
+#                "not currently contributing" columns
+#                (Tracked + Waiting) sit together; a returning
+#                SV moves right through Floating → Converging →
+#                Anchoring → Anchored.
 #   Floating   — admitted, MW accumulating, no integer fix yet
 #                (SvAmbState.FLOATING)
 #   Converging — wide-lane integer fixed, narrow-lane pending
-#                (SvAmbState.CONVERGING)
-#   Waiting    — cooldown-bound after a slip / false fix
-#                (SvAmbState.WAITING).  Placed between Converging
-#                and Anchoring because a recovered SV typically
-#                re-fixes WL off cooldown and then heads into
-#                Anchoring next.
+#                (SvAmbState.CONVERGING — was "WL" until
+#                2026-04-23, renamed to match the state name)
 #   Anchoring  — NL integer landed, earning Δaz validation
 #                (SvAmbState.ANCHORING).  Short-term member of the
 #                fix set.
 #   Anchored   — NL integer has survived ≥ 8° Δaz
 #                (SvAmbState.ANCHORED).  Long-term member.
 #
-# Reading left-to-right gives a coherent progression story.  The
-# Tracked/Floating split (added 2026-04-21) matters during
-# bootstrap where Floating lags Tracked as the engine admits SVs
-# to the filter at its own pace.  A persistent gap between the
-# two indicates admission-path issues.
+# The resolution line below each header gives an approximate
+# per-SV position-contribution σ at that stage.  Order-of-
+# magnitude estimates, based on measurement noise + ambiguity
+# state:
+#
+#   Tracked / Waiting  — SV not in fix set, no contribution (— )
+#   Floating           — float IF ambiguity, PR-limited per-SV
+#                        (σ_PR≈3 m before convergence, ~0.5 m
+#                        after tens of epochs of MW averaging)
+#   Converging         — WL integer fixed; NL float dominates.
+#                        λ_NL ≈ 10.7 cm so per-SV contribution
+#                        settles near ~15 cm once MW WL is stable
+#   Anchoring          — NL integer just fixed but unvalidated
+#                        over Δaz.  Per-SV phase residual at
+#                        SIGMA_PHI_IF scale (~3 cm) with residual
+#                        wrong-integer risk bounded by bootstrap
+#                        success rate
+#   Anchored           — NL validated over ≥ 8° Δaz.  Per-SV
+#                        residual limited by phase noise +
+#                        leftover obs-model gaps (~5 mm on clean
+#                        geometry, ~1 cm with partial obs-model)
+#
+# These are displayed as a second header line.  Exact values are
+# approximations — the real per-SV contribution depends on
+# elevation, multipath, and how much of the obs-model (tides,
+# PCVs, wind-up) has been applied.  The point is for the operator
+# to see the scale progression, not to compute a precise number.
 #
 # Third field flags columns whose values should render as ``-``
 # (architecturally impossible) when the constellation lacks NL
@@ -103,20 +130,13 @@ _CONSTELLATION_ROWS: tuple[tuple[str, str], ...] = (
 # with the correction stream's published phase biases for NL
 # integer fixing.  Only Anchoring and Anchored need the capability
 # check; the rest are reachable on any dual-freq GNSS.
-#
-# Column header strings are kept compact so the SvStateTable rows
-# stay narrow (three-constellation fleet on an 80-col terminal is
-# the target).  "Anchoring" / "Anchored" don't abbreviate cleanly,
-# so we use them in full; "Converging" loses to the shorter "WL"
-# as a compromise — the column's *state* is the phase between WL
-# and NL (narrow-lane pending), which "WL" still communicates.
-_COLUMNS: tuple[tuple[str, frozenset[str], bool], ...] = (
-    ("Tracked",   frozenset({"TRACKING"}),   False),
-    ("Floating",  frozenset({"FLOATING"}),   False),
-    ("WL",        frozenset({"CONVERGING"}), False),
-    ("Waiting",   frozenset({"WAITING"}),    False),
-    ("Anchoring", frozenset({"ANCHORING"}),  True),
-    ("Anchored",  frozenset({"ANCHORED"}),   True),
+_COLUMNS: tuple[tuple[str, str, frozenset[str], bool], ...] = (
+    ("Tracked",    "—",      frozenset({"TRACKING"}),   False),
+    ("Waiting",    "—",      frozenset({"WAITING"}),    False),
+    ("Floating",   "~0.5 m", frozenset({"FLOATING"}),   False),
+    ("Converging", "~15 cm", frozenset({"CONVERGING"}), False),
+    ("Anchoring",  "~3 cm",  frozenset({"ANCHORING"}),  True),
+    ("Anchored",   "~5 mm",  frozenset({"ANCHORED"}),   True),
 )
 
 # Rendered in cells that are architecturally impossible given the
@@ -345,14 +365,22 @@ class SvStateTable(Widget):
             show_edge=False,
         )
         table.add_column("", style="bold")
-        for col_name, _members, _needs_nl in _COLUMNS:
-            table.add_column(col_name, justify="right")
+        # Two-line headers: column name on top, approximate per-SV
+        # position-contribution σ underneath.  Rich renders the \n
+        # as a soft break inside the header cell, preserving
+        # right-justification on both lines.  The sub-header is
+        # styled ``dim`` so it reads as annotation rather than data.
+        for col_name, col_res, _members, _needs_nl in _COLUMNS:
+            header = Text()
+            header.append(col_name)
+            header.append(f"\n{col_res}", style="dim")
+            table.add_column(header, justify="right")
         for prefix, label in _CONSTELLATION_ROWS:
             row_counts = counts.get(prefix, {})
             cells = [label]
             constellation_observed = prefix in observed
             nl_capable = prefix in self._nl_capable
-            for _col_name, members, needs_nl in _COLUMNS:
+            for _col_name, _col_res, members, needs_nl in _COLUMNS:
                 if not constellation_observed:
                     cells.append(_NOT_POSSIBLE)
                 elif needs_nl and not nl_capable:
@@ -430,6 +458,7 @@ class AntennaPositionLine(Widget):
         state: Optional[str] = None,
         position: Optional[tuple[float, float, float]] = None,
         sigma_m: Optional[float] = None,
+        worst_sigma_m: Optional[float] = None,
         reached_anchored: bool = False,
         id: Optional[str] = None,  # noqa: A002
         classes: Optional[str] = None,
@@ -438,6 +467,7 @@ class AntennaPositionLine(Widget):
         self._state = state
         self._position = position
         self._sigma_m = sigma_m
+        self._worst_sigma_m = worst_sigma_m
         self._reached_anchored = reached_anchored
 
     def update_position(
@@ -446,6 +476,7 @@ class AntennaPositionLine(Widget):
         state: Optional[str],
         position: Optional[tuple[float, float, float]],
         sigma_m: Optional[float],
+        worst_sigma_m: Optional[float] = None,
         reached_anchored: bool = False,
     ) -> None:
         """Record a new snapshot; no-op if nothing display-relevant
@@ -456,12 +487,14 @@ class AntennaPositionLine(Widget):
             state == self._state
             and position == self._position
             and sigma_m == self._sigma_m
+            and worst_sigma_m == self._worst_sigma_m
             and reached_anchored == self._reached_anchored
         ):
             return
         self._state = state
         self._position = position
         self._sigma_m = sigma_m
+        self._worst_sigma_m = worst_sigma_m
         self._reached_anchored = reached_anchored
         self.refresh()
 
@@ -491,25 +524,30 @@ class AntennaPositionLine(Widget):
             # No numeric block yet — state label alone.
             return t
         lat, lon, alt = self._position
-        # Format matches engine's current precision (:.6f lat/lon,
-        # :.1f alt).  Widens automatically when main lands the
-        # precision ask — the regex captures whatever's logged,
-        # so the string we get already has the full precision;
-        # our format here re-stringifies with enough decimals to
-        # preserve what the engine emitted.  Using :.8f / :.3f
-        # gives a fixed width today (tail zeros) and becomes
-        # exact when the engine widens.  Trailing-zero shading
-        # from uncertainty handles the visual.
+        # Format to the widest precision the engine ever emits
+        # (8 dp lat/lon ≈ 1.1 mm at the equator, 3 dp alt ≈ 1 mm).
+        # Trailing-digit shading from uncertainty handles the
+        # visual when the engine logs fewer digits — the regex
+        # captures the value, we re-stringify to fixed width, and
+        # uncertain_decimals_deg/m dim the digits below σ quantum.
+        # A trailing ``°`` labels the angular units on lat/lon so
+        # they aren't confused with signed-decimal altitude.
         lat_s = f"{lat:.8f}"
         lon_s = f"{lon:.8f}"
         alt_s = f"{alt:.3f}"
         self._append_shaded_deg(t, lat_s)
+        t.append("°")
         t.append(" / ")
         self._append_shaded_deg(t, lon_s)
+        t.append("°")
         t.append(" / ")
         self._append_shaded_m(t, alt_s)
-        t.append(" ")
-        t.append(format_uncertainty(self._sigma_m))
+        t.append(" m")
+        t.append("  positionσ ")
+        t.append(format_uncertainty(self._sigma_m).lstrip("± "))
+        if self._worst_sigma_m is not None:
+            t.append("  worstσ ")
+            t.append(format_uncertainty(self._worst_sigma_m).lstrip("± "))
         return t
 
     def _append_shaded_deg(self, t: Text, s: str) -> None:
@@ -588,5 +626,92 @@ class SecondOpinionLine(Widget):
         if self._delta is None:
             t.append("—")
         else:
-            t.append(f"{self._delta:.1f} m 3D")
+            # Δ annotates the numeric offset as a delta (matches
+            # the log field ``nav2Δ`` and Bob's 2026-04-23 ask).
+            # Layout: ``NN.N m Δ 3D``.
+            t.append(f"{self._delta:.1f} m Δ 3D")
+        return t
+
+
+class FilterStateLine(Widget):
+    """Single-line ``ZTD`` + correction-stream indicator.
+
+    Layout::
+
+        ZTD -2.85 m ±293 mm   SSR SSRA00CNE0   EPH BCEP00BKG0
+
+    Three pieces:
+
+      * ``ZTD`` — current residual ZTD above Saastamoinen a priori.
+        Displayed in m (signed), with ±σ in mm if the engine
+        published it.  Renders ``—`` when no AntPosEst line with
+        ZTD has arrived yet.
+      * ``SSR`` — NTRIP mount name for the SSR corrections stream
+        (orbit/clock/bias).  ``—`` when not connected.
+      * ``EPH`` — NTRIP mount name for the broadcast-ephemeris
+        stream.  ``—`` when not connected.
+
+    The correction-stream names are static-ish during a run
+    (engine connects once at startup); they're shown here so a
+    shared-lab monitor can distinguish sessions running on
+    CNES vs WHU vs BCEP without having to grep the log.
+    """
+
+    DEFAULT_CSS = """
+    FilterStateLine {
+        height: 1;
+        width: auto;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        ztd_m: Optional[float] = None,
+        ztd_sigma_mm: Optional[int] = None,
+        ssr_mount: Optional[str] = None,
+        eph_mount: Optional[str] = None,
+        id: Optional[str] = None,  # noqa: A002
+        classes: Optional[str] = None,
+    ) -> None:
+        super().__init__(id=id, classes=classes)
+        self._ztd_m = ztd_m
+        self._ztd_sigma_mm = ztd_sigma_mm
+        self._ssr_mount = ssr_mount
+        self._eph_mount = eph_mount
+
+    def update_state(
+        self,
+        *,
+        ztd_m: Optional[float],
+        ztd_sigma_mm: Optional[int],
+        ssr_mount: Optional[str],
+        eph_mount: Optional[str],
+    ) -> None:
+        if (
+            ztd_m == self._ztd_m
+            and ztd_sigma_mm == self._ztd_sigma_mm
+            and ssr_mount == self._ssr_mount
+            and eph_mount == self._eph_mount
+        ):
+            return
+        self._ztd_m = ztd_m
+        self._ztd_sigma_mm = ztd_sigma_mm
+        self._ssr_mount = ssr_mount
+        self._eph_mount = eph_mount
+        self.refresh()
+
+    def render(self) -> Text:
+        t = Text()
+        t.append("ZTD ", style="bold")
+        if self._ztd_m is None:
+            t.append("—")
+        else:
+            t.append(f"{self._ztd_m:+.3f} m")
+            if self._ztd_sigma_mm is not None:
+                t.append(f" ±{self._ztd_sigma_mm} mm")
+        t.append("   SSR ", style="bold")
+        t.append(self._ssr_mount if self._ssr_mount else "—")
+        t.append("   EPH ", style="bold")
+        t.append(self._eph_mount if self._eph_mount else "—")
         return t

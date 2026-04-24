@@ -241,9 +241,9 @@ class AntPosEstLineTest(unittest.TestCase):
     def test_typical_line_extracts_all_fields(self):
         self.path.write_text(
             "2026-04-21 17:48:07,703 INFO   [AntPosEst 4210] "
-            "σ=0.023m pos=(40.123456, -90.123456, 198.2) n=12 amb=12 "
+            "positionσ=0.023m pos=(40.123456, -90.123456, 198.2) n=12 amb=12 "
             "WL: 12/17 fixed NL: 3 fixed R=5.4 P=0.997 nav2Δ=2.7m "
-            "ZTD=+274±3mm\n"
+            "ZTD=+274±3mm worstσ=1.5m\n"
         )
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
         _wait_until(lambda: r.state.antenna_position is not None)
@@ -252,13 +252,45 @@ class AntPosEstLineTest(unittest.TestCase):
             r.state.antenna_position, (40.123456, -90.123456, 198.2),
         )
         self.assertEqual(r.state.nav2_delta_m, 2.7)
+        self.assertEqual(r.state.worst_sigma_m, 1.5)
+        self.assertAlmostEqual(r.state.ztd_m, 0.274, places=6)
+        self.assertEqual(r.state.ztd_sigma_mm, 3)
+
+    def test_signed_ztd_and_missing_sigma(self):
+        """ZTD can be negative and the ±sigma is optional — older
+        engine versions emitted bare ``ZTD=<mm>mm``."""
+        self.path.write_text(
+            "2026-04-21 17:48:07,703 INFO   [AntPosEst 10] "
+            "positionσ=2.0m pos=(40.0, -90.0, 200.0) "
+            "ZTD=-2850mm worstσ=1000.0m\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.antenna_position is not None)
+        self.assertAlmostEqual(r.state.ztd_m, -2.850, places=6)
+        self.assertIsNone(r.state.ztd_sigma_mm)
+        self.assertEqual(r.state.worst_sigma_m, 1000.0)
+
+    def test_stream_identifiers_captured(self):
+        """NTRIP mount names from the engine startup banner feed
+        LogState.eph_mount / ssr_mount."""
+        self.path.write_text(
+            "2026-04-23 20:11:18,257 INFO Ephemeris stream: "
+            "ntrip.data.gnss.ga.gov.au:443/BCEP00BKG0\n"
+            "2026-04-23 20:11:18,257 INFO SSR stream: "
+            "products.igs-ip.net:443/SSRA00CNE0\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.eph_mount is not None
+                    and r.state.ssr_mount is not None)
+        self.assertEqual(r.state.eph_mount, "BCEP00BKG0")
+        self.assertEqual(r.state.ssr_mount, "SSRA00CNE0")
 
     def test_negative_altitude_parses(self):
         """Engine has been briefly seen emitting negative altitudes
         during a filter glitch.  Regex must accept them."""
         self.path.write_text(
             "2026-04-21 17:48:07,703 INFO   [AntPosEst 4210] "
-            "σ=1.500m pos=(40.123456, -90.123456, -5.8) n=12 amb=12\n"
+            "positionσ=1.500m pos=(40.123456, -90.123456, -5.8) n=12 amb=12\n"
         )
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
         _wait_until(lambda: r.state.antenna_position is not None)
@@ -270,7 +302,7 @@ class AntPosEstLineTest(unittest.TestCase):
         stays None."""
         self.path.write_text(
             "2026-04-21 17:48:07,703 INFO   [AntPosEst 10] "
-            "σ=2.356m pos=(40.123400, -90.123500, 201.3) n=11 amb=14 "
+            "positionσ=2.356m pos=(40.123400, -90.123500, 201.3) n=11 amb=14 "
             "WL: 0/15 fixed NL: 0 fixed\n"
         )
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
@@ -284,9 +316,9 @@ class AntPosEstLineTest(unittest.TestCase):
         position, never a stale frame."""
         self.path.write_text(
             "2026-04-21 17:48:00,000 INFO   [AntPosEst 10] "
-            "σ=0.500m pos=(40.12, -90.12, 195.0)\n"
+            "positionσ=0.500m pos=(40.12, -90.12, 195.0)\n"
             "2026-04-21 17:48:10,000 INFO   [AntPosEst 20] "
-            "σ=0.023m pos=(40.123456, -90.123456, 198.2)\n"
+            "positionσ=0.023m pos=(40.123456, -90.123456, 198.2)\n"
         )
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
         _wait_until(
@@ -303,7 +335,7 @@ class AntPosEstLineTest(unittest.TestCase):
         defeat the point of asking for more precision."""
         self.path.write_text(
             "2026-04-21 17:48:07,703 INFO   [AntPosEst 4210] "
-            "σ=0.023m pos=(40.12345678, -90.12345678, 198.247)\n"
+            "positionσ=0.023m pos=(40.12345678, -90.12345678, 198.247)\n"
         )
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
         _wait_until(lambda: r.state.antenna_position is not None)

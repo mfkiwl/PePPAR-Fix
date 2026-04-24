@@ -143,6 +143,41 @@ class LogState:
     #: observation or when the engine runs without a nav2_store.
     nav2_delta_m: Optional[float] = None
 
+    #: Latest worstσ (m) — the largest per-SV position-sensitivity
+    #: sigma produced by the engine's null-mode eigenvalue monitor
+    #: (engine commit e5637d9).  Effectively the filter's
+    #: smallest-eigenvalue reciprocal expressed as a per-SV σ; huge
+    #: values (~10³ m) flag a rank-deficient mode, small values
+    #: (<1 m) flag well-observed geometry.  Displayed alongside
+    #: positionσ because they answer complementary "how
+    #: trustworthy is the fix?" questions.
+    worst_sigma_m: Optional[float] = None
+
+    #: Latest ZTD residual (metres, signed).  Log emits as
+    #: ``ZTD=<mm>±<sigma_mm>mm`` in millimetres; we store the
+    #: central value in m to match the other sigma conventions in
+    #: this struct.  None before the first AntPosEst line that
+    #: carries ZTD (i.e., engine versions past the
+    #: solid-tide/ZTD-log port).
+    ztd_m: Optional[float] = None
+
+    #: Latest ZTD uncertainty (mm, positive).  Optional — older
+    #: engine versions emitted bare ``ZTD=<mm>mm`` without the
+    #: ± field.
+    ztd_sigma_mm: Optional[int] = None
+
+    #: NTRIP mount identifier for the broadcast-ephemeris stream
+    #: the engine is connected to, e.g. ``"BCEP00BKG0"``.  Parsed
+    #: once from the startup ``Ephemeris stream: HOST:PORT/MOUNT``
+    #: line.  None if the engine is running without NTRIP (offline
+    #: mode with `--nav` file).
+    eph_mount: Optional[str] = None
+
+    #: NTRIP mount identifier for the SSR-corrections stream, e.g.
+    #: ``"SSRA00CNE0"``.  None if SSR isn't connected (engine
+    #: running in broadcast-only NAV mode).
+    ssr_mount: Optional[str] = None
+
 
 class LogReader:
     """Threaded engine-log consumer.
@@ -251,6 +286,7 @@ class LogReader:
         self._parse_sv_state_line(line)
         self._parse_phase_bias_lookup(line)
         self._parse_antposest_line(line)
+        self._parse_stream_lines(line)
 
     def _parse_antposest_line(self, line: str) -> None:
         """Extract position + σ + nav2Δ from ``[AntPosEst N] ...``.
@@ -286,6 +322,31 @@ class LogReader:
         nav2 = m.group("nav2d")
         if nav2 is not None:
             self.state.nav2_delta_m = float(nav2)
+        worst = m.group("worst")
+        if worst is not None:
+            self.state.worst_sigma_m = float(worst)
+        ztd_mm = m.group("ztd_mm")
+        if ztd_mm is not None:
+            self.state.ztd_m = int(ztd_mm) * 1e-3
+            ztd_sigma = m.group("ztd_sigma_mm")
+            if ztd_sigma is not None:
+                self.state.ztd_sigma_mm = int(ztd_sigma)
+
+    def _parse_stream_lines(self, line: str) -> None:
+        """Capture the NTRIP correction-stream identifiers.
+
+        Engine logs one ``Ephemeris stream:`` and one ``SSR stream:``
+        line at startup listing ``HOST:PORT/MOUNT``.  We store the
+        mount names for display — the host+port is noise for the
+        operator glancing at the monitor.
+        """
+        m = _EPH_STREAM_RE.search(line)
+        if m is not None:
+            self.state.eph_mount = m.group("mount")
+            return
+        m = _SSR_STREAM_RE.search(line)
+        if m is not None:
+            self.state.ssr_mount = m.group("mount")
 
     def _parse_phase_bias_lookup(self, line: str) -> None:
         """Look for ``Phase bias lookup: <sv> f1=...(HIT|MISS) f2=...(HIT|MISS)``.
@@ -436,16 +497,38 @@ _PHASE_BIAS_LOOKUP_RE = re.compile(
     r"f2=.*?\((?P<f2_status>HIT|MISS)\)"
 )
 
-# Matches ``[AntPosEst 4200] σ=0.023m pos=(LAT, LON, ALT) ...``.
-# σ, lat, lon, alt are always present; nav2Δ is optional (may not
-# be logged on early-bootstrap lines before NAV2 kicks in, or in
-# runs without a nav2_store).  Altitude is signed (engine has been
-# seen briefly showing negative altitudes during bootstrap glitches)
-# and can have any number of decimals per ``project_to_main_...``.
-# nav2Δ precision today is 1 decimal; accept any.
+# Matches ``[AntPosEst 4200] positionσ=0.023m pos=(LAT, LON, ALT) ...``.
+# positionσ, lat, lon, alt are always present; nav2Δ, ZTD, and
+# worstσ are optional — nav2Δ is absent on pre-NAV2 bootstrap
+# lines or runs without nav2_store; ZTD + worstσ came in with
+# engine ports f7da44e / e5637d9 and appear alongside obs-model
+# corrections.  Altitude is signed (bootstrap-glitch negatives
+# seen) and can have any number of decimals.  ZTD is signed in
+# mm with optional ±sigma (e.g. ``ZTD=-2850±293mm``); worstσ is
+# the filter's null-mode smallest-eigenvalue proxy in metres
+# (huge = uncostrained; small = well-observed).
+#
+# Field name change history: the σ field was renamed to
+# ``positionσ`` by engine commit f17fc05 to disambiguate from
+# the new ``worstσ`` null-mode metric on the same line.  We
+# only match the new name; older pre-rename logs won't parse
+# (acceptable — peppar-mon's support window is the current
+# engine).
 _ANTPOSEST_LINE_RE = re.compile(
     r"\[AntPosEst \d+\]\s+"
-    r"σ=(?P<sigma>[\d.]+)m\s+"
+    r"positionσ=(?P<sigma>[\d.]+)m\s+"
     r"pos=\((?P<lat>-?[\d.]+),\s*(?P<lon>-?[\d.]+),\s*(?P<alt>-?[\d.]+)\)"
     r"(?:.*?nav2Δ=(?P<nav2d>[\d.]+)m)?"
+    r"(?:.*?ZTD=(?P<ztd_mm>[-+]?\d+)(?:±(?P<ztd_sigma_mm>\d+))?mm)?"
+    r"(?:.*?worstσ=(?P<worst>[\d.]+)m)?"
+)
+
+# Startup lines identifying the correction streams the engine
+# connected to.  Emitted once at engine boot, replayed by the
+# log reader.
+_EPH_STREAM_RE = re.compile(
+    r"Ephemeris stream:\s*(?P<host>[\w.-]+):(?P<port>\d+)/(?P<mount>[\w_]+)"
+)
+_SSR_STREAM_RE = re.compile(
+    r"SSR stream:\s*(?P<host>[\w.-]+):(?P<port>\d+)/(?P<mount>[\w_]+)"
 )
