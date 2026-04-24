@@ -163,6 +163,59 @@ characterization" section for the state-persistence schema and
 operational motivation.  Sooner-or-later work regardless of
 options (A)/(B)/(C).
 
+## Status (2026-04-24)
+
+### Part 1 — opt-in scaffold (landed)
+
+Kwarg-gated calibrated-white Q is in `PPPFilter.__init__`:
+
+- `clock_model='random_walk'` (default, bit-exact legacy behavior).
+- `clock_model='calibrated_white'` uses
+  `Q_clk = C² · rx_tcxo_adev_1s² · dt`.
+- Default `rx_tcxo_adev_1s = 1e-8` is intentionally pessimistic
+  (~100× looser than our measured TCXO); real F9T characterization is
+  a prerequisite before flipping the engine default.
+- 10 unit tests in `scripts/peppar_fix/test_clock_model.py` cover the
+  formula, mode switching, default-preservation, and state-layout
+  invariance.
+
+State layout **unchanged** — still 7 base states, no `IDX_CLK_RATE`.
+The scaffold is a process-noise tightening only.  Two-state (phase +
+frequency) adds `IDX_CLK_RATE` and shifts `N_BASE` from 7 to 8,
+which propagates to `ppp_ar.py` + every test that imports `N_BASE`.
+Deferred to a later session.
+
+### Part 2 — F9T rx TCXO characterization (pending)
+
+Before flipping the engine default to `calibrated_white`, measure the
+F9T's rx TCXO ADEV at τ = 1, 10, 100, 1000 s.  Two paths:
+
+- **Datasheet lookup** — u-blox ZED-F9T hardware manual.  Fast, coarse.
+- **Lab measurement** — qErr-detrended F9T PPS via TICC (chB against
+  Geppetto RO) reveals the rx TCXO's instability once the RO
+  contribution is subtracted.  Requires (0) RO characterization first.
+
+Once we have a defensible σ_y(1s), wire it through the engine CLI as
+`--rx-tcxo-adev-1s` and a matching `--clock-model` flag, and run
+an A/B night against a host still on `random_walk`.
+
+### Part 3 — two-state refactor (deferred)
+
+Proper 2-state (phase + frequency) adds a clock-rate state and a
+2×2 process-noise block.  Refactor touches:
+
+- `solve_ppp.py`: add `IDX_CLK_RATE`, bump `N_BASE` to 8.
+- `ppp_ar.py`: all `N_BASE + amb_idx` arithmetic auto-updates
+  (uses module-level constant).
+- `cycle_slip.py`, `fix_set_integrity_monitor.py`: same.
+- `scripts/peppar_fix_engine.py`: filter-state readers
+  (`filt.IDX_CLK`, etc.) — CLK is still at index 3, unchanged.
+- Tests: `test_join_test.py`, `test_reached_resolved_regimes.py`,
+  `test_phase_bias_gate.py` — regenerate fake filter shapes.
+
+Lab validation required (regression the null-mode behavior against
+`calibrated_white` 1-state result).
+
 ## Recommended ordering
 
 ```

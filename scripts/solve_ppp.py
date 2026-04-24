@@ -78,6 +78,33 @@ SIGMA_PHI_IF = 0.03
 ELEV_MASK = 10.0  # degrees.  Tried 15° on 2026-04-17: with GAL-only the SV count dropped to 6/epoch (from ~8–10 at 10°) and LAMBDA couldn't fix NL at all — all three hosts went into persistent NAV2-reset cycling.  Low-elevation SVs do cause wrong-integer poisoning, but the remedy can't be a harder hard cut on SV-limited runs.  Next try: elevation-dependent measurement weighting (already partially present via `cno_factor * elev_factor` in SIGMA_P_IF weighting) or per-SV exclusion in the NL resolver rather than the observation stream.
 BDS_MIN_PRN = 19  # Exclude BDS-2 GEO/IGSO
 
+# Clock-state modeling (see docs/clock-state-modeling.md).
+#
+# The default 'random_walk' mode uses Q_clk = CLOCK_RW_Q_DEFAULT · dt
+# (effectively unconstrained — σ = 1000 m / √s).  This treats dt_rx as a
+# nuisance parameter and lets geometry + phase carry the information.
+#
+# The 'calibrated_white' mode computes Q_clk from the receiver's rx TCXO
+# ADEV at 1 s, assuming white-FM dominates at short tau (standard for
+# TCXO/OCXO at sub-10 s):
+#
+#     Q_clk = C² · σ_y(1s)² · dt            (m²/s, per-step variance)
+#
+# Derivation: for white-FM with spectral density h_0, σ_y²(τ) = h_0/(2τ),
+# so h_0 = 2·τ·σ_y²(τ).  Phase in seconds over interval dt has variance
+# h_0·dt/2; phase in meters is c·phase_sec, so Var(Δclk_m) = c²·h_0·dt/2
+# = c²·τ·σ_y²(τ)·dt (with τ=1s).
+#
+# Default ADEV value below is intentionally pessimistic.  The F9T's
+# datasheet TCXO is ~5e-11 to 1e-10 at 1s; our lab-measured DO TCXO
+# TDEV(1s)=1.17 ns maps to σ_y(1s)≈2e-9 (ticc-baseline-2026-04-01.md).
+# The default 1e-8 is 100× looser than that as a safety margin until a
+# lab-local F9T rx TCXO characterization lands.
+F9T_TCXO_ADEV_1S_DEFAULT = 1e-8  # fractional frequency (dimensionless)
+CLOCK_RW_Q_DEFAULT = 1e6  # m²/s, the legacy random-walk Q coefficient
+
+CLOCK_MODELS = ('random_walk', 'calibrated_white')
+
 # F9T signal name → RINEX observation code mapping
 SIG_TO_RINEX = {
     'GPS-L1CA': ('C1C', 'L1C'),   # Code, Phase
@@ -234,7 +261,31 @@ def load_ppp_epochs(csv_path, systems=None, osb=None):
 class PPPFilter:
     """Multi-GNSS static-position PPP EKF with ISBs and float ambiguities."""
 
-    def __init__(self):
+    def __init__(self, clock_model='random_walk',
+                 rx_tcxo_adev_1s=F9T_TCXO_ADEV_1S_DEFAULT):
+        """Multi-GNSS static-position PPP EKF.
+
+        clock_model: 'random_walk' (default, legacy) or 'calibrated_white'.
+            random_walk: Q_clk = CLOCK_RW_Q_DEFAULT · dt.  IDX_CLK is
+                effectively unconstrained; geometry + phase carry the
+                information.  Preserves bit-exact behavior prior to
+                2026-04-24.
+            calibrated_white: Q_clk = C² · rx_tcxo_adev_1s² · dt.
+                Physics-based process noise derived from the receiver's
+                rx TCXO ADEV at 1 s assuming white-FM dominates.  Tighter
+                constraint on IDX_CLK; directly attacks the null-mode
+                clock axis (docs/clock-state-modeling.md).
+        rx_tcxo_adev_1s: fractional-frequency Allan deviation at τ=1 s
+            for the receiver's rx TCXO.  Only consumed when
+            clock_model='calibrated_white'.  Default is pessimistic; see
+            F9T_TCXO_ADEV_1S_DEFAULT.
+        """
+        if clock_model not in CLOCK_MODELS:
+            raise ValueError(
+                f"clock_model must be one of {CLOCK_MODELS}, got "
+                f"{clock_model!r}")
+        self.clock_model = clock_model
+        self.rx_tcxo_adev_1s = float(rx_tcxo_adev_1s)
         self.x = None
         self.P = None
         self.sv_to_idx = {}
@@ -307,7 +358,7 @@ class PPPFilter:
             q_pos = 1e-4         # Converged: static with breathing room
         for i in range(3):
             Q[i, i] = q_pos * dt
-        Q[IDX_CLK, IDX_CLK] = 1e6 * dt
+        Q[IDX_CLK, IDX_CLK] = self._q_clk() * dt
         # Pinned ISBs (single-constellation runs) get no process noise so
         # they stay fixed at zero; IDX_CLK absorbs the reference system clock.
         pinned = getattr(self, '_pinned_isbs', set())
@@ -317,6 +368,18 @@ class PPPFilter:
             Q[IDX_ISB_BDS, IDX_ISB_BDS] = 1.0 * dt
         Q[IDX_ZTD, IDX_ZTD] = (5e-5)**2 * dt  # ~5 cm/hour RMS (IGS standard)
         self.P = self.P + Q
+
+    def _q_clk(self):
+        """Per-second process-noise coefficient on IDX_CLK (m²/s).
+
+        Returns the coefficient so that predict() can multiply by dt.
+        See docs/clock-state-modeling.md option (A).
+        """
+        if self.clock_model == 'random_walk':
+            return CLOCK_RW_Q_DEFAULT
+        # calibrated_white: Q = c² · σ_y(1s)²
+        sigma_y = self.rx_tcxo_adev_1s
+        return (C * sigma_y) ** 2
 
     def add_ambiguity(self, sv, N_init_m):
         idx = len(self.x) - N_BASE
