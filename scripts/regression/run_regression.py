@@ -701,6 +701,21 @@ def run(args) -> int:
     if wl_only:
         log.info("WL-only mode: MW slip detection on, no NL constraint")
 
+    # Phase wind-up tracker — Phase 3 of the obs-model completion plan.
+    # When --phase-windup is on, accumulates a per-SV cumulative
+    # carrier wind-up correction (Wu 1993) and removes it from the
+    # observed IF phase before the filter sees it.  See
+    # docs/obs-model-completion-plan.md and
+    # scripts/regression/phase_windup.py.  When off (default), the
+    # tracker is constructed but never queried, so the per-epoch
+    # path is bit-exact unchanged.
+    if getattr(args, "phase_windup", False):
+        from regression.phase_windup import PhaseWindupTracker
+        windup_tracker = PhaseWindupTracker()
+        log.info("Phase wind-up correction enabled (Wu 1993)")
+    else:
+        windup_tracker = None
+
     # Iterate epochs
     prev_t = None
     n_processed = 0
@@ -838,6 +853,13 @@ def run(args) -> int:
                 filt.remove_ambiguity(sv)
                 slip_resets_this_ep += 1
                 n_slip_resets += 1
+                # Wind-up tracks an absolute integer offset from the
+                # first epoch this SV was seen; a slip re-floats the
+                # ambiguity, which absorbs the wind-up zero-reference
+                # along with everything else.  Drop tracker state so
+                # the next epoch reseeds cleanly.
+                if windup_tracker is not None:
+                    windup_tracker.reset(sv)
             mw.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
 
         # Track WL-fix high-water mark for diagnostics.
@@ -849,14 +871,15 @@ def run(args) -> int:
         # (pos, clk).  clk_file overrides the clock when given (high-rate
         # CLK product); otherwise the filter uses the clock value from
         # sat_position.
-        # PCV/PCO correction: adjust phi_if and pr_if for each SV before
-        # the filter sees them.  Skip silently per-SV on ANTEX lookup
-        # miss (e.g. BDS SVs when ANTEX lacks entries).
-        if antex is not None and recv_ant_type is not None:
-            from datetime import timedelta as _td
-            from solve_pseudorange import C as _C_PR
-            # Per-epoch Sun position (ECEF) for nominal-yaw body frame.
-            # Reused across all SVs at this epoch.
+
+        # Per-epoch Sun position (ECEF) for nominal-yaw body frame.
+        # Reused by both PCV and phase wind-up; computed once iff
+        # either is active, since both need the satellite body frame
+        # which depends on the satellite-Sun direction.
+        _sun_ecef = None
+        _need_sun = (antex is not None and recv_ant_type is not None) \
+            or (windup_tracker is not None)
+        if _need_sun:
             from regression.solid_tide import (_jd_from_datetime,
                                                 _gmst_rad,
                                                 _sun_pos_eci,
@@ -864,6 +887,13 @@ def run(args) -> int:
             _jd = _jd_from_datetime(t)
             _gmst = _gmst_rad(_jd)
             _sun_ecef = _eci_to_ecef(_sun_pos_eci(_jd), _gmst)
+
+        # PCV/PCO correction: adjust phi_if and pr_if for each SV before
+        # the filter sees them.  Skip silently per-SV on ANTEX lookup
+        # miss (e.g. BDS SVs when ANTEX lacks entries).
+        if antex is not None and recv_ant_type is not None:
+            from datetime import timedelta as _td
+            from solve_pseudorange import C as _C_PR
             n_pcv_applied = 0
             rcv_pos_now = filt.x[:3] if filt is not None else truth_ecef
             for o in observations:
@@ -883,6 +913,39 @@ def run(args) -> int:
                     n_pcv_applied += 1
             if ep_idx == 0 or (ep_idx % 500 == 0 and n_pcv_applied > 0):
                 log.debug("PCV applied to %d SVs at epoch %d", n_pcv_applied, ep_idx)
+
+        # Phase wind-up correction (Wu 1993) — applies to phi_if_m only,
+        # PR is unaffected.  Like PCV, runs per-SV with a per-epoch
+        # sat-position lookup.  IF-effective wavelength for wind-up is
+        # c / (f1 + f2) (NOT c / f_IF — see phase_windup.py docstring).
+        if windup_tracker is not None:
+            from datetime import timedelta as _td_wu
+            from solve_pseudorange import C as _C_WU
+            rcv_pos_wu = filt.x[:3] if filt is not None else truth_ecef
+            n_wu_applied = 0
+            for o in observations:
+                if o.get('phi_if_m') is None:
+                    continue
+                wl1 = o.get('wl_f1')
+                wl2 = o.get('wl_f2')
+                if wl1 is None or wl2 is None:
+                    continue
+                tau_approx = o['pr_if'] / _C_WU if 'pr_if' in o else 0.075
+                t_tx = t - _td_wu(seconds=tau_approx)
+                sat_pos, _ = eph_source.sat_position(o['sv'], t_tx)
+                if sat_pos is None:
+                    continue
+                windup_tracker.update(
+                    o['sv'], sat_pos, _sun_ecef, rcv_pos_wu)
+                f1 = _C_WU / wl1
+                f2 = _C_WU / wl2
+                lam_eff = _C_WU / (f1 + f2)
+                o['phi_if_m'] += windup_tracker.correction_m(
+                    o['sv'], lam_eff)
+                n_wu_applied += 1
+            if ep_idx == 0 or (ep_idx % 500 == 0 and n_wu_applied > 0):
+                log.debug("Wind-up applied to %d SVs at epoch %d",
+                          n_wu_applied, ep_idx)
 
         # Solid Earth tide: when --solid-tide is enabled, the filter
         # estimates the ITRF position but observations see an
@@ -1253,6 +1316,19 @@ def main():
                          "project_to_main_pride_ablation_20260423.  "
                          "Harness-side only; engine impact requires "
                          "porting the solid_tide module there too.")
+    ap.add_argument("--phase-windup", action="store_true",
+                    help="Apply Wu 1993 carrier-phase wind-up "
+                         "correction to phi_if_m before the filter "
+                         "sees it.  Phase 3 of "
+                         "docs/obs-model-completion-plan.md.  "
+                         "Effect: removes the per-SV cumulative "
+                         "rotation-of-RHCP-polarization phase shift "
+                         "(typically a few mm cumulative; mm-scale "
+                         "unmodeled phase signals amplify into "
+                         "meter-scale trajectory error through the "
+                         "filter's null-mode coupling per "
+                         "project_to_main_qpos_sweep_20260424.md).  "
+                         "Tracker reset on slip resync.")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
