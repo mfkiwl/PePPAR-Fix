@@ -939,6 +939,23 @@ def wait_for_ephemeris(beph, stop_event, systems=None, timeout_s=120):
     return True
 
 
+def _build_ppp_filter(args):
+    """PPPFilter factory honouring --clock-model + --rx-tcxo-adev-1s.
+
+    Keeps the two instantiation sites (bootstrap + AntPosEstThread
+    warm-start) in lockstep.  Default args shape preserves legacy
+    bit-exact behaviour (clock_model='random_walk').
+    """
+    kwargs = {}
+    cm = getattr(args, "clock_model", "random_walk")
+    if cm and cm != "random_walk":
+        kwargs["clock_model"] = cm
+        adev = getattr(args, "rx_tcxo_adev_1s", None)
+        if adev is not None:
+            kwargs["rx_tcxo_adev_1s"] = float(adev)
+    return PPPFilter(**kwargs)
+
+
 # ── Phase 1: Bootstrap ─────────────────────────────────────────────────── #
 
 def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
@@ -949,6 +966,13 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
         (ecef, sigma_m) on convergence, or None on timeout/error.
     """
     log.info("=== Phase 1: Position bootstrap (PPPFilter) ===")
+    cm = getattr(args, "clock_model", "random_walk")
+    if cm == "random_walk":
+        log.info(f"  clock_model={cm} (legacy Q_clk=1e6·dt)")
+    else:
+        adev = getattr(args, "rx_tcxo_adev_1s", None)
+        log.info(f"  clock_model={cm} rx_tcxo_adev_1s="
+                 f"{adev if adev is not None else '(default)'}")
 
     # Seed position
     seed_ecef = None
@@ -957,7 +981,7 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
         seed_ecef = lla_to_ecef(lat, lon, alt)
         log.info(f"Seed position: {lat:.6f}, {lon:.6f}, {alt:.1f}m")
 
-    filt = PPPFilter()
+    filt = _build_ppp_filter(args)
     filt_initialized = False
     correction_gate = CorrectionFreshnessGate()
     run_bootstrap.last_correction_gate_stats = correction_gate.stats.as_dict()
@@ -1309,7 +1333,9 @@ class AntPosEstThread(threading.Thread):
                  solid_tide=True,
                  antex_parser=None,
                  receiver_antenna_type=None,
-                 pcv_enabled=True):
+                 pcv_enabled=True,
+                 clock_model="random_walk",
+                 rx_tcxo_adev_1s=None):
         super().__init__(daemon=True, name="AntPosEst")
         # ANTEX parser + receiver antenna type (Phase 2 of obs-model
         # completion plan).  PCV correction applies only when BOTH
@@ -1378,7 +1404,12 @@ class AntPosEstThread(threading.Thread):
             log.info("AntPosEstThread: continuing from bootstrap PPPFilter "
                      "(amb=%d, %s)", len(self._filt.sv_to_idx), self._mw.summary())
         else:
-            self._filt = PPPFilter()
+            ppp_kwargs = {}
+            if clock_model and clock_model != "random_walk":
+                ppp_kwargs["clock_model"] = clock_model
+                if rx_tcxo_adev_1s is not None:
+                    ppp_kwargs["rx_tcxo_adev_1s"] = float(rx_tcxo_adev_1s)
+            self._filt = PPPFilter(**ppp_kwargs)
             self._filt.initialize(known_ecef, 0.0, systems=self._systems)
             self._mw = MelbourneWubbenaTracker()
             self._nl = NarrowLaneResolver(
@@ -5716,6 +5747,8 @@ def run(args):
             antex_parser=_ape_antex_parser,
             receiver_antenna_type=getattr(args, "receiver_antenna", None),
             pcv_enabled=bool(getattr(args, "pcv", True)),
+            clock_model=getattr(args, "clock_model", "random_walk"),
+            rx_tcxo_adev_1s=getattr(args, "rx_tcxo_adev_1s", None),
         )
         ape_thread.start()
 
@@ -5979,6 +6012,29 @@ Two-phase operation:
                           "(20-char TYPE field from ANTEX).  Required "
                           "for PCV correction; when absent, PCV is "
                           "skipped with a warning.")
+    pos.add_argument("--clock-model", default="random_walk",
+                     choices=("random_walk", "calibrated_white"),
+                     help="rx TCXO process-noise model in PPPFilter.  "
+                          "random_walk (default) uses the legacy "
+                          "Q_clk = 1e6·dt — IDX_CLK is effectively "
+                          "unconstrained.  calibrated_white uses "
+                          "Q_clk = (c · σ_y(1s))² · dt derived from the "
+                          "rx TCXO's fractional-frequency ADEV, "
+                          "tightening the null-mode clock axis.  "
+                          "Prefer σ_y(1s) from a lab-local F9T "
+                          "characterization; the default "
+                          "--rx-tcxo-adev-1s is intentionally "
+                          "pessimistic.  See "
+                          "docs/clock-state-modeling.md option (A).")
+    pos.add_argument("--rx-tcxo-adev-1s", type=float, default=None,
+                     help="Fractional-frequency Allan deviation at τ=1s "
+                          "for the receiver's rx TCXO.  Consumed only "
+                          "when --clock-model=calibrated_white.  When "
+                          "omitted, uses PPPFilter's pessimistic "
+                          "default (~1e-8).  Typical F9T datasheet "
+                          "values: 5e-11 to 1e-10.  Our lab-measured "
+                          "DO TCXO maps to σ_y(1s)≈2e-9 (see "
+                          "docs/ticc-baseline-2026-04-01.md).")
     pos.add_argument("--timeout", type=int, default=3600,
                      help="Bootstrap timeout in seconds (default: 3600)")
     pos.add_argument("--watchdog-threshold", type=float, default=0.5,
