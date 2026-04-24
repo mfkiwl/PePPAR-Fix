@@ -296,6 +296,46 @@ class AntPosEstLineTest(unittest.TestCase):
         self.assertIsNone(r.state.ztd_sigma_mm)
         self.assertEqual(r.state.worst_sigma_m, 1000.0)
 
+    def test_peer_bus_active_latches(self):
+        """The engine's startup ``peer-bus active: ...`` line sets
+        ``engine_peer_bus_active`` on LogState.  Before the line
+        arrives, the flag stays False."""
+        self.path.write_text(
+            "2026-04-24 08:00:00,000 INFO Host config: ...\n"
+            "2026-04-24 08:00:01,000 INFO peer-bus active: "
+            "udp-multicast host=test group=239.18.8.13 port=12468 "
+            "antenna_ref='UFO1'\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.engine_peer_bus_active)
+        self.assertTrue(r.state.engine_peer_bus_active)
+
+    def test_peer_bus_active_absent_by_default(self):
+        """A log that never mentions peer-bus stays False."""
+        self.path.write_text(
+            "2026-04-24 08:00:00,000 INFO Host config: ...\n"
+            "2026-04-24 08:00:01,000 INFO Opening /dev/gnss-top\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.engine_start_time is not None)
+        self.assertFalse(r.state.engine_peer_bus_active)
+
+    def test_peer_bus_active_latches_once(self):
+        """Once set, ``engine_peer_bus_active`` stays True even if
+        later log content doesn't mention peer-bus."""
+        self.path.write_text(
+            "2026-04-24 08:00:00,000 INFO peer-bus active: "
+            "udp-multicast host=test group=239.18.8.13 port=12468\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.engine_peer_bus_active)
+        # Append a non-peer-bus line — the latch must NOT flip back.
+        with self.path.open("a") as f:
+            f.write("2026-04-24 08:00:02,000 INFO quiet line\n")
+        import time
+        time.sleep(0.3)
+        self.assertTrue(r.state.engine_peer_bus_active)
+
     def test_stream_identifiers_captured(self):
         """NTRIP mount names from the engine startup banner feed
         LogState.eph_mount / ssr_mount."""

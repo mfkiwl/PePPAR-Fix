@@ -191,6 +191,16 @@ class LogState:
     #: running in broadcast-only NAV mode).
     ssr_mount: Optional[str] = None
 
+    #: True after we've observed the engine announcing its own
+    #: peer-bus publishing.  Latches once set (never flips back to
+    #: False within a run) — if the engine was publishing at any
+    #: point, peppar-mon retires its LogToBusBridge and lets the
+    #: engine be the sole publisher.  Detection via the engine's
+    #: ``peer-bus active:`` startup log line (see
+    #: ``scripts/peer_publisher.py::initialize``).  Absent in logs
+    #: produced by engines without ``--peer-bus``.
+    engine_peer_bus_active: bool = False
+
 
 class LogReader:
     """Threaded engine-log consumer.
@@ -300,6 +310,7 @@ class LogReader:
         self._parse_phase_bias_lookup(line)
         self._parse_antposest_line(line)
         self._parse_stream_lines(line)
+        self._parse_peer_bus_active(line)
 
     def _parse_antposest_line(self, line: str) -> None:
         """Extract position + σ + nav2Δ from ``[AntPosEst N] ...``.
@@ -364,6 +375,22 @@ class LogReader:
         m = _SSR_STREAM_RE.search(line)
         if m is not None:
             self.state.ssr_mount = m.group("mount")
+
+    def _parse_peer_bus_active(self, line: str) -> None:
+        """Latch ``engine_peer_bus_active`` when the engine's
+        ``peer-bus active:`` startup line arrives.
+
+        One-way latch: set once on first match, never cleared
+        within a run.  If the engine crashes and restarts without
+        ``--peer-bus``, we keep the bridge retired — acceptable
+        because that's an unusual case and the staleness heuristic
+        in the bus (5 s heartbeat timeout) already handles the
+        'peer quietly left' story elsewhere.
+        """
+        if self.state.engine_peer_bus_active:
+            return
+        if _PEER_BUS_ACTIVE_RE.search(line) is not None:
+            self.state.engine_peer_bus_active = True
 
     def _parse_phase_bias_lookup(self, line: str) -> None:
         """Look for ``Phase bias lookup: <sv> f1=...(HIT|MISS) f2=...(HIT|MISS)``.
@@ -550,3 +577,11 @@ _EPH_STREAM_RE = re.compile(
 _SSR_STREAM_RE = re.compile(
     r"SSR stream:\s*(?P<host>[\w.-]+):(?P<port>\d+)/(?P<mount>[\w_]+)"
 )
+
+# Engine's ``peer-bus active: ...`` startup line, emitted once by
+# ``scripts/peer_publisher.py::initialize`` when the engine has
+# actually opened a peer bus (via ``--peer-bus``).  Peppar-mon's
+# fleet mode uses this to decide whether to keep its own
+# LogToBusBridge running or retire it in favour of the engine's
+# native publishing.
+_PEER_BUS_ACTIVE_RE = re.compile(r"peer-bus active:")

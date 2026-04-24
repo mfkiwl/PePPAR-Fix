@@ -267,6 +267,21 @@ class PepparMonApp(App):
             from peppar_mon.fleet import compute_summary
             summary = compute_summary(self._aggregator.snapshots())
             self.query_one("#fleet-state", FleetStateLine).update_summary(summary)
+        # Bridge retirement: once the engine announces its own
+        # peer-bus publishing, shut the log→bus bridge down so the
+        # engine is the sole publisher for this host.  One-way
+        # transition per run; doesn't un-retire if engine later
+        # crashes and restarts without ``--peer-bus`` (rare case;
+        # the cost is the bridge stays off, peer-bus goes quiet for
+        # this host until a full restart).
+        if (self._bridge is not None
+                and self._reader.state.engine_peer_bus_active):
+            self._bridge.stop()
+            self._bridge = None
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                "peppar-mon: engine peer-bus active; bridge retired",
+            )
 
     def _uptime_line(self) -> str:
         """Delegates to the module-level pure function so it can
