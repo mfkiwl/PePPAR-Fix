@@ -256,6 +256,32 @@ class AntPosEstLineTest(unittest.TestCase):
         self.assertAlmostEqual(r.state.ztd_m, 0.274, places=6)
         self.assertEqual(r.state.ztd_sigma_mm, 3)
 
+    def test_earth_tide_fields(self):
+        """``tide=<mm>mm(U±<mm>)`` captures total magnitude and the
+        vertical component.  Signed U — can be negative at certain
+        latitudes/epochs."""
+        self.path.write_text(
+            "2026-04-21 17:48:07,703 INFO   [AntPosEst 10] "
+            "positionσ=1.5m pos=(40.0, -90.0, 200.0) "
+            "ZTD=+0±500mm tide=135mm(U+131) worstσ=1000.0m\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.earth_tide_mm is not None)
+        self.assertEqual(r.state.earth_tide_mm, 135)
+        self.assertEqual(r.state.earth_tide_u_mm, 131)
+
+    def test_earth_tide_negative_u(self):
+        """U can be negative (outbound tide pulling antenna down)."""
+        self.path.write_text(
+            "2026-04-21 17:48:07,703 INFO   [AntPosEst 10] "
+            "positionσ=1.5m pos=(40.0, -90.0, 200.0) "
+            "tide=87mm(U-42)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.earth_tide_mm is not None)
+        self.assertEqual(r.state.earth_tide_mm, 87)
+        self.assertEqual(r.state.earth_tide_u_mm, -42)
+
     def test_signed_ztd_and_missing_sigma(self):
         """ZTD can be negative and the ±sigma is optional — older
         engine versions emitted bare ``ZTD=<mm>mm``."""

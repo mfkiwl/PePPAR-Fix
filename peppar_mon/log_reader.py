@@ -166,6 +166,19 @@ class LogState:
     #: ± field.
     ztd_sigma_mm: Optional[int] = None
 
+    #: Total solid Earth tide magnitude (mm, positive) at the
+    #: current epoch.  Parsed from the engine's ``tide=<mm>mm(U<±N>)``
+    #: field on the [AntPosEst] line.  None before the first line
+    #: that carries the field (older engine builds or --no-solid-tide
+    #: runs).  See `docs/obs-model-completion-plan.md`.
+    earth_tide_mm: Optional[int] = None
+
+    #: Vertical (Up) component of the solid Earth tide (mm, signed).
+    #: Dominates the total magnitude for most stations at most
+    #: epochs (peak ±30 cm), so displayed alongside the total as an
+    #: orientation cue.
+    earth_tide_u_mm: Optional[int] = None
+
     #: NTRIP mount identifier for the broadcast-ephemeris stream
     #: the engine is connected to, e.g. ``"BCEP00BKG0"``.  Parsed
     #: once from the startup ``Ephemeris stream: HOST:PORT/MOUNT``
@@ -331,6 +344,10 @@ class LogReader:
             ztd_sigma = m.group("ztd_sigma_mm")
             if ztd_sigma is not None:
                 self.state.ztd_sigma_mm = int(ztd_sigma)
+        tide_mm = m.group("tide_mm")
+        if tide_mm is not None:
+            self.state.earth_tide_mm = int(tide_mm)
+            self.state.earth_tide_u_mm = int(m.group("tide_u_mm"))
 
     def _parse_stream_lines(self, line: str) -> None:
         """Capture the NTRIP correction-stream identifiers.
@@ -520,6 +537,7 @@ _ANTPOSEST_LINE_RE = re.compile(
     r"pos=\((?P<lat>-?[\d.]+),\s*(?P<lon>-?[\d.]+),\s*(?P<alt>-?[\d.]+)\)"
     r"(?:.*?nav2Δ=(?P<nav2d>[\d.]+)m)?"
     r"(?:.*?ZTD=(?P<ztd_mm>[-+]?\d+)(?:±(?P<ztd_sigma_mm>\d+))?mm)?"
+    r"(?:.*?tide=(?P<tide_mm>\d+)mm\(U(?P<tide_u_mm>[-+]?\d+)\))?"
     r"(?:.*?worstσ=(?P<worst>[\d.]+)m)?"
 )
 

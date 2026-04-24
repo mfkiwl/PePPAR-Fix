@@ -634,18 +634,25 @@ class SecondOpinionLine(Widget):
 
 
 class FilterStateLine(Widget):
-    """Single-line ``ZTD`` + correction-stream indicator.
+    """Single-line ``ZTD`` + Earth-tide + correction-stream indicator.
 
     Layout::
 
-        ZTD -2.85 m ±293 mm   SSR SSRA00CNE0   EPH BCEP00BKG0
+        ZTD -2.85 m ±293 mm   Earth tide 135 mm (U+131)   SSR SSRA00CNE0   EPH BCEP00BKG0
 
-    Three pieces:
+    Four pieces:
 
       * ``ZTD`` — current residual ZTD above Saastamoinen a priori.
         Displayed in m (signed), with ±σ in mm if the engine
         published it.  Renders ``—`` when no AntPosEst line with
         ZTD has arrived yet.
+      * ``Earth tide`` — current IERS 2010 solid Earth tide
+        magnitude in mm, with the vertical (U) component in
+        parentheses as an orientation cue.  The U component
+        dominates the total at most latitudes and epochs (peak
+        ±300 mm).  Omitted when no tide has been logged yet —
+        keeps the line short on engine builds without the tide
+        correction applied.
       * ``SSR`` — NTRIP mount name for the SSR corrections stream
         (orbit/clock/bias).  ``—`` when not connected.
       * ``EPH`` — NTRIP mount name for the broadcast-ephemeris
@@ -669,6 +676,8 @@ class FilterStateLine(Widget):
         *,
         ztd_m: Optional[float] = None,
         ztd_sigma_mm: Optional[int] = None,
+        earth_tide_mm: Optional[int] = None,
+        earth_tide_u_mm: Optional[int] = None,
         ssr_mount: Optional[str] = None,
         eph_mount: Optional[str] = None,
         id: Optional[str] = None,  # noqa: A002
@@ -677,6 +686,8 @@ class FilterStateLine(Widget):
         super().__init__(id=id, classes=classes)
         self._ztd_m = ztd_m
         self._ztd_sigma_mm = ztd_sigma_mm
+        self._earth_tide_mm = earth_tide_mm
+        self._earth_tide_u_mm = earth_tide_u_mm
         self._ssr_mount = ssr_mount
         self._eph_mount = eph_mount
 
@@ -685,18 +696,24 @@ class FilterStateLine(Widget):
         *,
         ztd_m: Optional[float],
         ztd_sigma_mm: Optional[int],
+        earth_tide_mm: Optional[int] = None,
+        earth_tide_u_mm: Optional[int] = None,
         ssr_mount: Optional[str],
         eph_mount: Optional[str],
     ) -> None:
         if (
             ztd_m == self._ztd_m
             and ztd_sigma_mm == self._ztd_sigma_mm
+            and earth_tide_mm == self._earth_tide_mm
+            and earth_tide_u_mm == self._earth_tide_u_mm
             and ssr_mount == self._ssr_mount
             and eph_mount == self._eph_mount
         ):
             return
         self._ztd_m = ztd_m
         self._ztd_sigma_mm = ztd_sigma_mm
+        self._earth_tide_mm = earth_tide_mm
+        self._earth_tide_u_mm = earth_tide_u_mm
         self._ssr_mount = ssr_mount
         self._eph_mount = eph_mount
         self.refresh()
@@ -710,6 +727,11 @@ class FilterStateLine(Widget):
             t.append(f"{self._ztd_m:+.3f} m")
             if self._ztd_sigma_mm is not None:
                 t.append(f" ±{self._ztd_sigma_mm} mm")
+        if self._earth_tide_mm is not None:
+            t.append("   Earth tide ", style="bold")
+            t.append(f"{self._earth_tide_mm} mm")
+            if self._earth_tide_u_mm is not None:
+                t.append(f" (U{self._earth_tide_u_mm:+d})")
         t.append("   SSR ", style="bold")
         t.append(self._ssr_mount if self._ssr_mount else "—")
         t.append("   EPH ", style="bold")

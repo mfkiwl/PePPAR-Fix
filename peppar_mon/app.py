@@ -211,6 +211,8 @@ class PepparMonApp(App):
         self.query_one("#filter-state", FilterStateLine).update_state(
             ztd_m=s.ztd_m,
             ztd_sigma_mm=s.ztd_sigma_mm,
+            earth_tide_mm=s.earth_tide_mm,
+            earth_tide_u_mm=s.earth_tide_u_mm,
             ssr_mount=s.ssr_mount,
             eph_mount=s.eph_mount,
         )
