@@ -75,6 +75,16 @@ SIGMA_P_IF = 3.0
 # sweep first — the harness number is not a drop-in.
 SIGMA_PHI_IF = 0.03
 
+# Module-level overrides for filter-tuning experiments.  When non-None
+# the update() path uses these instead of the SIGMA_P_IF /
+# SIGMA_PHI_IF constants above.  Set by the regression harness's
+# --sigma-pr / --sigma-phi flags (already plumbed in
+# scripts/regression/run_regression.py); reading them here is the
+# missing-half of that wiring.  No behaviour change when both are
+# None, which is the default.
+_SIGMA_P_IF_OVERRIDE = None
+_SIGMA_PHI_IF_OVERRIDE = None
+
 ELEV_MASK = 10.0  # degrees.  Tried 15° on 2026-04-17: with GAL-only the SV count dropped to 6/epoch (from ~8–10 at 10°) and LAMBDA couldn't fix NL at all — all three hosts went into persistent NAV2-reset cycling.  Low-elevation SVs do cause wrong-integer poisoning, but the remedy can't be a harder hard cut on SV-limited runs.  Next try: elevation-dependent measurement weighting (already partially present via `cno_factor * elev_factor` in SIGMA_P_IF weighting) or per-SV exclusion in the NL resolver rather than the observation stream.
 BDS_MIN_PRN = 19  # Exclude BDS-2 GEO/IGSO
 
@@ -586,7 +596,9 @@ class PPPFilter:
             h_pr[IDX_ZTD] = m_wet
             H_rows.append(h_pr)
             z_rows.append(dz_pr)
-            R_diag.append((SIGMA_P_IF / w) ** 2)
+            _sp = (_SIGMA_P_IF_OVERRIDE if _SIGMA_P_IF_OVERRIDE is not None
+                   else SIGMA_P_IF)
+            R_diag.append((_sp / w) ** 2)
             labels.append((sv, 'pr', elev))
 
             # --- IF Carrier phase ---
@@ -604,7 +616,10 @@ class PPPFilter:
                 h_phi[amb_idx] = 1.0
                 H_rows.append(h_phi)
                 z_rows.append(dz_phi)
-                R_diag.append((SIGMA_PHI_IF / w) ** 2)
+                _spi = (_SIGMA_PHI_IF_OVERRIDE
+                        if _SIGMA_PHI_IF_OVERRIDE is not None
+                        else SIGMA_PHI_IF)
+                R_diag.append((_spi / w) ** 2)
                 labels.append((sv, 'phi', elev))
 
             n_used += 1
