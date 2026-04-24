@@ -134,6 +134,43 @@ def _compute_sv_azimuths(filt, corrections, observations, gps_time):
             continue
         out[sv] = filt.compute_azimuth(pos, sat_pos)
     return out
+
+
+def _compute_sv_ipp_szas(filt, azimuths, elevations, gps_time):
+    """Per-SV solar-zenith-angle at the ionospheric pierce point.
+
+    ~90° flags the terminator twilight band where dTEC/dt is
+    largest.  Enables post-hoc analysis of whether slips
+    concentrate under terminator conditions, per the 2026-04-24
+    sunrise-slip-storm investigation.
+
+    Empty dict when filter has no position.  Per-SV None when the
+    SV has no computed azimuth/elevation yet (e.g., sat ephemeris
+    unavailable this epoch).
+    """
+    if filt is None or not hasattr(filt, 'x') or len(filt.x) < 3:
+        return {}
+    try:
+        from peppar_fix.ipp_sza import ipp_solar_zenith_deg
+    except Exception:
+        return {}
+    try:
+        from solve_pseudorange import ecef_to_lla as _e2l
+        lat, lon, _alt = _e2l(
+            float(filt.x[0]), float(filt.x[1]), float(filt.x[2]))
+    except Exception:
+        return {}
+    utc = gps_time if isinstance(gps_time, datetime) else gps_time  # already UTC-aware
+    out = {}
+    for sv, az in azimuths.items():
+        el = elevations.get(sv)
+        if el is None or az is None:
+            continue
+        try:
+            out[sv] = ipp_solar_zenith_deg(lat, lon, az, el, utc)
+        except Exception:
+            continue
+    return out
 from ntrip_client import NtripStream
 from realtime_ppp import serial_reader, ntrip_reader, QErrStore, Nav2PositionStore
 from ticc import Ticc
@@ -1092,25 +1129,33 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
         current_svs = {o['sv'] for o in observations}
         elevations = _compute_sv_elevations(filt, corrections,
                                                   observations, gps_time)
+        azimuths = _compute_sv_azimuths(filt, corrections,
+                                              observations, gps_time)
+        ipp_szas = _compute_sv_ipp_szas(filt, azimuths, elevations, gps_time)
         slip_events = slip_monitor.check(
             observations, gps_time.timestamp(), n_epochs,
-            elevations=elevations)
+            elevations=elevations,
+            azimuths=azimuths, ipp_szas=ipp_szas)
         for ev in slip_events:
             flush_sv_phase(
                 ev.sv, filt=filt, mw_tracker=mw_tracker,
                 nl_resolver=nl_resolver, slip_monitor=slip_monitor,
                 reason="|".join(ev.reasons), epoch=n_epochs)
             log.info("slip: sv=%s reasons=%s conf=%s lock=%.0fms cno=%.1f"
-                     " elev=%s gap=%s gf=%s mw=%s",
+                     " elev=%s az=%s ipp_sza=%s gap=%s gf=%s mw=%s",
                      ev.sv, ",".join(ev.reasons), ev.confidence,
                      ev.lock_ms, ev.cno,
                      f"{ev.elevation_deg:.0f}°" if ev.elevation_deg is not None else "?",
+                     f"{ev.azimuth_deg:.0f}°" if ev.azimuth_deg is not None else "?",
+                     f"{ev.ipp_sza_deg:.0f}°" if ev.ipp_sza_deg is not None else "?",
                      f"{ev.gap_s:.2f}s" if ev.gap_s is not None else "-",
                      f"{ev.gf_jump_m*100:.1f}cm" if ev.gf_jump_m is not None else "-",
                      f"{ev.mw_jump_cyc:.2f}c" if ev.mw_jump_cyc is not None else "-")
             peer_publisher.publish_slip_event(
                 sv=ev.sv, reasons=ev.reasons, conf=ev.confidence,
                 elev_deg=ev.elevation_deg,
+                azimuth_deg=ev.azimuth_deg,
+                ipp_sza_deg=ev.ipp_sza_deg,
                 lock_duration_ms=int(ev.lock_ms) if ev.lock_ms is not None else None,
                 gf_jump_m=ev.gf_jump_m, mw_jump_cyc=ev.mw_jump_cyc,
             )
@@ -2009,9 +2054,14 @@ class AntPosEstThread(threading.Thread):
             current_svs = {o['sv'] for o in observations}
             elevations = _compute_sv_elevations(
                 filt, corrections, observations, gps_time)
+            azimuths = _compute_sv_azimuths(
+                filt, corrections, observations, gps_time)
+            ipp_szas = _compute_sv_ipp_szas(
+                filt, azimuths, elevations, gps_time)
             slip_events = self._slip_monitor.check(
                 observations, gps_time.timestamp(), self._n_epochs,
-                elevations=elevations)
+                elevations=elevations,
+                azimuths=azimuths, ipp_szas=ipp_szas)
             for ev in slip_events:
                 flush_sv_phase(
                     ev.sv, filt=filt, mw_tracker=mw,
@@ -2021,16 +2071,20 @@ class AntPosEstThread(threading.Thread):
                     confidence=ev.confidence,
                     reason="|".join(ev.reasons), epoch=self._n_epochs)
                 log.info("slip: sv=%s reasons=%s conf=%s lock=%.0fms"
-                         " cno=%.1f elev=%s gap=%s gf=%s mw=%s",
+                         " cno=%.1f elev=%s az=%s ipp_sza=%s gap=%s gf=%s mw=%s",
                          ev.sv, ",".join(ev.reasons), ev.confidence,
                          ev.lock_ms, ev.cno,
                          f"{ev.elevation_deg:.0f}°" if ev.elevation_deg is not None else "?",
+                         f"{ev.azimuth_deg:.0f}°" if ev.azimuth_deg is not None else "?",
+                         f"{ev.ipp_sza_deg:.0f}°" if ev.ipp_sza_deg is not None else "?",
                          f"{ev.gap_s:.2f}s" if ev.gap_s is not None else "-",
                          f"{ev.gf_jump_m*100:.1f}cm" if ev.gf_jump_m is not None else "-",
                          f"{ev.mw_jump_cyc:.2f}c" if ev.mw_jump_cyc is not None else "-")
                 peer_publisher.publish_slip_event(
                     sv=ev.sv, reasons=ev.reasons, conf=ev.confidence,
                     elev_deg=ev.elevation_deg,
+                    azimuth_deg=ev.azimuth_deg,
+                    ipp_sza_deg=ev.ipp_sza_deg,
                     lock_duration_ms=int(ev.lock_ms) if ev.lock_ms is not None else None,
                     gf_jump_m=ev.gf_jump_m, mw_jump_cyc=ev.mw_jump_cyc,
                 )

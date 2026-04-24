@@ -207,6 +207,8 @@ def publish_slip_event(
     reasons,
     conf: str,
     elev_deg: Optional[float] = None,
+    azimuth_deg: Optional[float] = None,
+    ipp_sza_deg: Optional[float] = None,
     lock_duration_ms: Optional[int] = None,
     gf_jump_m: Optional[float] = None,
     mw_jump_cyc: Optional[float] = None,
@@ -218,7 +220,10 @@ def publish_slip_event(
     payload = SlipEventPayload(
         ts_mono_ns=mono_ns(), sv=sv,
         reasons=list(reasons), conf=conf,
-        elev_deg=elev_deg, lock_duration_ms=lock_duration_ms,
+        elev_deg=elev_deg,
+        azimuth_deg=azimuth_deg,
+        ipp_sza_deg=ipp_sza_deg,
+        lock_duration_ms=lock_duration_ms,
         gf_jump_m=gf_jump_m, mw_jump_cyc=mw_jump_cyc,
     )
     _bus.publish(f"peppar-fix.{_host}.slip-event.{sv}", to_bytes(payload))

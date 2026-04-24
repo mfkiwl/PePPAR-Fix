@@ -115,6 +115,15 @@ class SlipEvent:
     gap_s: Optional[float] = None
     gf_jump_m: Optional[float] = None
     mw_jump_cyc: Optional[float] = None
+    # Sky geometry at slip time (Bob 2026-04-24).  Enables post-hoc
+    # analysis by azimuth octant and by solar-zenith-angle at the
+    # ionospheric pierce point — the latter is a cheap proxy for
+    # "how close is this signal's IPP to the terminator right now."
+    # SZA ≈ 90° flags the twilight band where dTEC/dt is largest.
+    # Both None when the engine couldn't compute them (no filter
+    # position, missing sat ephemeris, SV below horizon).
+    azimuth_deg: Optional[float] = None
+    ipp_sza_deg: Optional[float] = None
 
     @property
     def confidence(self) -> str:
@@ -129,6 +138,8 @@ class SlipEvent:
             f"{self.lock_ms:.0f}",
             f"{self.cno:.1f}",
             f"{self.elevation_deg:.1f}" if self.elevation_deg is not None else "",
+            f"{self.azimuth_deg:.1f}" if self.azimuth_deg is not None else "",
+            f"{self.ipp_sza_deg:.1f}" if self.ipp_sza_deg is not None else "",
             f"{self.gap_s:.2f}" if self.gap_s is not None else "",
             f"{self.gf_jump_m:.4f}" if self.gf_jump_m is not None else "",
             f"{self.mw_jump_cyc:.3f}" if self.mw_jump_cyc is not None else "",
@@ -137,7 +148,8 @@ class SlipEvent:
     @staticmethod
     def csv_header() -> list[str]:
         return ["epoch", "sv", "reasons", "confidence", "lock_ms",
-                "cno", "elev_deg", "gap_s", "gf_jump_m", "mw_jump_cyc"]
+                "cno", "elev_deg", "az_deg", "ipp_sza_deg",
+                "gap_s", "gf_jump_m", "mw_jump_cyc"]
 
 
 # ── Monitor ──────────────────────────────────────────────────────── #
@@ -174,14 +186,20 @@ class CycleSlipMonitor:
     # ── core ─────────────────────────────────────────────────────── #
 
     def check(self, observations, t_mono_s: float,
-              epoch: int, elevations=None) -> list[SlipEvent]:
+              epoch: int, elevations=None,
+              azimuths=None, ipp_szas=None) -> list[SlipEvent]:
         """Return list of SlipEvent for SVs that slipped this epoch.
 
         observations : list of dicts with keys sv, lock_duration_ms, cno,
                        phi1_cyc, phi2_cyc, wl_f1, wl_f2, pr1_m, pr2_m.
         elevations : optional dict sv -> elev_deg for SlipEvent tagging.
+        azimuths   : optional dict sv -> az_deg  (0°=N, 90°=E).
+        ipp_szas   : optional dict sv -> IPP solar zenith angle (deg);
+                     ~90° flags the terminator twilight band.
         """
         elevations = elevations or {}
+        azimuths = azimuths or {}
+        ipp_szas = ipp_szas or {}
         events: list[SlipEvent] = []
         current_svs: set[str] = set()
 
@@ -270,6 +288,8 @@ class CycleSlipMonitor:
                     lock_ms=lock_ms,
                     cno=cno,
                     elevation_deg=elevations.get(sv),
+                    azimuth_deg=azimuths.get(sv),
+                    ipp_sza_deg=ipp_szas.get(sv),
                     gap_s=gap_s,
                     gf_jump_m=gf_delta,
                     mw_jump_cyc=mw_delta_cyc,

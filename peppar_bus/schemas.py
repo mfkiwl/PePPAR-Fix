@@ -172,6 +172,13 @@ class SlipEventPayload:
     reasons: list = field(default_factory=list)
     conf: str = "LOW"           # "LOW" | "HIGH"
     elev_deg: Optional[float] = None
+    # Sky geometry at slip time (added 2026-04-24 for sunrise-storm
+    # analysis).  azimuth_deg: 0°=N, 90°=E.  ipp_sza_deg: solar
+    # zenith angle at the SV's ionospheric pierce point (~90° flags
+    # terminator band where dTEC/dt is largest).  Both None when the
+    # engine couldn't compute them (no filter position, etc.).
+    azimuth_deg: Optional[float] = None
+    ipp_sza_deg: Optional[float] = None
     lock_duration_ms: Optional[int] = None
     gf_jump_m: Optional[float] = None
     mw_jump_cyc: Optional[float] = None
