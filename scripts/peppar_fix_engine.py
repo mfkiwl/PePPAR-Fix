@@ -2557,6 +2557,41 @@ class AntPosEstThread(threading.Thread):
                             "  [WL_INTEGRALITY %d] %d SVs, %d would-fix: %s",
                             self._n_epochs, len(snap), n_would,
                             " ".join(parts))
+
+                # Per-SV post-fit residual snapshot every 60 epochs.
+                # Bob 2026-04-24 root-cause hunt: when the float PPP
+                # solution is biased by observation-model error
+                # (phase bias mismatch, PCV offset, code bias residual,
+                # hardware signal bias), individual SVs will show
+                # systematic residual offsets.  Per-SV mean + std over
+                # a rolling window would be ideal, but for a first
+                # pass we emit the raw post-fit residual per SV per
+                # measurement type (PR + phi) sorted by |resid|
+                # descending — worst SVs at the head of each line.
+                if self._n_epochs % 60 == 0 and resid is not None \
+                        and len(resid) > 0:
+                    _labels = getattr(filt, 'last_residual_labels', [])
+                    # Pair each residual with (sv, kind).  Sort by
+                    # |resid| so operators see the worst offenders first.
+                    tagged = [
+                        (lab[0], lab[1], float(r))
+                        for lab, r in zip(_labels, resid)
+                    ]
+                    tagged.sort(key=lambda t: -abs(t[2]))
+                    pr_parts = [f"{sv}:{v:+.2f}" for sv, k, v in tagged
+                                if k == 'pr']
+                    phi_parts = [f"{sv}:{v:+.3f}" for sv, k, v in tagged
+                                 if k == 'phi']
+                    if pr_parts:
+                        log.info(
+                            "  [RESID_PR %d] %d: %s",
+                            self._n_epochs, len(pr_parts),
+                            " ".join(pr_parts))
+                    if phi_parts:
+                        log.info(
+                            "  [RESID_PHI %d] %d: %s",
+                            self._n_epochs, len(phi_parts),
+                            " ".join(phi_parts))
                 # Peer-bus publish — mirrors the [AntPosEst] log line's
                 # fields to any subscribers.  All three helpers no-op
                 # when --peer-bus is disabled.
