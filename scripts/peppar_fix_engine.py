@@ -45,7 +45,8 @@ import numpy as np
 
 from solve_pseudorange import C, ecef_to_lla, lla_to_ecef
 from solve_ppp import PPPFilter, FixedPosFilter, ls_init, N_BASE, SIGMA_P_IF, IDX_ZTD as PPP_IDX_ZTD
-from solid_tide import solid_tide_displacement
+from solid_tide import solid_tide_displacement, sun_pos_ecef
+from antex import ANTEXParser, compute_pcv_correction
 from peppar_fix.bootstrap_gate import (
     residuals_consistent, nav2_agrees, scrub_for_retry,
 )
@@ -1294,8 +1295,20 @@ class AntPosEstThread(threading.Thread):
                  nl_diag_enabled=False,
                  join_test_enabled=True,
                  wl_only=False,
-                 solid_tide=True):
+                 solid_tide=True,
+                 antex_parser=None,
+                 receiver_antenna_type=None,
+                 pcv_enabled=True):
         super().__init__(daemon=True, name="AntPosEst")
+        # ANTEX parser + receiver antenna type (Phase 2 of obs-model
+        # completion plan).  PCV correction applies only when BOTH
+        # parser and antenna type are provided AND pcv_enabled is
+        # True.  See scripts/antex.py and
+        # docs/obs-model-completion-plan.md.
+        self._antex = antex_parser
+        self._recv_ant_type = receiver_antenna_type
+        self._pcv_enabled = bool(pcv_enabled) and antex_parser is not None \
+            and receiver_antenna_type is not None
         # WL-only mode: clamp the lifecycle at CONVERGING, skip NL
         # resolution.  See docs/wl-only-foundation.md.
         self._wl_only = bool(wl_only)
@@ -1307,6 +1320,9 @@ class AntPosEstThread(threading.Thread):
         # position for range calculation without modifying the filter
         # state.  Expected delta: ~40 mm on clean-geometry hosts.
         self._solid_tide = bool(solid_tide)
+        # Per-epoch PCV counter for the [AntPosEst] status tag.
+        self._last_pcv_applied = 0
+        self._last_pcv_skipped = 0
         self.obs_queue = queue.Queue(maxsize=50)
         self._corrections = corrections
         self._stop = stop_event
@@ -1973,19 +1989,48 @@ class AntPosEstThread(threading.Thread):
             tide_offset = None
             self._last_tide_3d_mm = None
             self._last_tide_up_mm = None
-            if self._solid_tide:
-                pos_ecef = filt.x[:3]
-                pos_norm = float(np.linalg.norm(pos_ecef))
-                if pos_norm > 100_000.0:
-                    tide_offset = solid_tide_displacement(gps_time, pos_ecef)
-                    # Cache tide magnitude + radial projection for the
-                    # AntPosEst status line.  Radial ≈ local up for a
-                    # near-spherical station position; good to 0.1 mm.
-                    r_hat = pos_ecef / pos_norm
-                    self._last_tide_3d_mm = 1000.0 * float(
-                        np.linalg.norm(tide_offset))
-                    self._last_tide_up_mm = 1000.0 * float(
-                        np.dot(tide_offset, r_hat))
+            pos_ecef = filt.x[:3]
+            pos_norm = float(np.linalg.norm(pos_ecef))
+            pos_usable = pos_norm > 100_000.0
+            if self._solid_tide and pos_usable:
+                tide_offset = solid_tide_displacement(gps_time, pos_ecef)
+                # Cache tide magnitude + radial projection for the
+                # AntPosEst status line.  Radial ≈ local up for a
+                # near-spherical station position; good to 0.1 mm.
+                r_hat = pos_ecef / pos_norm
+                self._last_tide_3d_mm = 1000.0 * float(
+                    np.linalg.norm(tide_offset))
+                self._last_tide_up_mm = 1000.0 * float(
+                    np.dot(tide_offset, r_hat))
+
+            # PCV correction (Phase 2 of obs-model plan).  Per-SV
+            # antenna phase-center correction applied to obs pr_if +
+            # phi_if_m in-place.  Requires ANTEX parser + receiver
+            # antenna type + usable filter position.  Sun ECEF shared
+            # with solid tide (computed once per epoch).
+            self._last_pcv_applied = 0
+            self._last_pcv_skipped = 0
+            if self._pcv_enabled and pos_usable:
+                sun_ecef = sun_pos_ecef(gps_time)
+                for obs in observations:
+                    sv = obs['sv']
+                    sat_pos, _ = corrections.sat_position(sv, gps_time)
+                    if sat_pos is None:
+                        self._last_pcv_skipped += 1
+                        continue
+                    if obs.get('pr_if') is None or obs.get('phi_if_m') is None:
+                        self._last_pcv_skipped += 1
+                        continue
+                    delta, ok = compute_pcv_correction(
+                        obs, np.asarray(sat_pos), pos_ecef,
+                        self._antex, self._recv_ant_type, gps_time,
+                        sun_pos_ecef=sun_ecef)
+                    if ok:
+                        obs['pr_if'] += delta
+                        obs['phi_if_m'] += delta
+                        self._last_pcv_applied += 1
+                    else:
+                        self._last_pcv_skipped += 1
 
             # EKF update
             n_used, resid, sys_counts = filt.update(
@@ -2291,6 +2336,12 @@ class AntPosEstThread(threading.Thread):
                 if self._last_tide_3d_mm is not None:
                     tide_tag = (f" tide={self._last_tide_3d_mm:.0f}mm"
                                 f"(U{self._last_tide_up_mm:+.0f})")
+                # PCV activity: N applied / M skipped this epoch.
+                # Tag omitted when PCV is disabled entirely.
+                pcv_tag = ""
+                if self._pcv_enabled:
+                    pcv_tag = (f" pcv={self._last_pcv_applied}"
+                               f"/{self._last_pcv_applied + self._last_pcv_skipped}")
                 # Worst-σ diagnostic: largest σ (√ of largest
                 # eigenvalue) across P's base-state block.  Pairs
                 # with positionσ on this line — they share the same
@@ -2307,11 +2358,11 @@ class AntPosEstThread(threading.Thread):
                              if nm_sigma is not None else "")
                 log.info(
                     "  [AntPosEst %d] positionσ=%.3fm pos=(%.6f, %.6f, %.1f) "
-                    "n=%d amb=%d %s %s%s%s%s%s%s%s",
+                    "n=%d amb=%d %s %s%s%s%s%s%s%s%s",
                     self._n_epochs, sigma_3d, lat, lon, alt,
                     n_used, len(filt.sv_to_idx),
                     mw.summary(), nl.summary(), nav2_tag, ztd_tag,
-                    strength_tag, readmit_tag, tide_tag, worst_tag,
+                    strength_tag, readmit_tag, tide_tag, pcv_tag, worst_tag,
                 )
                 # Full-precision NAV2 log line.  NAV2-PVT's native format is
                 # LLA; lat/lon at 1e-7 deg (~1 cm resolution at our latitude)
@@ -5297,6 +5348,31 @@ def run(args):
     ape_sm = AntPosEst(wl_only=bool(getattr(args, "wl_only", False)))
     dfe_sm = DOFreqEst()
 
+    # Load ANTEX for PCV correction (Phase 2 of obs-model plan).  We
+    # parse at engine startup so the one-time cost (~1s on IGS14.atx)
+    # happens before any real-time observation processing.  Loading
+    # failures are warnings, not errors: the engine continues without
+    # PCV correction.
+    _ape_antex_parser = None
+    antex_path = getattr(args, "antex_path", None)
+    recv_ant = getattr(args, "receiver_antenna", None)
+    pcv_flag = bool(getattr(args, "pcv", True))
+    if pcv_flag and antex_path and recv_ant:
+        try:
+            _ape_antex_parser = ANTEXParser(antex_path)
+            log.info("ANTEX loaded from %s; receiver antenna = %r",
+                     antex_path, recv_ant)
+        except Exception as e:
+            log.warning("ANTEX load failed (%s); continuing without PCV", e)
+            _ape_antex_parser = None
+    elif pcv_flag and (antex_path or recv_ant):
+        log.warning(
+            "PCV correction needs both --antex-path and --receiver-antenna; "
+            "got antex=%s receiver=%s; continuing without PCV",
+            antex_path, recv_ant)
+    elif not pcv_flag:
+        log.info("PCV correction disabled via --no-pcv")
+
     def on_signal(signum, frame):
         log.info("Signal received, shutting down")
         stop_event.set()
@@ -5587,6 +5663,9 @@ def run(args):
             join_test_enabled=bool(getattr(args, "join_test", True)),
             wl_only=bool(getattr(args, "wl_only", False)),
             solid_tide=bool(getattr(args, "solid_tide", True)),
+            antex_parser=_ape_antex_parser,
+            receiver_antenna_type=getattr(args, "receiver_antenna", None),
+            pcv_enabled=bool(getattr(args, "pcv", True)),
         )
         ape_thread.start()
 
@@ -5827,6 +5906,29 @@ Two-phase operation:
                           "of docs/obs-model-completion-plan.md.  Use "
                           "this flag to A/B test the correction's impact "
                           "on lab performance.")
+    pos.add_argument("--no-pcv", dest="pcv",
+                     action="store_false", default=True,
+                     help="Disable satellite + receiver antenna phase "
+                          "center variation / offset (PCV / PCO) "
+                          "correction.  On by default when --antex-path "
+                          "is provided.  Bravo's harness measured "
+                          "−117 mm improvement on clean GAL+BDS geometry "
+                          "on ABMF 2020/001 (Phase 2 of obs-model-"
+                          "completion-plan.md).  Requires --antex-path "
+                          "and --receiver-antenna.")
+    pos.add_argument("--antex-path", default=None,
+                     help="Path to IGS ANTEX (.atx) file providing "
+                          "antenna phase center calibrations.  Required "
+                          "for PCV correction; when absent, PCV is "
+                          "silently skipped.  IGS14.atx is ~2 MB, "
+                          "freely available from "
+                          "https://files.igs.org/pub/station/general/")
+    pos.add_argument("--receiver-antenna", default=None,
+                     help="ANTEX receiver-antenna type string for this "
+                          "host's antenna, e.g. 'TRM57971.00     NONE' "
+                          "(20-char TYPE field from ANTEX).  Required "
+                          "for PCV correction; when absent, PCV is "
+                          "skipped with a warning.")
     pos.add_argument("--timeout", type=int, default=3600,
                      help="Bootstrap timeout in seconds (default: 3600)")
     pos.add_argument("--watchdog-threshold", type=float, default=0.5,

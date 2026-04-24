@@ -153,6 +153,17 @@ def _eci_to_ecef(v_eci: np.ndarray, gmst: float) -> np.ndarray:
     ])
 
 
+def sun_pos_ecef(t: datetime) -> np.ndarray:
+    """Sun position in ECEF at epoch t.  Exposed for reuse by the
+    PCV satellite-body-frame calculation (scripts/antex.py), which
+    needs the Sun direction to project body-X/Y PCO components.
+    Accuracy: ~arcmin (Montenbruck & Gill low-precision).  Same
+    precision used internally by solid_tide_displacement."""
+    jd = _jd_from_datetime(t)
+    gmst = _gmst_rad(jd)
+    return _eci_to_ecef(_sun_pos_eci(jd), gmst)
+
+
 def solid_tide_displacement(t: datetime, station_ecef: np.ndarray) -> np.ndarray:
     """IERS 2010 Step 1 solid Earth tide displacement at a station.
 
