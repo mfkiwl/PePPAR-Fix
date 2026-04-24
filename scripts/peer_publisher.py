@@ -33,12 +33,18 @@ _host = None        # str: this engine's published host identifier
 
 
 def initialize(spec: str, *, host: str, antenna_ref: str = "",
-               version: str = "engine") -> bool:
+               site_ref: str = "", version: str = "engine") -> bool:
     """Initialize the peer-bus from a CLI flag spec string.
 
     Returns True when the bus is active, False when disabled.
     Errors during initialization are logged and degrade to disabled
     — a peer-bus misconfiguration must not take the engine down.
+
+    ``antenna_ref`` identifies the shared-ARP cohort (splitter
+    siblings).  ``site_ref`` identifies the shared-atmosphere
+    cohort (hosts at the same physical site sharing atmospheric
+    column).  Both optional; empty strings exclude the peer from
+    cohort checks.  See ``docs/fleet-consensus-monitors.md``.
     """
     global _bus, _host
     spec = (spec or "").strip().lower()
@@ -61,14 +67,16 @@ def initialize(spec: str, *, host: str, antenna_ref: str = "",
             if len(parts) >= 3 and parts[2]:
                 kwargs["port"] = int(parts[2])
             identity = PeerIdentity(
-                host=host, version=version, antenna_ref=antenna_ref,
+                host=host, version=version,
+                antenna_ref=antenna_ref, site_ref=site_ref,
             )
             _bus = UDPMulticastBus(host=host, identity=identity, **kwargs)
             _host = host
             log.info("peer-bus active: udp-multicast host=%s group=%s port=%s "
-                     "antenna_ref=%r",
+                     "antenna_ref=%r site_ref=%r",
                      host, kwargs.get("group", "default"),
-                     kwargs.get("port", "default"), antenna_ref)
+                     kwargs.get("port", "default"),
+                     antenna_ref, site_ref)
             return True
         log.error("peer-bus: unsupported transport spec %r", spec)
         return False
@@ -78,6 +86,21 @@ def initialize(spec: str, *, host: str, antenna_ref: str = "",
         _bus = None
         _host = None
         return False
+
+
+def get_bus():
+    """Return the installed PeerBus instance, or None when disabled.
+    Exposes the bus for ``peer_subscriber`` (and future consumers)
+    so they can register subscriptions on the same transport
+    without duplicating the socket + discovery setup."""
+    return _bus
+
+
+def get_host() -> Optional[str]:
+    """Return the host identifier this publisher is using, or None
+    when disabled.  Consumers that need to identify 'self' vs
+    'peers' read this."""
+    return _host
 
 
 def shutdown() -> None:

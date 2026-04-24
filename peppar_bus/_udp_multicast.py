@@ -200,6 +200,7 @@ class UDPMulticastBus(PeerBus):
                         version=hb.engine_version,
                         systems=hb.systems,
                         antenna_ref=hb.antenna_ref,
+                        site_ref=hb.site_ref,
                         first_seen_mono_ns=(
                             self._peers.get(from_host, (None, 0))[1] or now
                         ),
@@ -227,6 +228,7 @@ class UDPMulticastBus(PeerBus):
                 engine_version=self._identity.version,
                 systems=self._identity.systems,
                 antenna_ref=self._identity.antenna_ref,
+                site_ref=self._identity.site_ref,
             )
             self.publish(
                 f"peppar-fix.{self._host}.heartbeat",

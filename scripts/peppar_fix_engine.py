@@ -2450,6 +2450,51 @@ class AntPosEstThread(threading.Thread):
                         getattr(self, '_nl_capable_constellations', set()) or set(),
                     )),
                 )
+                # Fleet consensus diagnostics (logging only in Part 1;
+                # Part 2 wires these into FixSetIntegrityMonitor as
+                # trip conditions).  Cohort medians are pulled via the
+                # peer_subscriber's snapshot of peer state.  Include
+                # self in the median so the cohort always has ≥ 2 when
+                # at least one peer is present.  Per cohort semantics
+                # in docs/fleet-consensus-monitors.md: position cohort
+                # uses antenna_ref; ZTD cohort uses site_ref.
+                import peer_subscriber
+                if peer_subscriber.is_active():
+                    _ant_ref = peer_subscriber.get_local_antenna_ref()
+                    _site_ref = peer_subscriber.get_local_site_ref()
+                    _ztd_m = (float(filt.x[ztd_idx])
+                              if filt.x.shape[0] > ztd_idx else None)
+                    _self_snap = peer_subscriber.build_self_snapshot(
+                        antenna_ref=_ant_ref, site_ref=_site_ref,
+                        lat_deg=lat, lon_deg=lon, alt_m=alt,
+                        ztd_m=_ztd_m,
+                    )
+                    _pos_med = (peer_subscriber.cohort_median_position(
+                                    _ant_ref, self_snapshot=_self_snap)
+                                if _ant_ref else None)
+                    _ztd_med = (peer_subscriber.cohort_median_ztd(
+                                    _site_ref, self_snapshot=_self_snap)
+                                if _site_ref else None)
+                    if _pos_med is not None or _ztd_med is not None:
+                        from peppar_bus.cohort import ecef_distance_m
+                        parts = []
+                        if _pos_med is not None:
+                            med_lat, med_lon, med_alt, n_pos = _pos_med
+                            dh, d3 = ecef_distance_m(
+                                lat, lon, alt,
+                                med_lat, med_lon, med_alt,
+                            )
+                            parts.append(
+                                f"pos_cohort_n={n_pos} "
+                                f"Δh={dh * 1000:.0f}mm Δ3d={d3 * 1000:.0f}mm")
+                        if _ztd_med is not None and _ztd_m is not None:
+                            med_ztd, n_ztd = _ztd_med
+                            delta_mm = (_ztd_m - med_ztd) * 1000.0
+                            parts.append(
+                                f"ztd_cohort_n={n_ztd} "
+                                f"Δztd={delta_mm:+.1f}mm")
+                        if parts:
+                            log.info("  [COHORT] %s", "  ".join(parts))
                 # Full-precision NAV2 log line.  NAV2-PVT's native format is
                 # LLA; lat/lon at 1e-7 deg (~1 cm resolution at our latitude)
                 # and height in mm.  Deriving ECEF from LLA doesn't add
@@ -6386,6 +6431,17 @@ Two-phase operation:
         ),
     )
     peer.add_argument(
+        "--peer-site-ref", default="",
+        metavar="NAME",
+        help=(
+            "Site identifier (e.g. 'DuPage') published in this "
+            "host's heartbeat.  Peers with matching site_ref form "
+            "the shared-atmosphere cohort for ZTD consensus "
+            "checks (see docs/fleet-consensus-monitors.md).  "
+            "Empty = don't claim a site."
+        ),
+    )
+    peer.add_argument(
         "--peer-host", default=None,
         metavar="NAME",
         help=(
@@ -6495,7 +6551,20 @@ Two-phase operation:
         getattr(args, 'peer_bus', 'none') or 'none',
         host=_peer_host,
         antenna_ref=getattr(args, 'peer_antenna_ref', '') or '',
+        site_ref=getattr(args, 'peer_site_ref', '') or '',
         version="peppar-fix-engine",
+    )
+    # Peer subscriber piggybacks on the bus that peer_publisher
+    # just opened.  Wires up callbacks for peer position + ztd so
+    # the engine has a view of the fleet's state for consensus
+    # monitors (Part 2 of docs/fleet-consensus-monitors.md).  No-op
+    # when peer_publisher didn't open a bus.  Local antenna_ref +
+    # site_ref are stored on the subscriber so ``cohort_*`` helpers
+    # can be called from anywhere without re-threading config.
+    import peer_subscriber
+    peer_subscriber.initialize(
+        antenna_ref=getattr(args, 'peer_antenna_ref', '') or '',
+        site_ref=getattr(args, 'peer_site_ref', '') or '',
     )
 
     if not args.serial:

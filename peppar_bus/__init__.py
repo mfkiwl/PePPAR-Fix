@@ -13,6 +13,7 @@ Public surface:
   PeerIdentity         — heartbeat payload
   encode / decode      — envelope serialization (JSON Lines)
   schemas              — typed payload dataclasses for each topic
+  cohort               — pure cohort grouping + median helpers
 
 Transport roadmap: UDPMulticastBus today, TCPP2PBus next, MQTTBus
 when fleet scales.  All share this interface.  See
@@ -22,13 +23,14 @@ when fleet scales.  All share this interface.  See
 from peppar_bus._abc import PeerBus, PeerIdentity, PeerMessage, mono_ns
 from peppar_bus._envelope import encode, decode
 from peppar_bus._udp_multicast import UDPMulticastBus
-from peppar_bus import schemas
+from peppar_bus import cohort, schemas
 
 __all__ = [
     "PeerBus",
     "PeerIdentity",
     "PeerMessage",
     "UDPMulticastBus",
+    "cohort",
     "decode",
     "encode",
     "mono_ns",

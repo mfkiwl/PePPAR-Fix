@@ -69,9 +69,21 @@ def main() -> None:
         metavar="NAME",
         help=(
             "Antenna identifier (e.g. 'UFO1').  Peers sharing the "
-            "same antenna_ref get cross-antenna position "
-            "comparison in the fleet summary.  Empty (default) "
-            "means 'don't claim a specific antenna'."
+            "same antenna_ref form the shared-ARP cohort for "
+            "position consensus.  Empty (default) = don't claim."
+        ),
+    )
+    parser.add_argument(
+        "--fleet-site-ref",
+        default="",
+        metavar="NAME",
+        help=(
+            "Site identifier (e.g. 'DuPage').  Peers sharing the "
+            "same site_ref form the shared-atmosphere cohort for "
+            "ZTD consensus (looser than antenna_ref — hosts on "
+            "different antennas at the same site qualify).  Empty "
+            "(default) = don't claim a site.  See "
+            "docs/fleet-consensus-monitors.md."
         ),
     )
     args = parser.parse_args()
@@ -80,6 +92,7 @@ def main() -> None:
         fleet_mode=args.fleet,
         fleet_host=args.fleet_host,
         fleet_antenna_ref=args.fleet_antenna_ref,
+        fleet_site_ref=args.fleet_site_ref,
     ).run()
 
 

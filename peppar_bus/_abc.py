@@ -20,13 +20,23 @@ class PeerIdentity:
     is observing.  Hosts with the same antenna_ref are sharing a
     splitter and their integer fixes must agree (mod PCO).  The
     fleet aggregator uses this to decide whether cross-host
-    integer comparison is meaningful.
+    position comparison is meaningful (shared-ARP cohort).
+
+    ``site_ref`` is a coarser grouping: hosts at the same physical
+    site whose antennas are close enough that the atmospheric
+    column is effectively shared.  Lab example: L5 fleet on
+    ``antenna_ref="UFO1"`` and ptpmon on ``antenna_ref="PATCH3"``
+    both declare ``site_ref="DuPage"``.  Position cross-check
+    requires matching ``antenna_ref``; ZTD cross-check only
+    requires matching ``site_ref``.  See
+    ``docs/fleet-consensus-monitors.md`` for cohort semantics.
     """
 
     host: str
     version: str = "unknown"
     systems: str = ""          # e.g. "G+E+C"
     antenna_ref: str = ""
+    site_ref: str = ""
     first_seen_mono_ns: int = 0
 
 

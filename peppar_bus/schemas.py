@@ -26,6 +26,12 @@ class HeartbeatPayload:
 
     Topic: ``peppar-fix.<host>.heartbeat``
     Cadence: every 1 s (UDPMulticastBus), negotiable per transport.
+
+    ``antenna_ref`` and ``site_ref`` parallel ``PeerIdentity``:
+    ``antenna_ref`` identifies the shared-ARP cohort (same physical
+    antenna via splitter); ``site_ref`` identifies the shared-
+    atmosphere cohort (nearby antennas at the same site).  See
+    ``docs/fleet-consensus-monitors.md``.
     """
 
     schema_version: int = SCHEMA_VERSION
@@ -33,6 +39,7 @@ class HeartbeatPayload:
     engine_version: str = "unknown"
     systems: str = ""
     antenna_ref: str = ""
+    site_ref: str = ""
 
 
 @dataclass

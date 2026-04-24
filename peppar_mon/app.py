@@ -122,6 +122,7 @@ class PepparMonApp(App):
         fleet_mode: bool = False,
         fleet_host: str | None = None,
         fleet_antenna_ref: str = "",
+        fleet_site_ref: str = "",
     ) -> None:
         super().__init__()
         if log_path is None:
@@ -139,6 +140,7 @@ class PepparMonApp(App):
         self._fleet_mode = fleet_mode
         self._fleet_host = fleet_host
         self._fleet_antenna_ref = fleet_antenna_ref
+        self._fleet_site_ref = fleet_site_ref
         self._bus = None
         self._aggregator = None
         self._bridge = None
@@ -216,6 +218,7 @@ class PepparMonApp(App):
             host=host,
             version="peppar-mon",
             antenna_ref=self._fleet_antenna_ref,
+            site_ref=self._fleet_site_ref,
         )
         self._bus = UDPMulticastBus(host=host, identity=identity)
         self._aggregator = FleetAggregator(self._bus)
