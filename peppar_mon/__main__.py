@@ -42,8 +42,45 @@ def main() -> None:
             "from the first line and follows for new content."
         ),
     )
+    parser.add_argument(
+        "--fleet",
+        action="store_true",
+        help=(
+            "Enable fleet mode.  Publishes this host's state to a "
+            "UDP-multicast peer bus + subscribes to peers, and "
+            "adds a fleet-summary row (cross-host position Δ, "
+            "Anchored counts, ZTD spread).  See "
+            "docs/peer-state-sharing.md."
+        ),
+    )
+    parser.add_argument(
+        "--fleet-host",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Host identifier to publish as on the fleet bus.  "
+            "Defaults to the system hostname.  Must be unique "
+            "within the fleet."
+        ),
+    )
+    parser.add_argument(
+        "--fleet-antenna-ref",
+        default="",
+        metavar="NAME",
+        help=(
+            "Antenna identifier (e.g. 'UFO1').  Peers sharing the "
+            "same antenna_ref get cross-antenna position "
+            "comparison in the fleet summary.  Empty (default) "
+            "means 'don't claim a specific antenna'."
+        ),
+    )
     args = parser.parse_args()
-    PepparMonApp(log_path=args.log_file).run()
+    PepparMonApp(
+        log_path=args.log_file,
+        fleet_mode=args.fleet,
+        fleet_host=args.fleet_host,
+        fleet_antenna_ref=args.fleet_antenna_ref,
+    ).run()
 
 
 if __name__ == "__main__":

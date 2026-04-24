@@ -35,8 +35,8 @@ from textual.widgets import Static, Header, Footer
 from peppar_mon._util import format_elapsed_short, format_uptime
 from peppar_mon.log_reader import LogReader
 from peppar_mon.widgets import (
-    AntennaPositionLine, FilterStateLine, SecondOpinionLine,
-    StateBar, SvStateTable,
+    AntennaPositionLine, FilterStateLine, FleetStateLine,
+    SecondOpinionLine, StateBar, SvStateTable,
 )
 
 # If no new timestamped line has landed in the log within this many
@@ -115,7 +115,14 @@ class PepparMonApp(App):
     TITLE = "peppar-mon"
     SUB_TITLE = "scaffold"
 
-    def __init__(self, log_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        log_path: Path | None = None,
+        *,
+        fleet_mode: bool = False,
+        fleet_host: str | None = None,
+        fleet_antenna_ref: str = "",
+    ) -> None:
         super().__init__()
         if log_path is None:
             env = os.environ.get(_LOG_PATH_ENV)
@@ -129,6 +136,12 @@ class PepparMonApp(App):
             log_path = env
         self.log_path = Path(log_path)
         self._reader: LogReader = LogReader(self.log_path)
+        self._fleet_mode = fleet_mode
+        self._fleet_host = fleet_host
+        self._fleet_antenna_ref = fleet_antenna_ref
+        self._bus = None
+        self._aggregator = None
+        self._bridge = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -152,6 +165,13 @@ class PepparMonApp(App):
                 yield FilterStateLine(
                     id="filter-state", classes="top-row-right",
                 )
+            # Row 4 (fleet mode only): cross-host summary.
+            if self._fleet_mode:
+                with Horizontal(classes="top-row"):
+                    yield Static("", classes="top-row-left")
+                    yield FleetStateLine(
+                        id="fleet-state", classes="top-row-right",
+                    )
             yield StateBar(
                 machine_name="AntPosEst",
                 all_states=_ANT_POS_EST_STATES,
@@ -168,6 +188,8 @@ class PepparMonApp(App):
     def on_ready(self) -> None:
         self.sub_title = f"reading {self.log_path}"
         self._reader.start()
+        if self._fleet_mode:
+            self._start_fleet()
         self._tick()
         # Textual schedules set_interval callbacks on its own event
         # loop so the UI thread stays responsive.
@@ -175,7 +197,32 @@ class PepparMonApp(App):
 
     def on_unmount(self) -> None:
         # Best-effort teardown when the app exits.
+        if self._bridge is not None:
+            self._bridge.stop()
+        if self._bus is not None:
+            self._bus.close()
         self._reader.stop()
+
+    def _start_fleet(self) -> None:
+        """Boot the peer-bus + bridge + aggregator.  Called once on
+        startup when --fleet was passed."""
+        import socket as _s
+        from peppar_bus import PeerIdentity, UDPMulticastBus
+        from peppar_mon.bridge import LogToBusBridge
+        from peppar_mon.fleet import FleetAggregator
+
+        host = self._fleet_host or _s.gethostname()
+        identity = PeerIdentity(
+            host=host,
+            version="peppar-mon",
+            antenna_ref=self._fleet_antenna_ref,
+        )
+        self._bus = UDPMulticastBus(host=host, identity=identity)
+        self._aggregator = FleetAggregator(self._bus)
+        self._bridge = LogToBusBridge(
+            reader=self._reader, bus=self._bus, host=host,
+        )
+        self._bridge.start()
 
     def _tick(self) -> None:
         # datetime.now() is naive-local-time; .astimezone() attaches the
@@ -216,6 +263,10 @@ class PepparMonApp(App):
             ssr_mount=s.ssr_mount,
             eph_mount=s.eph_mount,
         )
+        if self._aggregator is not None:
+            from peppar_mon.fleet import compute_summary
+            summary = compute_summary(self._aggregator.snapshots())
+            self.query_one("#fleet-state", FleetStateLine).update_summary(summary)
 
     def _uptime_line(self) -> str:
         """Delegates to the module-level pure function so it can

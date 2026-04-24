@@ -737,3 +737,81 @@ class FilterStateLine(Widget):
         t.append("   EPH ", style="bold")
         t.append(self._eph_mount if self._eph_mount else "—")
         return t
+
+
+class FleetStateLine(Widget):
+    """One-line cross-host summary of the peer fleet.
+
+    Layout when ≥ 2 peers share the same antenna::
+
+        Fleet (3 hosts):  Δ 3 mm / 5 mm   |   Anchored 13/13 13/13 12/13   |   ZTD σ 2 mm
+
+    - ``Δ horiz / 3D``: max pairwise position delta across the
+      same-antenna cohort, horizontal then 3D.  Shared-antenna
+      baseline is 0, so anything beyond mm points at wrong-
+      integer or null-mode.
+    - ``Anchored``: per-host Anchored-count list — one number per
+      host, sorted by hostname for stability.
+    - ``ZTD σ``: range (max - min) of ZTD residual in mm.  Same-
+      atmosphere peers should match within a few mm.
+
+    When fewer than 2 peers are present, renders ``Fleet: (waiting
+    for peers)``.
+    """
+
+    DEFAULT_CSS = """
+    FleetStateLine {
+        height: 1;
+        width: auto;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        summary=None,
+        id: Optional[str] = None,  # noqa: A002
+        classes: Optional[str] = None,
+    ) -> None:
+        super().__init__(id=id, classes=classes)
+        self._summary = summary
+
+    def update_summary(self, summary) -> None:
+        if summary == self._summary:
+            return
+        self._summary = summary
+        self.refresh()
+
+    def render(self) -> Text:
+        t = Text()
+        s = self._summary
+        if s is None or s.n_hosts < 2:
+            t.append("Fleet: ", style="bold")
+            t.append("(waiting for peers)")
+            return t
+        t.append(f"Fleet ({s.n_hosts} hosts): ", style="bold")
+        if s.max_delta_h_m is not None and s.max_delta_3d_m is not None:
+            t.append("Δ ")
+            t.append(_format_mm_cm(s.max_delta_h_m * 1000.0))
+            t.append(" / ")
+            t.append(_format_mm_cm(s.max_delta_3d_m * 1000.0))
+        else:
+            t.append("Δ —")
+        if s.anchored_per_host:
+            t.append("   Anchored ")
+            t.append(" ".join(str(c) for _, c in s.anchored_per_host))
+        if s.ztd_spread_mm is not None:
+            t.append("   ZTD σ ")
+            t.append(f"{s.ztd_spread_mm:.1f} mm")
+        return t
+
+
+def _format_mm_cm(mm: float) -> str:
+    """Render a distance in the natural unit: mm below 100 mm,
+    cm below 100 cm, m otherwise.  Mirrors format_uncertainty's
+    scale choice but without the ± prefix."""
+    if abs(mm) < 100:
+        return f"{mm:.0f} mm"
+    if abs(mm) < 1000:
+        return f"{mm / 10:.0f} cm"
+    return f"{mm / 1000:.2f} m"
