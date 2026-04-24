@@ -6281,6 +6281,19 @@ Two-phase operation:
                           "solve_ppp.SIGMA_P_IF (3.0 m).  Companion "
                           "knob to --sigma-phi-if for end-to-end "
                           "filter-trust calibration.")
+    pos.add_argument("--q-pos-converged", type=float, default=None,
+                     help="Override the converged-mode position process "
+                          "noise (m²/s).  Default 1e-4.  Tighter values "
+                          "(e.g. 1e-7, 1e-8) tell the filter that "
+                          "position truly does not move between epochs "
+                          "— honest for static stations, prevents "
+                          "trading position state for residual "
+                          "reduction along the (pos, ZTD, clk) null "
+                          "direction.  Bravo's PRIDE/ABMF Q_pos sweep "
+                          "(2026-04-24) showed σ_phi=1.0 + Q_pos=1e-8 "
+                          "achieves 6.2× total reduction vs defaults "
+                          "(mean 3D 9.30 → 1.51 m).  See "
+                          "project_to_main_qpos_sweep_20260424.md.")
     pos.add_argument("--timeout", type=int, default=3600,
                      help="Bootstrap timeout in seconds (default: 3600)")
     pos.add_argument("--watchdog-threshold", type=float, default=0.5,
@@ -6671,6 +6684,13 @@ Two-phase operation:
     if args.sigma_pr_if is not None:
         import solve_ppp as _spp
         _spp._SIGMA_P_IF_OVERRIDE = float(args.sigma_pr_if)
+    if args.q_pos_converged is not None:
+        # PPPFilter reads its Q_POS_CONVERGED class attribute lazily
+        # in predict() (commit 3aa2358).  Setting at class level
+        # before any instance is constructed propagates to every
+        # filter (bootstrap + AntPosEstThread fresh).
+        from solve_ppp import PPPFilter as _PF
+        _PF.Q_POS_CONVERGED = float(args.q_pos_converged)
     if args.ar_elev_mask is None:
         args.ar_elev_mask = 25.0
     if args.do_type is None:
@@ -6757,6 +6777,9 @@ Two-phase operation:
     if args.sigma_pr_if is not None:
         log.info(f"σ_pr_IF override: {args.sigma_pr_if:g} m "
                  f"(default 3.0 m)")
+    if args.q_pos_converged is not None:
+        log.info(f"Q_pos_converged override: {args.q_pos_converged:g} "
+                 f"(default 1e-4)")
 
     # Peer-bus initialization (optional).  Publishes no-op until the
     # first call site fires; stays no-op for entire run when
