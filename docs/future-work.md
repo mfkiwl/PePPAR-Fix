@@ -610,6 +610,13 @@ which is exactly the relative offset `ADJ_SETOFFSET` wants.
 
 ## Reference Oscillator (RO) characterization
 
+> **2026-04-24**: the position-filter context for RO work lives
+> in `docs/clock-state-modeling.md`.  This section focuses on
+> the RO's operational role (TICC-side accounting, spoofing
+> detection, single-channel calibration).  The companion
+> discussion of how RO state flows into the PPP filter's clock
+> dynamics is in the new doc.
+
 **What**: Treat the oscillator driving each TICC's 10 MHz reference
 input as a first-class entity — the **Reference Oscillator** (RO) —
 with its own characterization, bootstrap, runtime tracking, and

@@ -490,6 +490,7 @@ here before changing anything in the areas they cover.
 | File | Summary |
 |---|---|
 | [stream-timescale-correlation.md](docs/stream-timescale-correlation.md) | **Read this first.** How to correctly correlate events from independent timescales (GNSS, PPS, TICC, NTRIP). Covers why queue-order matching fails, the strict correlation gate design, confidence scoring, and fault injection testing. |
+| [clock-state-modeling.md](docs/clock-state-modeling.md) | Where time-domain knowledge enters the position filter.  Maps the three oscillators (rx TCXO, DO, RO) to filter states, lays out four levers (stochastic rx TCXO model, TICC+qErr pseudo-measurement, full co-estimation, RO characterization), and the recommended ordering.  Attacks the null-mode clock axis identified in the 2026-04-23 PRIDE arc. |
 | [full-data-flow.md](docs/full-data-flow.md) | Complete inventory of live data sources, their timescales, sink policies (freshest-only vs loss-free vs correlated-window), freshness requirements, and decimation effects. |
 | [platform-support.md](docs/platform-support.md) | Per-platform status for TimeHat (i226) and ocxo (E810). Documents device paths, PHC behavior, GNSS transport differences, and bring-up checklists. |
 | [time-and-platform-todo.md](docs/time-and-platform-todo.md) | Concrete work breakdown: remaining tasks for E810 GNSS, TimeHat PPS, correlation model, legacy cleanup, diagnostics. |
