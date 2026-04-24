@@ -284,17 +284,41 @@ Two parts, each session-scale:
   `peppar_bus` (complement to the already-wired publish path).
 - No filter-state changes.  Just consumption and logging.
 
-### Part 2: consensus monitors wired into FixSetIntegrityMonitor
+### Part 2: consensus monitors wired into FixSetIntegrityMonitor (landed cbb7126)
 
-- Add `PositionConsensusMonitor` and `ZtdConsensusMonitor`
-  classes alongside the existing fix-set monitors.
-- Wire their trip events into
-  `FixSetIntegrityMonitor.evaluate()` as additional reasons.
-- Default thresholds tuned from first-night data; parameters
-  exposed for adjustment.
-- Tests: cohort with agreement doesn't trip; cohort with one
-  outlier does trip (both monitors); cohort size of 1 (no
-  peers) silently skips the check.
+Landed as two new reasons directly on `FixSetIntegrityMonitor`
+(no new monitor classes — piggybacks the existing stateless-per-
+eval pattern):
+
+- `reason='pos_consensus'` — |self − cohort_median 3D| > 20 cm
+  sustained 30 epochs → full re-init (same remediation as
+  `anchor_collapse`).
+- `reason='ztd_consensus'` — |self ZTD − cohort_median ZTD|
+  > 10 cm sustained 60 epochs → NL-drop + ZTD reset (same
+  remediation as `ztd_impossible`).
+
+Thresholds + sustained counts are constructor kwargs, tunable
+without redeploy.  `evaluate()` gained two new optional kwargs
+(`pos_consensus_delta_m`, `ztd_consensus_delta_m`); passing
+`None` silently skips the consensus check — so single-host runs
+and hosts without `--peer-bus` behave bit-exact as before.
+
+Engine-side, cohort deltas are computed at every AntPosEst
+epoch (not at the 10-epoch [COHORT] log cadence) so the
+monitor's sustained-epoch counter advances at the right rate.
+
+Tests in `scripts/peppar_fix/test_fix_set_consensus.py` — 10
+cases covering sustained-delta trip, below-threshold silence,
+timer reset on dip, None passthrough, record_trip clearing both
+consensus latches, and consensus pre-empting `ztd_impossible`
+when both would trip.
+
+**Deployment note**: for consensus to fire, L5 hosts need
+`--peer-bus udp-multicast --peer-antenna-ref UFO1 --peer-site-ref
+DuPage` added to engine args.  Also: A/B runs with two different
+clock_models on the same cohort will spuriously trip consensus
+because the arms settle at different positions — consensus
+requires a matched-tuning cohort to be meaningful.
 
 ## Validation
 
