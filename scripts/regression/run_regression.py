@@ -822,8 +822,39 @@ def run(args) -> int:
                      "(%.2f m from truth, n_used=%d)",
                      init_ecef.tolist(), init_clk / C_LIGHT,
                      seed_offset, ls_n)
-            filt = PPPFilter()
-            filt.initialize(init_ecef, init_clk, systems=systems_lower)
+            # --seed-pos-offset override: place the filter at a
+            # deliberately-wrong position with σ already in converged-
+            # mode.  Studies Q_pos behaviour when the filter enters
+            # converged regime AT A WRONG POINT (lab warm-start
+            # failure mode per project_to_bravo_seed_error_sweep_
+            # 20260424.md).  Keep ls_init's clock — clock recovery
+            # isn't what we're studying.
+            seed_off_arg = getattr(args, "seed_pos_offset", None)
+            if seed_off_arg:
+                e_off, n_off, u_off = (
+                    float(s) for s in seed_off_arg.split(","))
+                # ENU → ECEF at truth station.
+                from regression.antex import ecef_to_enu_matrix
+                _enu_to_ecef = ecef_to_enu_matrix(truth_ecef).T
+                offset_ecef = _enu_to_ecef @ np.array(
+                    [e_off, n_off, u_off])
+                seeded_ecef = truth_ecef + offset_ecef
+                filt = PPPFilter()
+                filt.initialize(
+                    seeded_ecef, init_clk, systems=systems_lower)
+                # Force σ_pos to the requested converged-mode tightness.
+                # Default 0.5 m; lab warm-start regime is ~0.02 m.
+                seed_sigma = float(getattr(args, "seed_pos_sigma", 0.5))
+                filt.P[0, 0] = seed_sigma ** 2
+                filt.P[1, 1] = seed_sigma ** 2
+                filt.P[2, 2] = seed_sigma ** 2
+                log.info("seed-pos-offset: ENU=(%.1f, %.1f, %.1f) m, "
+                         "σ_pos = %.3f m (converged-mode entry)",
+                         e_off, n_off, u_off, seed_sigma)
+            else:
+                filt = PPPFilter()
+                filt.initialize(
+                    init_ecef, init_clk, systems=systems_lower)
 
         # Filter prediction step
         if prev_t is not None:
@@ -1362,6 +1393,26 @@ def main():
                          "project_to_main_pride_ablation_20260423.  "
                          "Harness-side only; engine impact requires "
                          "porting the solid_tide module there too.")
+    ap.add_argument("--seed-pos-offset", default=None, metavar="E,N,U",
+                    help="Override the cold-start ls_init seed: place "
+                         "the filter at truth_ecef + (E,N,U) metres "
+                         "with σ_pos = --seed-pos-sigma (default 0.5 m).  "
+                         "Used to study how Q_pos_converged behaves "
+                         "when the filter enters converged-mode AT A "
+                         "WRONG POINT — the lab warm-start failure "
+                         "mode that day0424i exposed.  Receiver clock "
+                         "is still seeded from ls_init (the issue "
+                         "under study is position lock-in, not clock). "
+                         "Format: comma-separated metres; e.g. "
+                         "'10,0,0' for 10 m east of truth.")
+    ap.add_argument("--seed-pos-sigma", type=float, default=0.5,
+                    metavar="SIGMA_M",
+                    help="σ_pos applied with --seed-pos-offset.  "
+                         "Default 0.5 m (just inside PPPFilter's "
+                         "converged-mode threshold of 1.0 m).  Lab "
+                         "warm-start typically lands at σ ≈ 0.02 m "
+                         "(deep converged) — use that to reproduce "
+                         "the day0424i pin failure mode.")
     ap.add_argument("--gmf", action="store_true",
                     help="Use Boehm 2006 Global Mapping Function "
                          "for tropospheric mapping (hydrostatic + "
