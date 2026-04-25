@@ -65,17 +65,19 @@ HOSTS = [
     },
 ]
 
-def _common_flags(known_pos: str) -> list:
-    return [
+def _common_flags(known_pos: str, with_ssr: bool) -> list:
+    flags = [
         "--wl-only", "--systems", "gal",
         "--known-pos", known_pos,
-        "--no-ssr",
         "--clock-model", "random_walk",
         "--sigma-phi-if", "1.0",
         "--phase-windup", "--gmf",
         "--peer-bus", "udp-multicast",
         "--peer-site-ref", "DuPage",
     ]
+    if not with_ssr:
+        flags.append("--no-ssr")
+    return flags
 
 
 # Default matrix: (offset_magnitude_m, repeats, alternate_signs)
@@ -123,7 +125,8 @@ def kill_all() -> None:
     time.sleep(3)
 
 
-def launch_all(tag: str, offset_e_m: float, known_pos: str) -> None:
+def launch_all(tag: str, offset_e_m: float, known_pos: str,
+               with_ssr: bool) -> None:
     print(f"  Launching {tag} with offset E={offset_e_m:+.3f}m...", flush=True)
     procs = []
     for h in HOSTS:
@@ -132,7 +135,7 @@ def launch_all(tag: str, offset_e_m: float, known_pos: str) -> None:
             "sudo PYTHONPATH=/home/bob/peppar-fix:/home/bob/peppar-fix/scripts "
             "nohup ./venv/bin/python scripts/peppar_fix_engine.py",
         ]
-        cmd_parts.extend(_common_flags(known_pos))
+        cmd_parts.extend(_common_flags(known_pos, with_ssr))
         cmd_parts.extend(h["extra"])
         # Use = form so a negative offset doesn't look like a flag to argparse
         cmd_parts.extend([
@@ -262,6 +265,9 @@ def main() -> int:
                          "passed to engine --known-pos.  Antenna "
                          "coords aren't committed; pass on CLI or "
                          "from env var SEED_SENS_KNOWN_POS.")
+    ap.add_argument("--with-ssr", action="store_true",
+                    help="Enable SSR corrections (default: --no-ssr).  "
+                         "Use to compare SSR-on vs SSR-off attractor.")
     ap.add_argument("--dry-run", action="store_true",
                     help="print plan, don't execute")
     args = ap.parse_args()
@@ -313,7 +319,7 @@ def main() -> int:
               f"start={datetime.now().strftime('%H:%M:%S')} ===", flush=True)
 
         kill_all()
-        launch_all(tag, offset_e, args.known_pos)
+        launch_all(tag, offset_e, args.known_pos, args.with_ssr)
         print(f"  Sleeping {args.duration}s ({args.duration//60} min)...",
               flush=True)
         time.sleep(args.duration)
