@@ -5830,15 +5830,18 @@ def run(args):
     # Load NTRIP config
     load_ntrip_config(args)
 
-    # --no-ssr: silently strip any SSR mount picked up from ntrip.conf
-    # so the engine runs broadcast-only (orbit/clock from BCEP).  Used
-    # for controlled correction-isolation experiments.
+    # --no-ssr: silently strip the PRIMARY SSR mount picked up from
+    # ntrip.conf so the engine takes orbit/clock from broadcast (BCEP)
+    # only.  A secondary bias mount (--ssr-bias-ntrip-conf) is left
+    # alone — pairing --no-ssr with --ssr-bias-ntrip-conf gives a
+    # "broadcast orbit/clock + biases from X" cell that is the
+    # zero-orbit/clock-AC corner of the 4-cell 2x2 diagnostic in
+    # docs/ssr-cross-ac-diagnostic-2026-04-25.md.
     if getattr(args, "no_ssr", False):
         if args.ssr_mount:
-            log.info(f"--no-ssr: discarding ssr_mount '{args.ssr_mount}' "
-                     f"(broadcast-only mode)")
+            log.info(f"--no-ssr: discarding primary ssr_mount "
+                     f"'{args.ssr_mount}' (broadcast orbit/clock)")
         args.ssr_mount = None
-        args.ssr_bias_mount = None
 
     if not args.ntrip_caster and not args.eph_mount:
         log.warning("No NTRIP source — using broadcast ephemeris from receiver only")
