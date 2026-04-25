@@ -69,9 +69,10 @@ def _common_flags(known_pos: str, with_ssr: bool, ssr_conf: str | None,
                   ssr_bias_conf: str | None,
                   no_primary_biases: bool,
                   no_ssr_code_bias: bool,
-                  no_ssr_phase_bias: bool) -> list:
+                  no_ssr_phase_bias: bool,
+                  systems: str) -> list:
     flags = [
-        "--wl-only", "--systems", "gal",
+        "--wl-only", "--systems", systems,
         "--known-pos", known_pos,
         "--clock-model", "random_walk",
         "--sigma-phi-if", "1.0",
@@ -147,7 +148,8 @@ def launch_all(tag: str, offset_e_m: float, known_pos: str,
                ssr_bias_conf: str | None,
                no_primary_biases: bool,
                no_ssr_code_bias: bool,
-               no_ssr_phase_bias: bool) -> None:
+               no_ssr_phase_bias: bool,
+               systems: str) -> None:
     print(f"  Launching {tag} with offset E={offset_e_m:+.3f}m...", flush=True)
     procs = []
     for h in HOSTS:
@@ -160,7 +162,8 @@ def launch_all(tag: str, offset_e_m: float, known_pos: str,
                                        ssr_bias_conf,
                                        no_primary_biases,
                                        no_ssr_code_bias,
-                                       no_ssr_phase_bias))
+                                       no_ssr_phase_bias,
+                                       systems))
         cmd_parts.extend(h["extra"])
         # Use = form so a negative offset doesn't look like a flag to argparse
         cmd_parts.extend([
@@ -312,6 +315,10 @@ def main() -> int:
     ap.add_argument("--no-ssr-phase-bias", action="store_true",
                     help="Drop ALL SSR phase biases (both mounts).  "
                          "Isolates code-bias contribution.")
+    ap.add_argument("--systems", default="gal",
+                    help="Comma-separated constellations passed to engine "
+                         "--systems (default: gal).  Examples: 'gps,gal', "
+                         "'gal,bds', 'gps,gal,bds'.")
     ap.add_argument("--quick", action="store_true",
                     help="Diagnostic mode: 2 runs (+30m, -30m), single "
                          "magnitude.  ~10 min wall-clock instead of 82.  "
@@ -372,7 +379,8 @@ def main() -> int:
                    args.ssr_conf, args.ssr_bias_conf,
                    args.no_primary_biases,
                    args.no_ssr_code_bias,
-                   args.no_ssr_phase_bias)
+                   args.no_ssr_phase_bias,
+                   args.systems)
         print(f"  Sleeping {args.duration}s ({args.duration//60} min)...",
               flush=True)
         time.sleep(args.duration)
