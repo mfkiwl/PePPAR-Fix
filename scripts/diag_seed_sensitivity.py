@@ -81,8 +81,10 @@ def _common_flags(known_pos: str, with_ssr: bool, ssr_conf: str | None,
     ]
     if not with_ssr:
         flags.append("--no-ssr")
-        return flags
-    if ssr_conf:
+        # --no-ssr no longer nulls ssr_bias_mount, so a bias mount paired
+        # with broadcast orbit/clock is the broadcast-O/C corner of the
+        # 4-cell 2x2.  Let it flow through.
+    elif ssr_conf:
         flags.extend(["--ssr-ntrip-conf", ssr_conf])
     if ssr_bias_conf:
         flags.extend(["--ssr-bias-ntrip-conf", ssr_bias_conf])
