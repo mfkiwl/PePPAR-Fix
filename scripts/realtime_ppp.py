@@ -837,21 +837,26 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         # drift.
                         if not hasattr(ssr, '_cb_lookup_logged'):
                             ssr._cb_lookup_logged = {}
-                        # Key by (sv, f1_sig, f2_sig); value = last-logged
-                        # (hit_f1, hit_f2, tuple(avail_cb)).  Re-log on any
-                        # change so late-arriving bias-mount updates show up
-                        # instead of being hidden by the initial MISS.
+                        # Key by (sv, f1_sig, f2_sig); value snapshot
+                        # includes cb VALUES (rounded to mm) so we re-emit
+                        # whenever the publisher's bias updates.  Critical
+                        # for cross-AC diagnostic: same SV + same signal
+                        # under CNES vs WHU produces different value snaps.
+                        # See docs/ssr-cross-ac-diagnostic-2026-04-25.md.
                         lk_cb = (sv, f1['sig_name'], f2['sig_name'])
                         avail_cb = tuple(sorted(ssr._code_bias.get(sv, {}).keys()))
-                        snap = (cb_f1 is not None, cb_f2 is not None, avail_cb)
+                        cb_f1_q = round(cb_f1, 3) if cb_f1 is not None else None
+                        cb_f2_q = round(cb_f2, 3) if cb_f2 is not None else None
+                        snap = (cb_f1_q, cb_f2_q, avail_cb)
                         if ssr._cb_lookup_logged.get(lk_cb) != snap:
-                            log.info("Code bias lookup: %s f1=%s→%s(%s) "
-                                     "f2=%s→%s(%s) avail=%s",
-                                     sv, f1['sig_name'], rinex_f1[0],
-                                     "HIT" if cb_f1 is not None else "MISS",
-                                     f2['sig_name'], rinex_f2[0],
-                                     "HIT" if cb_f2 is not None else "MISS",
-                                     list(avail_cb))
+                            log.info(
+                                "[CB_APPLIED] %s f1=%s→%s val=%sm "
+                                "f2=%s→%s val=%sm avail=%s",
+                                sv, f1['sig_name'], rinex_f1[0],
+                                f"{cb_f1:+.3f}" if cb_f1 is not None else "MISS",
+                                f2['sig_name'], rinex_f2[0],
+                                f"{cb_f2:+.3f}" if cb_f2 is not None else "MISS",
+                                list(avail_cb))
                             ssr._cb_lookup_logged[lk_cb] = snap
 
                     # Apply SSR phase biases before IF combination.
@@ -882,20 +887,28 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                             cp_f2 -= pb_f2 / wl_f2
                         ar_phase_bias_ok = (pb_f1 is not None
                                             and pb_f2 is not None)
-                        # Phase B diagnostic: log lookup misses
+                        # Phase-bias diagnostic: log VALUES on every
+                        # change, not just first occurrence.  Lets the
+                        # cross-AC compare pick up CNES vs WHU value
+                        # differences per (SV, signal) over time.  See
+                        # docs/ssr-cross-ac-diagnostic-2026-04-25.md.
                         if not hasattr(ssr, '_pb_lookup_logged'):
-                            ssr._pb_lookup_logged = set()
+                            ssr._pb_lookup_logged = {}
                         lk = (sv, f1['sig_name'], f2['sig_name'])
-                        if lk not in ssr._pb_lookup_logged:
-                            avail = list(ssr._phase_bias.get(sv, {}).keys())
-                            log.info("Phase bias lookup: %s f1=%s→%s(%s) "
-                                     "f2=%s→%s(%s) avail=%s",
-                                     sv, f1['sig_name'], rinex_f1,
-                                     "HIT" if pb_f1 is not None else "MISS",
-                                     f2['sig_name'], rinex_f2,
-                                     "HIT" if pb_f2 is not None else "MISS",
-                                     avail)
-                            ssr._pb_lookup_logged.add(lk)
+                        avail_pb = tuple(sorted(ssr._phase_bias.get(sv, {}).keys()))
+                        pb_f1_q = round(pb_f1, 3) if pb_f1 is not None else None
+                        pb_f2_q = round(pb_f2, 3) if pb_f2 is not None else None
+                        snap_pb = (pb_f1_q, pb_f2_q, avail_pb)
+                        if ssr._pb_lookup_logged.get(lk) != snap_pb:
+                            log.info(
+                                "[PB_APPLIED] %s f1=%s→%s val=%sm "
+                                "f2=%s→%s val=%sm avail=%s",
+                                sv, f1['sig_name'], rinex_f1[0],
+                                f"{pb_f1:+.3f}" if pb_f1 is not None else "MISS",
+                                f2['sig_name'], rinex_f2[0],
+                                f"{pb_f2:+.3f}" if pb_f2 is not None else "MISS",
+                                list(avail_pb))
+                            ssr._pb_lookup_logged[lk] = snap_pb
 
                     pr_if = a1 * pr_f1 - a2 * pr_f2
                     phi_if_m = a1 * wl_f1 * cp_f1 - a2 * wl_f2 * cp_f2
