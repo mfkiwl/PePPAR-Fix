@@ -1511,8 +1511,18 @@ class AntPosEstThread(threading.Thread):
             rec.state = SvAmbState.ANCHORING
         self._false_fix = FalseFixMonitor(self._sv_state)
         self._setting_drop = SettingSvDropMonitor(self._sv_state)
+        # pos_consensus / ztd_consensus thresholds raised from their
+        # design-doc defaults (0.20 m / 0.10 m) because lab obs-model
+        # bias floor is currently ~3 m on GAL-only with CNES SSR
+        # (project_pos_consensus_threshold_too_tight_20260424).  At
+        # the design-doc thresholds, monitor fires full-reinit faster
+        # than the filter can converge — actively harmful.  Should be
+        # tightened back to design defaults once WHU phase biases
+        # bring the lab floor into the sub-meter range.
         self._fix_set_integrity = FixSetIntegrityMonitor(
             self._sv_state, ape_state_machine=self._ape_sm,
+            pos_consensus_threshold_m=5.0,
+            ztd_consensus_threshold_m=2.0,
         )
         # Per-SV post-fix MW residual drift monitor — catches wrong
         # WL integer commits in the "pull phase" (minutes to tens of
