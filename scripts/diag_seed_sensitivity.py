@@ -134,8 +134,9 @@ def launch_all(tag: str, offset_e_m: float, known_pos: str) -> None:
         ]
         cmd_parts.extend(_common_flags(known_pos))
         cmd_parts.extend(h["extra"])
+        # Use = form so a negative offset doesn't look like a flag to argparse
         cmd_parts.extend([
-            "--seed-pos-offset", f"{offset_e_m},0,0",
+            f"--seed-pos-offset={offset_e_m},0,0",
             "--peer-antenna-ref", h["antenna_ref"],
             "--servo-log", f"data/{tag}-{h['name'].lower()}-servo.csv",
             "--ticc-log",  f"data/{tag}-{h['name'].lower()}-ticc.csv",
@@ -185,38 +186,46 @@ def collect_trajectory(host: dict, tag: str) -> list[dict]:
     return rows
 
 
-def score_run(traj: list[dict], offset_e_m: float, deg_to_m_lon: float) -> dict:
-    """Did the filter pull east-back-toward-truth?
+def score_run(traj: list[dict], offset_e_m: float, deg_to_m_lon: float,
+              truth_lon_deg: float) -> dict:
+    """Did the filter end closer to truth than its seed?
 
-    The seed-pos-offset added +offset_e meters east to the filter's
-    starting point.  If the offset is positive (east), the filter
-    should end up WEST of the start (negative Δlon meters east).
-    Conversely for negative offsets.
+    Seed lon = truth_lon + (offset_e_m / DEG_TO_M_LON).  Compare the
+    last-observed lon's distance-from-truth against the seed's
+    distance-from-truth (which equals |offset_e_m|).
 
-    Returns a dict with: first_epoch, last_epoch, first_lon, last_lon,
-    delta_lon_m (last − first, positive = moved east), direction (TOWARD,
-    AWAY, NONE if no data).
+    Returns first_epoch, last_epoch, first_lon, last_lon, last_dist_m
+    (signed: positive=east of truth, negative=west), direction (TOWARD
+    / AWAY / NO_DATA).
+
+    NOTE: this metric uses last_lon vs truth, not last vs first_observed.
+    By the time the first AntPosEst log line emits (epoch ~10), the
+    Kalman gain has already absorbed most of any large seed offset, so
+    delta_lon (last − first) measures within-run drift, not seed pull.
     """
     if not traj:
         return {"first_epoch": None, "last_epoch": None,
                 "first_lon": None, "last_lon": None,
-                "delta_lon_m": None, "direction": "NO_DATA"}
+                "last_dist_m": None, "direction": "NO_DATA"}
     first = traj[0]
     last = traj[-1]
-    delta_lon_deg = last["lon"] - first["lon"]
-    delta_lon_m = delta_lon_deg * deg_to_m_lon
-    if offset_e_m > 0:
-        direction = "TOWARD" if delta_lon_m < 0 else "AWAY"
-    elif offset_e_m < 0:
-        direction = "TOWARD" if delta_lon_m > 0 else "AWAY"
+    last_dist_m = (last["lon"] - truth_lon_deg) * deg_to_m_lon  # signed E
+    seed_dist_m = offset_e_m  # seed was offset_e_m east of truth
+    # TOWARD = filter ended closer to truth than seed.  AWAY = ended
+    # farther.  Use absolute distances to truth.
+    moved = abs(seed_dist_m) - abs(last_dist_m)
+    if abs(offset_e_m) < 1e-9:
+        direction = "NONE"  # control run, no offset
+    elif moved > 0:
+        direction = "TOWARD"
     else:
-        direction = "NONE"  # control run
+        direction = "AWAY"
     return {
         "first_epoch": first["epoch"],
         "last_epoch": last["epoch"],
         "first_lon": first["lon"],
         "last_lon": last["lon"],
-        "delta_lon_m": delta_lon_m,
+        "last_dist_m": last_dist_m,
         "direction": direction,
     }
 
@@ -229,7 +238,7 @@ def write_csv_header(path: Path) -> None:
         w.writerow([
             "tag", "run_idx", "offset_m", "host",
             "first_epoch", "last_epoch", "first_lon", "last_lon",
-            "delta_lon_m", "direction",
+            "last_dist_m", "direction",
         ])
 
 
@@ -264,6 +273,17 @@ def main() -> int:
               file=sys.stderr)
         return 2
     deg_to_m_lon = 111320.0 * math.cos(math.radians(lat0_deg))
+    try:
+        truth_lon_deg = float(args.known_pos.split(",")[1])
+    except (ValueError, IndexError):
+        print(f"--known-pos must be 'LAT,LON,ALT'; got {args.known_pos!r}",
+              file=sys.stderr)
+        return 2
+
+    # NOTE: ptpmon is on a different antenna (PATCH3) — its truth lon
+    # is NOT truth_lon_deg.  Per-host truth would need separate config;
+    # for now, ptpmon's TOWARD/AWAY classification is meaningful only
+    # relative to the UFO1 truth and should be reinterpreted post-hoc.
 
     # Build run sequence: alternating signs within each offset's repeats.
     runs = []  # list of (run_idx, offset_e_m)
@@ -301,20 +321,20 @@ def main() -> int:
         print("  Collecting trajectories + scoring...", flush=True)
         for host in HOSTS:
             traj = collect_trajectory(host, tag)
-            score = score_run(traj, offset_e, deg_to_m_lon)
+            score = score_run(traj, offset_e, deg_to_m_lon, truth_lon_deg)
             row = [
                 tag, run_idx, offset_e, host["name"],
                 score["first_epoch"], score["last_epoch"],
                 score["first_lon"], score["last_lon"],
-                score["delta_lon_m"], score["direction"],
+                score["last_dist_m"], score["direction"],
             ]
             append_csv_row(args.out, row)
             sigma_str = (f"σ {traj[0]['sigma']:.2f}→{traj[-1]['sigma']:.3f}"
                          if traj else "no data")
-            dlon_str = (f"Δlon {score['delta_lon_m']:+.2f}m"
-                        if score['delta_lon_m'] is not None else "")
+            dist_str = (f"end {score['last_dist_m']:+.2f}m E of truth"
+                        if score['last_dist_m'] is not None else "")
             print(f"  {host['name']:8s}: {score['direction']:8s}  "
-                  f"{sigma_str}  {dlon_str}", flush=True)
+                  f"{sigma_str}  {dist_str}", flush=True)
 
     # Final cleanup — leave engines running on last config? kill them.
     print("\nMatrix complete. Stopping engines.", flush=True)
