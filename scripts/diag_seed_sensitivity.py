@@ -65,7 +65,8 @@ HOSTS = [
     },
 ]
 
-def _common_flags(known_pos: str, with_ssr: bool, ssr_conf: str | None) -> list:
+def _common_flags(known_pos: str, with_ssr: bool, ssr_conf: str | None,
+                  ssr_bias_conf: str | None) -> list:
     flags = [
         "--wl-only", "--systems", "gal",
         "--known-pos", known_pos,
@@ -77,8 +78,11 @@ def _common_flags(known_pos: str, with_ssr: bool, ssr_conf: str | None) -> list:
     ]
     if not with_ssr:
         flags.append("--no-ssr")
-    elif ssr_conf:
+        return flags
+    if ssr_conf:
         flags.extend(["--ssr-ntrip-conf", ssr_conf])
+    if ssr_bias_conf:
+        flags.extend(["--ssr-bias-ntrip-conf", ssr_bias_conf])
     return flags
 
 
@@ -128,7 +132,8 @@ def kill_all() -> None:
 
 
 def launch_all(tag: str, offset_e_m: float, known_pos: str,
-               with_ssr: bool, ssr_conf: str | None) -> None:
+               with_ssr: bool, ssr_conf: str | None,
+               ssr_bias_conf: str | None) -> None:
     print(f"  Launching {tag} with offset E={offset_e_m:+.3f}m...", flush=True)
     procs = []
     for h in HOSTS:
@@ -137,7 +142,8 @@ def launch_all(tag: str, offset_e_m: float, known_pos: str,
             "sudo PYTHONPATH=/home/bob/peppar-fix:/home/bob/peppar-fix/scripts "
             "nohup ./venv/bin/python scripts/peppar_fix_engine.py",
         ]
-        cmd_parts.extend(_common_flags(known_pos, with_ssr, ssr_conf))
+        cmd_parts.extend(_common_flags(known_pos, with_ssr, ssr_conf,
+                                       ssr_bias_conf))
         cmd_parts.extend(h["extra"])
         # Use = form so a negative offset doesn't look like a flag to argparse
         cmd_parts.extend([
@@ -274,6 +280,11 @@ def main() -> int:
                     help="With --with-ssr, override default SSR ntrip-conf "
                          "(e.g. ntrip-cas.conf).  Engine reads from "
                          "~/peppar-fix/ unless absolute.")
+    ap.add_argument("--ssr-bias-conf", default=None,
+                    help="With --with-ssr, separate ntrip-conf for SSR code "
+                         "+ phase biases (e.g. ntrip-whu.conf paired with "
+                         "CNES orbit/clock).  Same path resolution as "
+                         "--ssr-conf.")
     ap.add_argument("--quick", action="store_true",
                     help="Diagnostic mode: 2 runs (+30m, -30m), single "
                          "magnitude.  ~10 min wall-clock instead of 82.  "
@@ -331,7 +342,7 @@ def main() -> int:
 
         kill_all()
         launch_all(tag, offset_e, args.known_pos, args.with_ssr,
-                   args.ssr_conf)
+                   args.ssr_conf, args.ssr_bias_conf)
         print(f"  Sleeping {args.duration}s ({args.duration//60} min)...",
               flush=True)
         time.sleep(args.duration)
