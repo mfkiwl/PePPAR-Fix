@@ -27,6 +27,35 @@ truth on a clear lab day with matched-bias GAL-only signals.*
 | PPP + CNES SSRA00CNE0 | **−6 to −8 m** (systematic) | 0.15 m |
 | PPP + CNES orbit/clock + WHU biases overlaid | **−4.0 to −4.9 m** | 0.3 m |
 
+## 2x2 result — day0425h (definitive)
+
+After landing `--no-primary-biases` and the engine adjustment that
+allows a secondary bias mount with `--no-ssr`, ran the 4-cell 2x2
+back-to-back (~45 min total).  UFO1 attractor (mean of 4 host-runs
+per cell), m east of Leica truth:
+
+|                  | biases: CNES         | biases: WHU         |
+|------------------|----------------------|----------------------|
+| **O/C: CNES**    | -1.99 m, spread 1.55 m | **-0.65 m, spread 0.18 m** |
+| **O/C: broadcast** | -1.74 m, spread 1.97 m | +0.10 m, spread 1.29 m |
+
+**Marginal effects:**
+- biases CNES → WHU: **+1.59 m east** (3.2× larger effect)
+- O/C CNES → broadcast: +0.50 m east
+
+**The bias source is the dominant contributor to the obs-model bias.**
+CNES's published phase/code bias datum sits ~1.6 m west of WHU's at
+this site/time.  CNES orbit/clock contributes a smaller ~0.5 m
+westward bias.  Both are within metres of truth — neither is an
+engine bug.
+
+**Best PPP configuration found**: CNES orbit/clock + WHU biases
+(`--ssr-conf ntrip-cnes.conf --ssr-bias-conf ntrip-whu.conf
+--no-primary-biases`).  Sub-meter accuracy with 18 cm fleet
+inter-host spread — a new production-candidate setup.
+
+## Earlier reading from day0425g (overlaid biases — superseded)
+
 **Key reading from day0425g (CNES orbit/clock + WHU biases):**
 overlaying WHU biases on CNES shifted the attractor ~3-4 m EAST
 (closer to truth).  Two pieces:
