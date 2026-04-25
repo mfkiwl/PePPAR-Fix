@@ -70,9 +70,9 @@ def _common_flags(known_pos: str, with_ssr: bool, ssr_conf: str | None,
                   no_primary_biases: bool,
                   no_ssr_code_bias: bool,
                   no_ssr_phase_bias: bool,
-                  systems: str) -> list:
+                  systems: str, no_wl_only: bool) -> list:
     flags = [
-        "--wl-only", "--systems", systems,
+        "--systems", systems,
         "--known-pos", known_pos,
         "--clock-model", "random_walk",
         "--sigma-phi-if", "1.0",
@@ -80,6 +80,8 @@ def _common_flags(known_pos: str, with_ssr: bool, ssr_conf: str | None,
         "--peer-bus", "udp-multicast",
         "--peer-site-ref", "DuPage",
     ]
+    if not no_wl_only:
+        flags.append("--wl-only")
     if not with_ssr:
         flags.append("--no-ssr")
         # --no-ssr no longer nulls ssr_bias_mount, so a bias mount paired
@@ -149,10 +151,11 @@ def launch_all(tag: str, offset_e_m: float, known_pos: str,
                no_primary_biases: bool,
                no_ssr_code_bias: bool,
                no_ssr_phase_bias: bool,
-               systems: str) -> None:
+               systems: str, no_wl_only: bool,
+               hosts: list) -> None:
     print(f"  Launching {tag} with offset E={offset_e_m:+.3f}m...", flush=True)
     procs = []
-    for h in HOSTS:
+    for h in hosts:
         cmd_parts = [
             "cd ~/peppar-fix && "
             "sudo PYTHONPATH=/home/bob/peppar-fix:/home/bob/peppar-fix/scripts "
@@ -163,7 +166,7 @@ def launch_all(tag: str, offset_e_m: float, known_pos: str,
                                        no_primary_biases,
                                        no_ssr_code_bias,
                                        no_ssr_phase_bias,
-                                       systems))
+                                       systems, no_wl_only))
         cmd_parts.extend(h["extra"])
         # Use = form so a negative offset doesn't look like a flag to argparse
         cmd_parts.extend([
@@ -319,6 +322,14 @@ def main() -> int:
                     help="Comma-separated constellations passed to engine "
                          "--systems (default: gal).  Examples: 'gps,gal', "
                          "'gal,bds', 'gps,gal,bds'.")
+    ap.add_argument("--exclude-hosts", default="",
+                    help="Comma-separated host names to skip (e.g. "
+                         "'clkPoC3' to leave it free for parallel work).  "
+                         "Matched against HOSTS[*]['name'].")
+    ap.add_argument("--no-wl-only", action="store_true",
+                    help="Drop --wl-only from engine flags, enabling "
+                         "narrow-lane (NL) integer resolution on top of "
+                         "WL.  Default keeps --wl-only.")
     ap.add_argument("--quick", action="store_true",
                     help="Diagnostic mode: 2 runs (+30m, -30m), single "
                          "magnitude.  ~10 min wall-clock instead of 82.  "
@@ -364,6 +375,13 @@ def main() -> int:
     if args.dry_run:
         return 0
 
+    excluded = {h.strip() for h in (args.exclude_hosts or "").split(",")
+                if h.strip()}
+    active_hosts = [h for h in HOSTS if h["name"] not in excluded]
+    if excluded:
+        print(f"Excluded hosts: {sorted(excluded)}; active: "
+              f"{[h['name'] for h in active_hosts]}", flush=True)
+
     write_csv_header(args.out)
 
     for run_idx, offset_e in runs:
@@ -380,13 +398,14 @@ def main() -> int:
                    args.no_primary_biases,
                    args.no_ssr_code_bias,
                    args.no_ssr_phase_bias,
-                   args.systems)
+                   args.systems, args.no_wl_only,
+                   active_hosts)
         print(f"  Sleeping {args.duration}s ({args.duration//60} min)...",
               flush=True)
         time.sleep(args.duration)
 
         print("  Collecting trajectories + scoring...", flush=True)
-        for host in HOSTS:
+        for host in active_hosts:
             traj = collect_trajectory(host, tag)
             score = score_run(traj, offset_e, deg_to_m_lon, truth_lon_deg)
             row = [
