@@ -18,13 +18,31 @@ truth on a clear lab day with matched-bias GAL-only signals.*
   Anything ≥10 m offset is cleanly resolvable; we use ±30 m for
   diagnostic runs since the bias signal is ~9 m.
 
-## Established baselines (day0425c, day0425d)
+## Established baselines (day0425c, day0425d, day0425g)
 
-| SSR provider | UFO1 fleet attractor vs Leica E | inter-host spread |
+| Configuration | UFO1 fleet attractor vs Leica E | inter-host spread |
 |---|---|---|
 | F9T NAV2 (autonomous, no PPP) | -0.5 to +0.2 m | 0.7 m |
 | PPP no-SSR | +0.5 to +3 m (drifting null mode) | <0.5 m |
 | PPP + CNES SSRA00CNE0 | **−6 to −8 m** (systematic) | 0.15 m |
+| PPP + CNES orbit/clock + WHU biases overlaid | **−4.0 to −4.9 m** | 0.3 m |
+
+**Key reading from day0425g (CNES orbit/clock + WHU biases):**
+overlaying WHU biases on CNES shifted the attractor ~3-4 m EAST
+(closer to truth).  Two pieces:
+
+1. **Bias datum matters.**  WHU's bias values disagree with CNES's by
+   enough to shift the position 3-4 m.  Different ACs anchor their
+   phase biases to different reference networks/epochs.
+2. **Orbit/clock contributes too.**  Even with WHU biases overlaid,
+   ~4 m of westward bias remains.  CNES orbit/clock (or our
+   application of it) is responsible for the residual ~4 m.
+
+Caveat: this is not pure "WHU biases" — both CNES's and WHU's biases
+flow into the engine, and the per-(SV, signal) merge winner depends
+on internal logic (most-recent? primary-wins? averaged?).  Clean
+isolation needs the `--no-primary-biases` engine flag listed in the
+"engine work" section below.
 
 **Adding our PPP+SSR makes the position 6-9 m worse than the
 autonomous code-only fix.**  Inter-host agreement under SSR is tight,
