@@ -5814,6 +5814,16 @@ def run(args):
     # Load NTRIP config
     load_ntrip_config(args)
 
+    # --no-ssr: silently strip any SSR mount picked up from ntrip.conf
+    # so the engine runs broadcast-only (orbit/clock from BCEP).  Used
+    # for controlled correction-isolation experiments.
+    if getattr(args, "no_ssr", False):
+        if args.ssr_mount:
+            log.info(f"--no-ssr: discarding ssr_mount '{args.ssr_mount}' "
+                     f"(broadcast-only mode)")
+        args.ssr_mount = None
+        args.ssr_bias_mount = None
+
     if not args.ntrip_caster and not args.eph_mount:
         log.warning("No NTRIP source — using broadcast ephemeris from receiver only")
 
@@ -5927,6 +5937,39 @@ def run(args):
         if uid is not None:
             save_position_to_receiver(uid, known_ecef, 0.0, "known_pos")
     if known_ecef is not None:
+        # --seed-pos-offset: apply (E,N,U) displacement in meters to
+        # whatever known_ecef was loaded.  Used for seed-error
+        # experiments — see project_to_main_seed_error_sweep_result.
+        seed_offset = getattr(args, "seed_pos_offset", None)
+        if seed_offset:
+            try:
+                e, n, u = [float(v) for v in seed_offset.split(",")]
+            except (ValueError, AttributeError):
+                log.error(f"--seed-pos-offset must be 'E,N,U' in metres; "
+                          f"got {seed_offset!r}")
+                return 1
+            # Build ENU→ECEF rotation at known_ecef and apply offset.
+            from solve_pseudorange import ecef_to_enu  # noqa: F401
+            lat0, lon0, _ = ecef_to_lla(known_ecef[0], known_ecef[1], known_ecef[2])
+            lat_r = math.radians(lat0)
+            lon_r = math.radians(lon0)
+            R_T = np.array([
+                [-math.sin(lon_r),
+                 -math.sin(lat_r) * math.cos(lon_r),
+                 math.cos(lat_r) * math.cos(lon_r)],
+                [math.cos(lon_r),
+                 -math.sin(lat_r) * math.sin(lon_r),
+                 math.cos(lat_r) * math.sin(lon_r)],
+                [0.0,
+                 math.cos(lat_r),
+                 math.sin(lat_r)],
+            ])
+            offset_ecef = R_T @ np.array([e, n, u])
+            known_ecef = np.asarray(known_ecef) + offset_ecef
+            log.info(f"--seed-pos-offset applied: E={e:+g}m N={n:+g}m U={u:+g}m "
+                     f"→ ECEF Δ=({offset_ecef[0]:+.3f}, {offset_ecef[1]:+.3f}, "
+                     f"{offset_ecef[2]:+.3f})m")
+
         lat, lon, alt = ecef_to_lla(known_ecef[0], known_ecef[1], known_ecef[2])
         log.info(f"Position ({pos_source}): {lat:.6f}, {lon:.6f}, {alt:.1f}m")
 
@@ -6374,6 +6417,25 @@ Two-phase operation:
                           "solve_ppp.SIGMA_P_IF (3.0 m).  Companion "
                           "knob to --sigma-phi-if for end-to-end "
                           "filter-trust calibration.")
+    pos.add_argument("--seed-pos-offset", default=None,
+                     help="Add an (E,N,U) offset in meters to the "
+                          "seed/known position before filter "
+                          "initialization.  Format: 'E,N,U' (commas, "
+                          "metres, signed).  Used for controlled "
+                          "seed-error experiments — same as Bravo's "
+                          "harness flag (commit a910d2d).  Combines "
+                          "with --known-pos or --seed-pos.  "
+                          "Example: '--seed-pos-offset 0,0,10' offsets "
+                          "the seed by +10 m vertically.")
+    pos.add_argument("--no-ssr", action="store_true",
+                     help="Disable SSR corrections entirely.  Engine "
+                          "uses broadcast ephemeris only — no SSR "
+                          "orbit/clock corrections, no SSR code "
+                          "biases, no SSR phase biases.  Used for "
+                          "controlled experiments isolating "
+                          "correction-stream effects from the engine's "
+                          "intrinsic behavior.  Same SSR-mount config "
+                          "in ntrip.conf is silently ignored.")
     pos.add_argument("--phase-windup", action="store_true",
                      help="Apply Wu 1993 carrier-phase wind-up "
                           "correction per SV per epoch.  Default "
