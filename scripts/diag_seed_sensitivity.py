@@ -128,10 +128,16 @@ def ssh(host_ssh: str, cmd: str, timeout: float = 15.0) -> tuple[int, str]:
         return 124, "timeout"
 
 
-def kill_all() -> None:
+def kill_all(hosts: list = None) -> None:
+    """Kill peppar_fix_engine on the listed hosts (default: all HOSTS).
+
+    When --exclude-hosts is in use, callers should pass the active host
+    subset so we don't disturb diagnostic engines running on the
+    excluded hosts.
+    """
     print("  Killing engines...", flush=True)
     procs = []
-    for h in HOSTS:
+    for h in (hosts if hosts is not None else HOSTS):
         p = subprocess.Popen(
             ["ssh", "-o", "BatchMode=yes", h["ssh"],
              "sudo pkill -9 -f peppar_fix_engine.py 2>/dev/null; true"],
@@ -392,7 +398,7 @@ def main() -> int:
               f"offset = {offset_e:+.3f}m E, tag={tag}, "
               f"start={datetime.now().strftime('%H:%M:%S')} ===", flush=True)
 
-        kill_all()
+        kill_all(active_hosts)
         launch_all(tag, offset_e, args.known_pos, args.with_ssr,
                    args.ssr_conf, args.ssr_bias_conf,
                    args.no_primary_biases,
@@ -424,7 +430,7 @@ def main() -> int:
 
     # Final cleanup — leave engines running on last config? kill them.
     print("\nMatrix complete. Stopping engines.", flush=True)
-    kill_all()
+    kill_all(active_hosts)
     print(f"Results: {args.out}", flush=True)
     return 0
 
