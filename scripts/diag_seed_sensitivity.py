@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""Sensitivity sweep for the seed-error / no-SSR pull-direction test.
+
+For each (offset, run_idx) in the matrix:
+  1. SSH-kill engines on all 4 lab hosts
+  2. SSH-launch with --seed-pos-offset OFFSET,0,0 --no-ssr (+ standard config)
+  3. Sleep RUN_DURATION_S
+  4. SSH-collect position trajectories from each host's log
+  5. Score: did filter pull east-back-toward-truth or away?
+
+Output (incremental, written after each run):
+  /tmp/seed_sensitivity_<TAG>.csv — one row per (run, host) with offset,
+  start_lon, end_lon, delta_lon_m, direction_pulled, run_duration_s.
+
+Designed to survive interruption — partial CSV remains.
+
+Usage:
+  ./diag_seed_sensitivity.py [--matrix M] [--duration S] [--dry-run]
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import math
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+
+HOSTS = [
+    {
+        "name": "TimeHat",
+        "ssh": "TimeHat",
+        "antenna_ref": "UFO1",
+        "extra": ["--servo", "/dev/ptp_i226", "--receiver", "f9t-l2",
+                   "--antex-path", "/home/bob/peppar-fix/ngs20.atx",
+                   "--receiver-antenna", "SFESPK6618H     NONE"],
+    },
+    {
+        "name": "clkPoC3",
+        "ssh": "clkPoC3",
+        "antenna_ref": "UFO1",
+        "extra": ["--no-do",
+                   "--antex-path", "/home/bob/peppar-fix/ngs20.atx",
+                   "--receiver-antenna", "SFESPK6618H     NONE"],
+    },
+    {
+        "name": "MadHat",
+        "ssh": "MadHat.local",
+        "antenna_ref": "UFO1",
+        "extra": ["--servo", "/dev/ptp_i226",
+                   "--antex-path", "/home/bob/peppar-fix/ngs20.atx",
+                   "--receiver-antenna", "SFESPK6618H     NONE"],
+    },
+    {
+        "name": "ptpmon",
+        "ssh": "ptpmon",
+        "antenna_ref": "PATCH3",
+        "extra": ["--no-do"],
+    },
+]
+
+def _common_flags(known_pos: str) -> list:
+    return [
+        "--wl-only", "--systems", "gal",
+        "--known-pos", known_pos,
+        "--no-ssr",
+        "--clock-model", "random_walk",
+        "--sigma-phi-if", "1.0",
+        "--phase-windup", "--gmf",
+        "--peer-bus", "udp-multicast",
+        "--peer-site-ref", "DuPage",
+    ]
+
+
+# Default matrix: (offset_magnitude_m, repeats, alternate_signs)
+DEFAULT_MATRIX = [
+    (30.0, 1),
+    (10.0, 2),
+    (3.0, 3),
+    (1.0, 3),
+    (0.3, 3),
+    (0.1, 3),
+]
+
+
+_ANT_POS_RE = re.compile(
+    r"\[AntPosEst (\d+)\] positionσ=([\d.]+)m pos=\(([\d.]+), ([-\d.]+), ([\d.]+)\)"
+)
+
+
+def ssh(host_ssh: str, cmd: str, timeout: float = 15.0) -> tuple[int, str]:
+    """Run a remote command. Returns (returncode, combined-output)."""
+    try:
+        r = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", host_ssh, cmd],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except subprocess.TimeoutExpired:
+        return 124, "timeout"
+
+
+def kill_all() -> None:
+    print("  Killing engines...", flush=True)
+    procs = []
+    for h in HOSTS:
+        p = subprocess.Popen(
+            ["ssh", "-o", "BatchMode=yes", h["ssh"],
+             "sudo pkill -9 -f peppar_fix_engine.py 2>/dev/null; true"],
+        )
+        procs.append(p)
+    for p in procs:
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    time.sleep(3)
+
+
+def launch_all(tag: str, offset_e_m: float, known_pos: str) -> None:
+    print(f"  Launching {tag} with offset E={offset_e_m:+.3f}m...", flush=True)
+    procs = []
+    for h in HOSTS:
+        cmd_parts = [
+            "cd ~/peppar-fix && "
+            "sudo PYTHONPATH=/home/bob/peppar-fix:/home/bob/peppar-fix/scripts "
+            "nohup ./venv/bin/python scripts/peppar_fix_engine.py",
+        ]
+        cmd_parts.extend(_common_flags(known_pos))
+        cmd_parts.extend(h["extra"])
+        cmd_parts.extend([
+            "--seed-pos-offset", f"{offset_e_m},0,0",
+            "--peer-antenna-ref", h["antenna_ref"],
+            "--servo-log", f"data/{tag}-{h['name'].lower()}-servo.csv",
+            "--ticc-log",  f"data/{tag}-{h['name'].lower()}-ticc.csv",
+            "--slip-log",  f"data/{tag}-{h['name'].lower()}-slips.csv",
+        ])
+        cmd_parts.append(f"> data/{tag}-{h['name'].lower()}.log 2>&1 & disown")
+        # Quote each arg appropriately for ssh: rebuild as a single shell-line.
+        shell_line = " ".join(_shell_quote(x) for x in cmd_parts)
+        p = subprocess.Popen(
+            ["ssh", "-o", "BatchMode=yes", h["ssh"], shell_line],
+        )
+        procs.append(p)
+    for p in procs:
+        try:
+            p.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+
+def _shell_quote(s: str) -> str:
+    # Don't quote our pre-built shell construct that uses redirection;
+    # detect it by leading 'cd' or trailing &.
+    if s.startswith("cd ") or s.endswith("disown") or "PYTHONPATH=" in s:
+        return s
+    if any(ch in s for ch in " '\"$&|;<>(){}*"):
+        # Use single-quote with embedded-single-quote escape.
+        return "'" + s.replace("'", "'\\''") + "'"
+    return s
+
+
+def collect_trajectory(host: dict, tag: str) -> list[dict]:
+    """SSH-grep the host's log for AntPosEst lines."""
+    cmd = f"grep '\\[AntPosEst' ~/peppar-fix/data/{tag}-{host['name'].lower()}.log"
+    rc, out = ssh(host["ssh"], cmd, timeout=20)
+    rows = []
+    for line in out.splitlines():
+        m = _ANT_POS_RE.search(line)
+        if not m:
+            continue
+        rows.append({
+            "epoch": int(m.group(1)),
+            "sigma": float(m.group(2)),
+            "lat":   float(m.group(3)),
+            "lon":   float(m.group(4)),
+            "alt":   float(m.group(5)),
+        })
+    return rows
+
+
+def score_run(traj: list[dict], offset_e_m: float, deg_to_m_lon: float) -> dict:
+    """Did the filter pull east-back-toward-truth?
+
+    The seed-pos-offset added +offset_e meters east to the filter's
+    starting point.  If the offset is positive (east), the filter
+    should end up WEST of the start (negative Δlon meters east).
+    Conversely for negative offsets.
+
+    Returns a dict with: first_epoch, last_epoch, first_lon, last_lon,
+    delta_lon_m (last − first, positive = moved east), direction (TOWARD,
+    AWAY, NONE if no data).
+    """
+    if not traj:
+        return {"first_epoch": None, "last_epoch": None,
+                "first_lon": None, "last_lon": None,
+                "delta_lon_m": None, "direction": "NO_DATA"}
+    first = traj[0]
+    last = traj[-1]
+    delta_lon_deg = last["lon"] - first["lon"]
+    delta_lon_m = delta_lon_deg * deg_to_m_lon
+    if offset_e_m > 0:
+        direction = "TOWARD" if delta_lon_m < 0 else "AWAY"
+    elif offset_e_m < 0:
+        direction = "TOWARD" if delta_lon_m > 0 else "AWAY"
+    else:
+        direction = "NONE"  # control run
+    return {
+        "first_epoch": first["epoch"],
+        "last_epoch": last["epoch"],
+        "first_lon": first["lon"],
+        "last_lon": last["lon"],
+        "delta_lon_m": delta_lon_m,
+        "direction": direction,
+    }
+
+
+def write_csv_header(path: Path) -> None:
+    if path.exists():
+        return
+    with path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "tag", "run_idx", "offset_m", "host",
+            "first_epoch", "last_epoch", "first_lon", "last_lon",
+            "delta_lon_m", "direction",
+        ])
+
+
+def append_csv_row(path: Path, row: list) -> None:
+    with path.open("a", newline="") as f:
+        csv.writer(f).writerow(row)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--duration", type=int, default=300,
+                    help="seconds per run (default: 300 = 5 min)")
+    ap.add_argument("--out", type=Path,
+                    default=Path("/tmp/seed_sensitivity.csv"),
+                    help="CSV output path (appended)")
+    ap.add_argument("--tag-prefix", default="day0425b",
+                    help="lab tag prefix; per-run tag suffix is "
+                         "'-r<NN>-e<+/-X>m' (e.g. day0425b-r01-e+30m)")
+    ap.add_argument("--known-pos", required=True,
+                    help="Receiver-truth seed position 'LAT,LON,ALT' "
+                         "passed to engine --known-pos.  Antenna "
+                         "coords aren't committed; pass on CLI or "
+                         "from env var SEED_SENS_KNOWN_POS.")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print plan, don't execute")
+    args = ap.parse_args()
+    # Compute lat0 for longitude→metres conversion from --known-pos.
+    try:
+        lat0_deg = float(args.known_pos.split(",")[0])
+    except (ValueError, IndexError):
+        print(f"--known-pos must be 'LAT,LON,ALT'; got {args.known_pos!r}",
+              file=sys.stderr)
+        return 2
+    deg_to_m_lon = 111320.0 * math.cos(math.radians(lat0_deg))
+
+    # Build run sequence: alternating signs within each offset's repeats.
+    runs = []  # list of (run_idx, offset_e_m)
+    idx = 0
+    for mag, repeats in DEFAULT_MATRIX:
+        for r in range(repeats):
+            sign = 1 if r % 2 == 0 else -1
+            idx += 1
+            runs.append((idx, mag * sign))
+
+    print(f"Plan: {len(runs)} runs × {args.duration}s = "
+          f"{len(runs) * (args.duration + 30) / 60:.1f} min wall-clock.\n"
+          f"Output CSV: {args.out}\n", flush=True)
+    for i, off in runs:
+        print(f"  run {i:02d}: offset = {off:+g} m E", flush=True)
+    if args.dry_run:
+        return 0
+
+    write_csv_header(args.out)
+
+    for run_idx, offset_e in runs:
+        tag = f"{args.tag_prefix}-r{run_idx:02d}-e{offset_e:+g}m"
+        # Sanitize tag for filenames
+        tag = tag.replace("+", "p").replace(".", "_")
+        print(f"\n=== Run {run_idx} of {len(runs)}: "
+              f"offset = {offset_e:+.3f}m E, tag={tag}, "
+              f"start={datetime.now().strftime('%H:%M:%S')} ===", flush=True)
+
+        kill_all()
+        launch_all(tag, offset_e, args.known_pos)
+        print(f"  Sleeping {args.duration}s ({args.duration//60} min)...",
+              flush=True)
+        time.sleep(args.duration)
+
+        print("  Collecting trajectories + scoring...", flush=True)
+        for host in HOSTS:
+            traj = collect_trajectory(host, tag)
+            score = score_run(traj, offset_e, deg_to_m_lon)
+            row = [
+                tag, run_idx, offset_e, host["name"],
+                score["first_epoch"], score["last_epoch"],
+                score["first_lon"], score["last_lon"],
+                score["delta_lon_m"], score["direction"],
+            ]
+            append_csv_row(args.out, row)
+            sigma_str = (f"σ {traj[0]['sigma']:.2f}→{traj[-1]['sigma']:.3f}"
+                         if traj else "no data")
+            dlon_str = (f"Δlon {score['delta_lon_m']:+.2f}m"
+                        if score['delta_lon_m'] is not None else "")
+            print(f"  {host['name']:8s}: {score['direction']:8s}  "
+                  f"{sigma_str}  {dlon_str}", flush=True)
+
+    # Final cleanup — leave engines running on last config? kill them.
+    print("\nMatrix complete. Stopping engines.", flush=True)
+    kill_all()
+    print(f"Results: {args.out}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
