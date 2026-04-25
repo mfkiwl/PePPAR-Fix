@@ -9,6 +9,32 @@ incrementally.
 > fusion, bootstrap-as-seed-verification, and wrapper dissolution plan.
 > Many of the entries below are stepping stones toward that vision.
 
+## Cross-AC SSR diagnostic — engine flags + signal-map work
+
+**See `docs/ssr-cross-ac-diagnostic-2026-04-25.md` for the full
+investigation.**  As of 2026-04-25 our PPP+CNES SSR settles 6–9 m
+west of Leica truth on UFO1 — *worse* than the bare F9T NAV2
+autonomous fix.  CAS attempt to cross-check failed because the
+engine's IGS-SSR signal map is missing Galileo `sig_id=2`, and CAS's
+proprietary `4076_NNN` message IDs expose at least one more
+compatibility gap (orbit/clock IOD matching) — CAS test diverged 280
+m inter-host on a 30 m seed.
+
+Three discrete pieces of engine work to enable cleaner diagnostics:
+
+A. **`--no-primary-biases`** flag (~10 lines) — drop biases from the
+   primary SSR mount while keeping its orbit/clock.  Required for the
+   clean 4-cell 2x2 (CNES/CAS × orbit-clock/biases).
+B. **IGS-SSR signal-map fix** for CAS / MADOCA — adds the missing
+   bias-map entries under the IGS-SSR encoding.  Independent of (A).
+C. **IOD-matching diagnostics** — log SVs whose orbit/clock SSR
+   couldn't be matched to broadcast IODs, so we can spot silent
+   fallback to broadcast-only orbits when SSR routing is broken.
+
+If the 2x2 narrows the bias to "biases" but doesn't separate code-
+from phase-bias, add `--no-ssr-code-bias` / `--no-ssr-phase-bias` —
+~10 more lines in the bias router.
+
 ## Three-source position sanity + self-healing FixedPosFilter
 
 > **Status 2026-04-22**: Most of this section *landed* as part of the
