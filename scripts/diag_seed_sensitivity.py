@@ -65,7 +65,7 @@ HOSTS = [
     },
 ]
 
-def _common_flags(known_pos: str, with_ssr: bool) -> list:
+def _common_flags(known_pos: str, with_ssr: bool, ssr_conf: str | None) -> list:
     flags = [
         "--wl-only", "--systems", "gal",
         "--known-pos", known_pos,
@@ -77,6 +77,8 @@ def _common_flags(known_pos: str, with_ssr: bool) -> list:
     ]
     if not with_ssr:
         flags.append("--no-ssr")
+    elif ssr_conf:
+        flags.extend(["--ssr-ntrip-conf", ssr_conf])
     return flags
 
 
@@ -126,7 +128,7 @@ def kill_all() -> None:
 
 
 def launch_all(tag: str, offset_e_m: float, known_pos: str,
-               with_ssr: bool) -> None:
+               with_ssr: bool, ssr_conf: str | None) -> None:
     print(f"  Launching {tag} with offset E={offset_e_m:+.3f}m...", flush=True)
     procs = []
     for h in HOSTS:
@@ -135,7 +137,7 @@ def launch_all(tag: str, offset_e_m: float, known_pos: str,
             "sudo PYTHONPATH=/home/bob/peppar-fix:/home/bob/peppar-fix/scripts "
             "nohup ./venv/bin/python scripts/peppar_fix_engine.py",
         ]
-        cmd_parts.extend(_common_flags(known_pos, with_ssr))
+        cmd_parts.extend(_common_flags(known_pos, with_ssr, ssr_conf))
         cmd_parts.extend(h["extra"])
         # Use = form so a negative offset doesn't look like a flag to argparse
         cmd_parts.extend([
@@ -268,6 +270,14 @@ def main() -> int:
     ap.add_argument("--with-ssr", action="store_true",
                     help="Enable SSR corrections (default: --no-ssr).  "
                          "Use to compare SSR-on vs SSR-off attractor.")
+    ap.add_argument("--ssr-conf", default=None,
+                    help="With --with-ssr, override default SSR ntrip-conf "
+                         "(e.g. ntrip-cas.conf).  Engine reads from "
+                         "~/peppar-fix/ unless absolute.")
+    ap.add_argument("--quick", action="store_true",
+                    help="Diagnostic mode: 2 runs (+30m, -30m), single "
+                         "magnitude.  ~10 min wall-clock instead of 82.  "
+                         "For comparing attractors across SSR providers.")
     ap.add_argument("--dry-run", action="store_true",
                     help="print plan, don't execute")
     args = ap.parse_args()
@@ -292,9 +302,10 @@ def main() -> int:
     # relative to the UFO1 truth and should be reinterpreted post-hoc.
 
     # Build run sequence: alternating signs within each offset's repeats.
+    matrix = [(30.0, 2)] if args.quick else DEFAULT_MATRIX
     runs = []  # list of (run_idx, offset_e_m)
     idx = 0
-    for mag, repeats in DEFAULT_MATRIX:
+    for mag, repeats in matrix:
         for r in range(repeats):
             sign = 1 if r % 2 == 0 else -1
             idx += 1
@@ -319,7 +330,8 @@ def main() -> int:
               f"start={datetime.now().strftime('%H:%M:%S')} ===", flush=True)
 
         kill_all()
-        launch_all(tag, offset_e, args.known_pos, args.with_ssr)
+        launch_all(tag, offset_e, args.known_pos, args.with_ssr,
+                   args.ssr_conf)
         print(f"  Sleeping {args.duration}s ({args.duration//60} min)...",
               flush=True)
         time.sleep(args.duration)
