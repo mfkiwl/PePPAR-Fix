@@ -80,6 +80,58 @@ TimeHat's firmware/EVK to match the F9T-20B siblings, OR (b) we have
 to operate hosts at separate antennas where geometry diversity becomes
 a bigger deal than firmware-induced cohort variance.
 
+## Long-convergence test (day0425k) — 30-min runs on clkPoC3
+
+Question: does the 1.4 m attractor gap between CNES (-2 m E) and WHU
+(-0.65 m E) close given enough convergence time?  Single-host
+sequential 30-min runs on clkPoC3, +30 m east seed.
+
+**Final 5-min averages (min 25-29 of each run):**
+
+| Configuration | east of Leica (m) | within-window stdev |
+|---|---|---|
+| CNES O/C + CNES biases       | -0.77 m | 0.09 m |
+| CNES O/C + WHU biases (clean) | +0.45 m | 0.11 m |
+| Δ (WHU - CNES)               | **+1.22 m** | — |
+
+**Verdict: hypothesis partially refuted.**  The gap shrank from ~1.4 m
+(5-min reading) to ~1.22 m (30-min reading), but did not close.  After
+30 min of convergence, the two ACs anchor the receiver to genuinely
+different absolute positions, not different transient paths.
+
+Both ACs converge to **within ~1 m of truth** at this duration, with
+WHU only ~0.3 m closer than CNES.  Inside each AC's own attractor the
+position oscillates ±0.3-0.5 m driven by atmospheric drift, so the
+1.22 m AC-to-AC gap is just barely larger than the within-AC noise
+floor.
+
+**Implications:**
+
+1. The 5-min snapshot in the 2x2 over-stated the AC difference.  In
+   steady state the gap is real but smaller (~1.2 m vs 1.4 m).
+2. For cross-host PPS agreement (all hosts using same AC), either AC
+   gives sub-meter absolute accuracy + tight cohort agreement.
+3. The 1.2 m residual AC datum difference is a known PPP
+   characteristic — different ACs choose slightly different reference
+   frame realizations.  Closing this is not actionable at the engine
+   level; it requires picking one AC as canonical.
+
+## Latent bug surfaced — RTCM `disc_counter` ignored
+
+`SSRState` parses the `disc_counter` field from RTCM 1265+ phase-bias
+messages but the engine has no consumer for it.  The discontinuity
+counter is the AC's signal to receivers that the integer-cycle
+reference for a (SV, signal) has changed and the receiver should
+reseed the integer ambiguity.  We don't.
+
+Empirical: in the 30-min runs above, bias values were stable to
+sub-mm — disc_counter didn't increment for any (SV, signal) during
+either window.  So this latent bug isn't responsible for today's
+1.2 m gap.  But it WILL bite multi-hour arcs where ACs typically
+reseed integer references every 10-30 minutes.  See memory
+`project_disc_counter_ignored_20260425` for the fix sketch (~30
+lines).
+
 ## Earlier reading from day0425g (overlaid biases — superseded)
 
 **Key reading from day0425g (CNES orbit/clock + WHU biases):**
