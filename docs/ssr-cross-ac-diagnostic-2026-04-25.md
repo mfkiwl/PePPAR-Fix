@@ -54,6 +54,32 @@ engine bug.
 --no-primary-biases`).  Sub-meter accuracy with 18 cm fleet
 inter-host spread — a new production-candidate setup.
 
+## Constellation sweep on the winning config — day0425i
+
+Same back-to-back protocol, swapping `--systems` one constellation at
+a time:
+
+| cell | systems        | attractor median | inter-host spread | notes                                           |
+|------|----------------|------------------|--------------------|-------------------------------------------------|
+| A    | gal            | -1.17 m          | **0.39 m**         | winner — tightest cohort                        |
+| B    | gps,gal        | +2.11 m          | 4.69 m             | TimeHat (F9T-10) under-admits GPS L5 vs siblings |
+| C    | gal,bds        | -2.21 m          | 1.69 m             | BDS biases partially matched                    |
+| D    | gps,gal,bds    | -0.01 m          | 1.27 m             | GPS east-pull + BDS west-pull happen to cancel  |
+
+**Adding any constellation beyond GAL hurts inter-host agreement.**
+GPS adds the most variance because TimeHat's older firmware
+under-admits dual-frequency GPS SVs (memory
+`project_timehat_f9t_10_under_admit_20260421`).  BDS adds modest
+west-bias.  Cell D's accidental zero-attractor is not a real win — it's
+a coincidental cancellation that opens the cohort spread by 3x vs
+gal-only.
+
+**For cross-host sub-ns PPS agreement, GAL-only is the right call.**
+Multi-constellation may be worth revisiting if (a) we upgrade
+TimeHat's firmware/EVK to match the F9T-20B siblings, OR (b) we have
+to operate hosts at separate antennas where geometry diversity becomes
+a bigger deal than firmware-induced cohort variance.
+
 ## Earlier reading from day0425g (overlaid biases — superseded)
 
 **Key reading from day0425g (CNES orbit/clock + WHU biases):**
