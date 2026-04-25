@@ -66,7 +66,10 @@ HOSTS = [
 ]
 
 def _common_flags(known_pos: str, with_ssr: bool, ssr_conf: str | None,
-                  ssr_bias_conf: str | None) -> list:
+                  ssr_bias_conf: str | None,
+                  no_primary_biases: bool,
+                  no_ssr_code_bias: bool,
+                  no_ssr_phase_bias: bool) -> list:
     flags = [
         "--wl-only", "--systems", "gal",
         "--known-pos", known_pos,
@@ -83,6 +86,12 @@ def _common_flags(known_pos: str, with_ssr: bool, ssr_conf: str | None,
         flags.extend(["--ssr-ntrip-conf", ssr_conf])
     if ssr_bias_conf:
         flags.extend(["--ssr-bias-ntrip-conf", ssr_bias_conf])
+    if no_primary_biases:
+        flags.append("--no-primary-biases")
+    if no_ssr_code_bias:
+        flags.append("--no-ssr-code-bias")
+    if no_ssr_phase_bias:
+        flags.append("--no-ssr-phase-bias")
     return flags
 
 
@@ -133,7 +142,10 @@ def kill_all() -> None:
 
 def launch_all(tag: str, offset_e_m: float, known_pos: str,
                with_ssr: bool, ssr_conf: str | None,
-               ssr_bias_conf: str | None) -> None:
+               ssr_bias_conf: str | None,
+               no_primary_biases: bool,
+               no_ssr_code_bias: bool,
+               no_ssr_phase_bias: bool) -> None:
     print(f"  Launching {tag} with offset E={offset_e_m:+.3f}m...", flush=True)
     procs = []
     for h in HOSTS:
@@ -143,7 +155,10 @@ def launch_all(tag: str, offset_e_m: float, known_pos: str,
             "nohup ./venv/bin/python scripts/peppar_fix_engine.py",
         ]
         cmd_parts.extend(_common_flags(known_pos, with_ssr, ssr_conf,
-                                       ssr_bias_conf))
+                                       ssr_bias_conf,
+                                       no_primary_biases,
+                                       no_ssr_code_bias,
+                                       no_ssr_phase_bias))
         cmd_parts.extend(h["extra"])
         # Use = form so a negative offset doesn't look like a flag to argparse
         cmd_parts.extend([
@@ -285,6 +300,16 @@ def main() -> int:
                          "+ phase biases (e.g. ntrip-whu.conf paired with "
                          "CNES orbit/clock).  Same path resolution as "
                          "--ssr-conf.")
+    ap.add_argument("--no-primary-biases", action="store_true",
+                    help="Drop bias messages from primary SSR mount; "
+                         "pair with --ssr-bias-conf for clean "
+                         "'orbit/clock from A, biases from B'.")
+    ap.add_argument("--no-ssr-code-bias", action="store_true",
+                    help="Drop ALL SSR code biases (both mounts).  "
+                         "Isolates phase-bias contribution.")
+    ap.add_argument("--no-ssr-phase-bias", action="store_true",
+                    help="Drop ALL SSR phase biases (both mounts).  "
+                         "Isolates code-bias contribution.")
     ap.add_argument("--quick", action="store_true",
                     help="Diagnostic mode: 2 runs (+30m, -30m), single "
                          "magnitude.  ~10 min wall-clock instead of 82.  "
@@ -342,7 +367,10 @@ def main() -> int:
 
         kill_all()
         launch_all(tag, offset_e, args.known_pos, args.with_ssr,
-                   args.ssr_conf, args.ssr_bias_conf)
+                   args.ssr_conf, args.ssr_bias_conf,
+                   args.no_primary_biases,
+                   args.no_ssr_code_bias,
+                   args.no_ssr_phase_bias)
         print(f"  Sleeping {args.duration}s ({args.duration//60} min)...",
               flush=True)
         time.sleep(args.duration)

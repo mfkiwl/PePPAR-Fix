@@ -20,20 +20,21 @@ proprietary `4076_NNN` message IDs expose at least one more
 compatibility gap (orbit/clock IOD matching) — CAS test diverged 280
 m inter-host on a 30 m seed.
 
-Three discrete pieces of engine work to enable cleaner diagnostics:
+Engine work for cleaner diagnostics:
 
-A. **`--no-primary-biases`** flag (~10 lines) — drop biases from the
-   primary SSR mount while keeping its orbit/clock.  Required for the
-   clean 4-cell 2x2 (CNES/CAS × orbit-clock/biases).
+A. **`--no-primary-biases`** *(landed 2026-04-25)* — drops biases from
+   primary SSR mount, keeps orbit/clock.  Enables the clean 4-cell
+   2x2 (CNES/CAS × orbit-clock/biases).
 B. **IGS-SSR signal-map fix** for CAS / MADOCA — adds the missing
-   bias-map entries under the IGS-SSR encoding.  Independent of (A).
+   bias-map entries under the IGS-SSR encoding.  *Open.*
 C. **IOD-matching diagnostics** — log SVs whose orbit/clock SSR
    couldn't be matched to broadcast IODs, so we can spot silent
    fallback to broadcast-only orbits when SSR routing is broken.
-
-If the 2x2 narrows the bias to "biases" but doesn't separate code-
-from phase-bias, add `--no-ssr-code-bias` / `--no-ssr-phase-bias` —
-~10 more lines in the bias router.
+   *Open.*
+D. **`--no-ssr-code-bias` / `--no-ssr-phase-bias`** *(landed
+   2026-04-25)* — drop one bias class from BOTH SSR mounts.  Finer
+   isolation once the 2x2 narrows the bias to "biases not
+   orbit/clock".
 
 ## Three-source position sanity + self-healing FixedPosFilter
 

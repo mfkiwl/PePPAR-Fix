@@ -97,10 +97,9 @@ IGS-SSR signal-map and IOD-matching paths are fixed.**
 
 ### Engine work to enable cleaner diagnostics
 
-A. **`--no-primary-biases` flag** (~10 lines in engine arg parsing
-   + bias router) — when set, drop biases from `--ssr-ntrip-conf`
-   while still consuming its orbit/clock.  Enables the clean 4-cell
-   2x2:
+A. **`--no-primary-biases` flag** *(landed 2026-04-25)* — drops bias
+   messages from `--ssr-ntrip-conf` while still consuming its
+   orbit/clock.  Enables the clean 4-cell 2x2:
 
    | orbit/clock | biases | tells us |
    |---|---|---|
@@ -123,12 +122,11 @@ C. **IOD matching diagnostics** — add per-epoch logging of "SVs with
 
 ### Per-correction-class binary search (if 2x2 doesn't isolate)
 
-If the 4-cell 2x2 narrows the bias to "biases" not "orbit/clock"
-but doesn't distinguish code-bias vs phase-bias, a finer split
-needs engine flags `--no-ssr-code-bias` and `--no-ssr-phase-bias`
-(toggle one class while keeping the other).  Same shape: ~10
-lines in the bias-router.  Defer until 2x2 results say it's
-needed.
+`--no-ssr-code-bias` and `--no-ssr-phase-bias` *(landed 2026-04-25)*
+— drop the matching bias class from BOTH primary and secondary
+SSR streams.  Use to isolate which class drives the bias once the
+2x2 narrows it to "biases not orbit/clock".  Toggling one keeps the
+other intact.
 
 ## References
 

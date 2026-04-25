@@ -111,13 +111,20 @@ for _mt in range(1240, 1271):  # 1240-1263 (orbit/clock/code) + 1265-1270 (phase
 #   1265–1270 per-constellation phase biases.
 # IGS SSR 4076 subtypes 25/65/105 = code bias; 26/66/106 = phase bias
 # (GPS/GAL/BDS ranges).
-BIAS_MSG_TYPES = {
-    '1059', '1065', '1067', '1242', '1264',
-    '1265', '1266', '1267', '1268', '1269', '1270',
-    '4076_025', '4076_026',
-    '4076_065', '4076_066',
-    '4076_105', '4076_106',
+#
+# Code-vs-phase split is exposed separately so cross-AC diagnostic flags
+# (--no-ssr-code-bias, --no-ssr-phase-bias) can drop one class while keeping
+# the other.  See docs/ssr-cross-ac-diagnostic-2026-04-25.md.
+CODE_BIAS_MSG_TYPES = {
+    '1059', '1065', '1242', '1264',
+    '4076_025', '4076_065', '4076_105',
 }
+PHASE_BIAS_MSG_TYPES = {
+    '1067',
+    '1265', '1266', '1267', '1268', '1269', '1270',
+    '4076_026', '4076_066', '4076_106',
+}
+BIAS_MSG_TYPES = CODE_BIAS_MSG_TYPES | PHASE_BIAS_MSG_TYPES
 
 
 # u-blox F9T reports BDS-3 modernized-signal cpMes in L1-reference cycles
@@ -1056,7 +1063,8 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
 # ── NTRIP correction reader ────────────────────────────────────────────────── #
 
 def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP",
-                 bias_only=False):
+                 bias_only=False, skip_biases=False,
+                 skip_code_biases=False, skip_phase_biases=False):
     """Read RTCM3 messages from an NtripStream.
 
     Routes broadcast ephemeris messages to BroadcastEphemeris and SSR
@@ -1074,6 +1082,14 @@ def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP",
     observables uncorrected (CNES has no C5Q code bias) and caused
     tens-of-metres filter drift in 2026-04-18 testing.  See
     docs/ssr-mount-survey.md.
+
+    skip_biases / skip_code_biases / skip_phase_biases: drop matching
+    bias messages without routing them.  Diagnostic flags for isolating
+    which correction class drives observed obs-model bias.  See
+    docs/ssr-cross-ac-diagnostic-2026-04-25.md.  Typical use:
+    `skip_biases=True` on the primary stream while a secondary stream
+    supplies the biases — gives a clean "orbit/clock from A, biases
+    from B" experiment.
     """
     msg_counts = defaultdict(int)
     n_skipped_non_phase_bias = 0
@@ -1109,6 +1125,15 @@ def ntrip_reader(stream, beph, ssr, stop_event, label="NTRIP",
             # Log first occurrence of each message type for debugging
             if n_total <= 3 or identity not in msg_counts or msg_counts[identity] <= 1:
                 log.debug(f"[{label}] msg #{n_total}: identity={identity}")
+
+            # Diagnostic skip filters apply uniformly: drop matching bias
+            # messages before any other routing happens.
+            if skip_code_biases and identity in CODE_BIAS_MSG_TYPES:
+                continue
+            if skip_phase_biases and identity in PHASE_BIAS_MSG_TYPES:
+                continue
+            if skip_biases and identity in BIAS_MSG_TYPES:
+                continue
 
             # Route to appropriate handler.  In bias_only mode, reject
             # everything except the bias message subset — the primary

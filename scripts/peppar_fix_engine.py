@@ -903,11 +903,23 @@ def start_ntrip_threads(args, beph, ssr, stop_event):
         t = threading.Thread(
             target=ntrip_reader,
             args=(ssr_stream, beph, ssr, stop_event, "SSR"),
+            kwargs={
+                'skip_biases':       getattr(args, 'no_primary_biases', False),
+                'skip_code_biases':  getattr(args, 'no_ssr_code_bias', False),
+                'skip_phase_biases': getattr(args, 'no_ssr_phase_bias', False),
+            },
             daemon=True,
         )
         t.start()
         threads.append(t)
         log.info(f"SSR stream: {ssr_host}:{ssr_p}/{args.ssr_mount}")
+        if getattr(args, 'no_primary_biases', False):
+            log.info("Primary SSR biases (code + phase) suppressed "
+                     "(--no-primary-biases)")
+        if getattr(args, 'no_ssr_code_bias', False):
+            log.info("All SSR code biases suppressed (--no-ssr-code-bias)")
+        if getattr(args, 'no_ssr_phase_bias', False):
+            log.info("All SSR phase biases suppressed (--no-ssr-phase-bias)")
         peer_publisher.publish_streams(
             ssr_mount=args.ssr_mount,
             eph_mount=getattr(args, 'eph_mount', None),
@@ -942,7 +954,11 @@ def start_ntrip_threads(args, beph, ssr, stop_event):
         t = threading.Thread(
             target=ntrip_reader,
             args=(bias_stream, beph, ssr, stop_event, "SSR-BIAS"),
-            kwargs={'bias_only': True},
+            kwargs={
+                'bias_only':         True,
+                'skip_code_biases':  getattr(args, 'no_ssr_code_bias', False),
+                'skip_phase_biases': getattr(args, 'no_ssr_phase_bias', False),
+            },
             daemon=True,
         )
         t.start()
@@ -6436,6 +6452,25 @@ Two-phase operation:
                           "correction-stream effects from the engine's "
                           "intrinsic behavior.  Same SSR-mount config "
                           "in ntrip.conf is silently ignored.")
+    pos.add_argument("--no-primary-biases", action="store_true",
+                     help="Diagnostic: drop bias messages (code + phase) "
+                          "from the PRIMARY SSR mount, keeping its "
+                          "orbit/clock.  Pair with --ssr-bias-mount / "
+                          "--ssr-bias-ntrip-conf to test 'orbit/clock "
+                          "from A, biases from B' cleanly.  See "
+                          "docs/ssr-cross-ac-diagnostic-2026-04-25.md.")
+    pos.add_argument("--no-ssr-code-bias", action="store_true",
+                     help="Diagnostic: drop ALL SSR code-bias messages "
+                          "(both primary and secondary mounts).  "
+                          "Isolates phase-bias contribution to obs-model "
+                          "bias.  Pseudoranges fall back to broadcast "
+                          "TGD only.")
+    pos.add_argument("--no-ssr-phase-bias", action="store_true",
+                     help="Diagnostic: drop ALL SSR phase-bias messages "
+                          "(both primary and secondary mounts).  "
+                          "Isolates code-bias contribution.  Carrier-"
+                          "phase ambiguities are absorbed into the float "
+                          "state without bias correction.")
     pos.add_argument("--phase-windup", action="store_true",
                      help="Apply Wu 1993 carrier-phase wind-up "
                           "correction per SV per epoch.  Default "
