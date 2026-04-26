@@ -610,7 +610,21 @@ class PPPFilter:
             rho_pred = rho + clk_val - sat_clk * C + tropo + x_eval[IDX_ZTD] * m_wet
 
             cno_factor = 10 ** ((obs['cno'] - 35) / 20)
-            elev_factor = math.sin(math.radians(elev))
+            # Elevation weighting policy.  Default ('legacy'): ``1/sin(e)``
+            # always.  PRIDE-style ('pride'): ``1/(2·sin(e))`` below 30°,
+            # no extra weight above.  Bravo's source-read of PRIDE's
+            # gpsmod.f90 found this divides VARIANCE by (2·sin(e))² —
+            # i.e. divides σ by 2·sin(e) — only below 30°.  Selected via
+            # class attribute ELEV_WEIGHT_POLICY.
+            policy = getattr(self, 'ELEV_WEIGHT_POLICY', 'legacy')
+            sin_e = math.sin(math.radians(elev))
+            if policy == 'pride':
+                if elev < 30.0:
+                    elev_factor = 2.0 * sin_e
+                else:
+                    elev_factor = 1.0
+            else:
+                elev_factor = sin_e
             w = max(0.01, cno_factor * elev_factor)
 
             # --- IF Pseudorange ---
