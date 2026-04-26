@@ -415,10 +415,22 @@ class SSRState:
         """Extract per-satellite orbit corrections from an SSR message.
 
         Supports both IGS SSR (IDF fields) and standard RTCM SSR (DF fields).
-        Standard RTCM SSR orbit fields (pyrtcm):
+        Both pyrtcm decoders apply the spec's per-LSB scale factor — the
+        returned values are in MILLIMETRES (orbit) and MILLIMETRES PER
+        SECOND (rates), matching the integer-LSB units of mm and mm/s.
+        We divide by 1000 to land in metres / metres-per-second for the
+        rest of the engine.
+
+        Standard RTCM SSR fields (pyrtcm):
           DF365 = radial (mm), DF366 = along-track (mm), DF367 = cross-track (mm)
           DF368/369/370 = velocity corrections (mm/s)
-        IGS SSR fields: IDF013-018
+        IGS SSR fields: IDF013-018 (same units as DF365-370 — pyrtcm scale
+          factors are identical: 0.1 mm radial, 0.4 mm along/cross, etc.)
+
+        Bug history (fixed 2026-04-25): the IGS-SSR branch previously used
+        IDF013-018 raw, treating them as metres.  That made every CAS
+        SSRA01CAS1 orbit and clock correction 1000× too large — produced
+        the 280 m position divergence we observed in cross-AC testing.
         """
         for i in range(1, n_sats + 1):
             sat_id = self._get_sat_id(msg, i)
@@ -428,10 +440,12 @@ class SSRState:
 
             iod = self._get_iod(msg, i)
 
-            # Try IGS SSR fields first, then standard RTCM SSR
+            # Try IGS SSR fields first, then standard RTCM SSR.  Both
+            # branches divide by 1000: pyrtcm returns the spec's mm/mm/s
+            # units verbatim.
             radial = getattr(msg, f'IDF013_{i:02d}', None)
             if radial is None:
-                # Standard RTCM SSR: DF365-370 are in mm, convert to meters
+                # Standard RTCM SSR: DF365-370 in mm
                 radial_mm = getattr(msg, f'DF365_{i:02d}', None)
                 if radial_mm is not None:
                     radial = radial_mm / 1000.0
@@ -443,11 +457,13 @@ class SSRState:
                 else:
                     continue
             else:
-                along = getattr(msg, f'IDF014_{i:02d}', 0.0)
-                cross = getattr(msg, f'IDF015_{i:02d}', 0.0)
-                dot_r = getattr(msg, f'IDF016_{i:02d}', 0.0)
-                dot_a = getattr(msg, f'IDF017_{i:02d}', 0.0)
-                dot_c = getattr(msg, f'IDF018_{i:02d}', 0.0)
+                # IGS SSR: IDF013-018 in mm / mm-per-second too
+                radial = radial / 1000.0
+                along = getattr(msg, f'IDF014_{i:02d}', 0.0) / 1000.0
+                cross = getattr(msg, f'IDF015_{i:02d}', 0.0) / 1000.0
+                dot_r = getattr(msg, f'IDF016_{i:02d}', 0.0) / 1000.0
+                dot_a = getattr(msg, f'IDF017_{i:02d}', 0.0) / 1000.0
+                dot_c = getattr(msg, f'IDF018_{i:02d}', 0.0) / 1000.0
 
             self._orbit[prn] = OrbitCorrection(
                 iod=iod, epoch_s=epoch_s,
@@ -462,9 +478,15 @@ class SSRState:
                      rx_mono=None, queue_remains=None, correlation_confidence=None):
         """Extract per-satellite clock corrections from an SSR message.
 
-        Standard RTCM SSR clock fields (pyrtcm):
-          DF376 = C0 (mm), DF377 = C1 (mm/s), DF378 = C2 (mm/s²)
-        IGS SSR fields: IDF019-021
+        Both standard RTCM SSR (DF376-378) and IGS SSR (IDF019-021) are
+        returned by pyrtcm in mm / mm/s / mm/s² (same scale factors —
+        0.1, 0.001, 0.00002 — meaning LSB = 0.1 mm, 0.001 mm/s,
+        0.00002 mm/s²).  Both branches divide by 1000 to land in m / m/s
+        / m/s² for the rest of the engine.
+
+        Bug history (fixed 2026-04-25): the IGS-SSR branch previously
+        used IDF019-021 raw, treating them as already-in-metres.  That
+        made every CAS SSRA01CAS1 clock correction 1000× too large.
         """
         for i in range(1, n_sats + 1):
             sat_id = self._get_sat_id(msg, i)
@@ -472,7 +494,8 @@ class SSRState:
                 continue
             prn = f"{sys_prefix}{sat_id:02d}"
 
-            # Try IGS SSR fields first, then standard RTCM SSR
+            # Try IGS SSR fields first, then standard RTCM SSR.  Both
+            # branches divide by 1000.
             c0 = getattr(msg, f'IDF019_{i:02d}', None)
             if c0 is None:
                 c0_mm = getattr(msg, f'DF376_{i:02d}', None)
@@ -483,8 +506,9 @@ class SSRState:
                 else:
                     continue
             else:
-                c1 = getattr(msg, f'IDF020_{i:02d}', 0.0)
-                c2 = getattr(msg, f'IDF021_{i:02d}', 0.0)
+                c0 = c0 / 1000.0
+                c1 = getattr(msg, f'IDF020_{i:02d}', 0.0) / 1000.0
+                c2 = getattr(msg, f'IDF021_{i:02d}', 0.0) / 1000.0
 
             self._clock[prn] = ClockCorrection(
                 epoch_s=epoch_s, c0=c0, c1=c1, c2=c2,
