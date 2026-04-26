@@ -528,28 +528,34 @@ class PPPFilter:
         if sys_name == 'bds': return IDX_ISB_BDS
         return None
 
-    def update(self, observations, sp3, t, clk_file=None,
-               receiver_offset_ecef=None):
-        """Kalman update step for one epoch.
+    def _compute_H_z_at(self, x_eval, observations, sp3, t,
+                         clk_file=None, receiver_offset_ecef=None):
+        """Build (H, z, R, n_used, sys_counts, labels) at a given state.
 
-        receiver_offset_ecef: optional np.array(3,) offset ADDED to the
-            filter's state position when computing the geometric range.
-            Use for observation-model displacements like solid Earth
-            tide (IERS 2010 Step 1).  Does NOT modify the filter state;
-            the filter still estimates the ITRF (mean-tide-free)
-            position.  Default None = no offset, identical to prior
-            behavior.
+        Pure function of x_eval — does not mutate self.  Used by the
+        iterated update loop to re-linearize observation residuals
+        after the state estimate moves within an epoch.
+
+        Returns ``(None, None, None, n_used, sys_counts, [])`` if
+        n_used < 4 (filter can't update).
+
+        Why this helper exists: matching PRIDE kinematic (~19 mm float
+        on ABMF vs our 1.8 m best) requires per-epoch processing
+        wisdom we don't have.  Bravo's 2026-04-26 source-read of
+        ``lsq.f90`` will identify the specifics; this refactor enables
+        the implementation to live in a tight inner loop in
+        ``update()`` rather than baked into the H/z assembly.
         """
         H_rows = []
         z_rows = []
         R_diag = []
-        labels = []  # (sv, 'pr'|'phi', elev_deg) aligned with rows — elev for PFR diagnostics
+        labels = []
         n_used = 0
         sys_counts = defaultdict(int)
         if receiver_offset_ecef is not None:
-            receiver_pos = self.x[:3] + np.asarray(receiver_offset_ecef)
+            receiver_pos = x_eval[:3] + np.asarray(receiver_offset_ecef)
         else:
-            receiver_pos = self.x[:3]
+            receiver_pos = x_eval[:3]
 
         for obs in observations:
             sv = obs['sv']
@@ -595,13 +601,13 @@ class PPPFilter:
             m_wet = self.wet_mapping(elev)
             e_los = dx / rho
 
-            # Clock + ISB
+            # Clock + ISB — read from x_eval (the iterate), not self.x
             isb_idx = self.isb_index(obs['sys'])
-            clk_val = self.x[IDX_CLK]
+            clk_val = x_eval[IDX_CLK]
             if isb_idx is not None:
-                clk_val += self.x[isb_idx]
+                clk_val += x_eval[isb_idx]
 
-            rho_pred = rho + clk_val - sat_clk * C + tropo + self.x[IDX_ZTD] * m_wet
+            rho_pred = rho + clk_val - sat_clk * C + tropo + x_eval[IDX_ZTD] * m_wet
 
             cno_factor = 10 ** ((obs['cno'] - 35) / 20)
             elev_factor = math.sin(math.radians(elev))
@@ -616,7 +622,7 @@ class PPPFilter:
                          "dz_pr=%.1f m",
                          sv, elev, rho, sat_clk, tropo,
                          obs['pr_if'], rho_pred, dz_pr)
-            h_pr = np.zeros(len(self.x))
+            h_pr = np.zeros(len(x_eval))
             h_pr[0] = -e_los[0]
             h_pr[1] = -e_los[1]
             h_pr[2] = -e_los[2]
@@ -634,8 +640,8 @@ class PPPFilter:
             # --- IF Carrier phase ---
             if sv in self.sv_to_idx:
                 amb_idx = N_BASE + self.sv_to_idx[sv]
-                dz_phi = obs['phi_if_m'] - rho_pred - self.x[amb_idx]
-                h_phi = np.zeros(len(self.x))
+                dz_phi = obs['phi_if_m'] - rho_pred - x_eval[amb_idx]
+                h_phi = np.zeros(len(x_eval))
                 h_phi[0] = -e_los[0]
                 h_phi[1] = -e_los[1]
                 h_phi[2] = -e_los[2]
@@ -659,38 +665,115 @@ class PPPFilter:
             self._diag_logged = True
 
         if n_used < 4:
-            return n_used, np.array([]), {}
+            return None, None, None, n_used, dict(sys_counts), labels
 
         H = np.array(H_rows)
         z = np.array(z_rows)
         R = np.diag(R_diag)
+        return H, z, R, n_used, dict(sys_counts), labels
 
-        S = H @ self.P @ H.T + R
-        try:
-            K = self.P @ H.T @ np.linalg.inv(S)
-        except np.linalg.LinAlgError:
-            return n_used, z, dict(sys_counts)
+    def update(self, observations, sp3, t, clk_file=None,
+               receiver_offset_ecef=None,
+               max_iter=None, conv_threshold_m=1e-3):
+        """Iterated EKF update — re-linearizes residuals up to ``max_iter``
+        times to converge to a self-consistent state estimate per epoch.
 
-        self.x = self.x + K @ z
+        Single-pass EKF (max_iter=1) was the original implementation;
+        switching to IEKF (max_iter≥3) is the first lever in the PRIDE-
+        kinematic-match work (2026-04-26).  Bravo's measurement showed
+        PRIDE kinematic gets 19 mm mean float on ABMF where our single-
+        pass gets 1.8 m even with Q_pos pinned — a 95× gap.
+
+        IEKF formula per epoch:
+          x_prior = self.x at entry
+          P_prior = self.P at entry
+          x_iter = x_prior
+          for i in 1..max_iter:
+              H_i, z_i = _compute_H_z_at(x_iter, observations, ...)
+              K_i = P_prior @ H_i.T @ inv(H_i @ P_prior @ H_i.T + R)
+              x_new = x_prior + K_i @ (z_i + H_i @ (x_iter - x_prior))
+              if ||x_new[:3] - x_iter[:3]|| < conv_threshold:
+                  break
+              x_iter = x_new
+          self.x = x_new
+          self.P = (I - K_i @ H_i) @ P_prior @ (...).T + K_i @ R @ K_i.T
+
+        max_iter=None defaults to a class attribute IEKF_MAX_ITER, which
+        defaults to 5.  Set IEKF_MAX_ITER=1 on the class to revert to
+        single-pass behavior (useful for A/B comparison in the harness).
+
+        receiver_offset_ecef: optional np.array(3,) offset added to the
+            position when computing geometric range (solid Earth tide
+            displacement).  Same semantics as before the refactor.
+        """
+        if max_iter is None:
+            max_iter = getattr(self, 'IEKF_MAX_ITER', 5)
+        x_prior = self.x.copy()
+        P_prior = self.P.copy()
+        x_iter = x_prior.copy()
+
+        H = z = R = K = None
+        labels: list = []
+        n_used = 0
+        sys_counts: dict = {}
+
+        for iter_n in range(max_iter):
+            H, z, R, n_used, sys_counts, labels = self._compute_H_z_at(
+                x_iter, observations, sp3, t, clk_file, receiver_offset_ecef)
+            if H is None:  # n_used < 4
+                self.x = x_prior
+                self.P = P_prior
+                return n_used, np.array([]), {}
+
+            S = H @ P_prior @ H.T + R
+            try:
+                K = P_prior @ H.T @ np.linalg.inv(S)
+            except np.linalg.LinAlgError:
+                # Fall back to current iterate; covariance unchanged.
+                self.x = x_iter
+                self.P = P_prior
+                return n_used, z, dict(sys_counts)
+
+            # IEKF state update (textbook form):
+            # x_new = x_prior + K (z(x_iter) + H(x_iter) (x_iter - x_prior))
+            # ─ z_iter is already (obs - h(x_iter)) from _compute_H_z_at,
+            # so we add H @ (x_iter - x_prior) to recenter on x_prior.
+            dx = x_iter - x_prior
+            x_new = x_prior + K @ (z + H @ dx)
+
+            # Convergence check on position (3D) — IEKF iteration matters
+            # most for the position state's nonlinearity in the geometric
+            # range.  Other states are linear in obs.
+            if np.linalg.norm(x_new[:3] - x_iter[:3]) < conv_threshold_m:
+                x_iter = x_new
+                break
+            x_iter = x_new
+
+        # Apply final state + Joseph-form covariance using the LAST H, K, R.
+        self.x = x_iter
         I_KH = np.eye(len(self.x)) - K @ H
-        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
+        self.P = I_KH @ P_prior @ I_KH.T + K @ R @ K.T
         self.P = 0.5 * (self.P + self.P.T)
 
-        post_resid = z - H @ (K @ z)
-        # Store per-measurement (sv, type) labels aligned with post_resid so
-        # callers can map residuals back to their satellites — used by the
-        # post-fix residual monitor to detect wrong integer fixes.
+        # Final post-fit residuals at the converged state.
+        post_resid = z - H @ (x_iter - x_prior) - H @ K @ (z + H @ (x_iter - x_prior) - H @ (x_iter - x_prior))
+        # Simpler equivalent: post_resid = z + H @ dx_old - H @ (x_new - x_prior)
+        # where dx_old = (x_iter_at_last_iter - x_prior).  Since we may
+        # have broken out before setting x_iter = x_new, recompute z at
+        # x_new for accurate post-fit residuals downstream.
+        H_final, z_final, _, _, _, labels_final = self._compute_H_z_at(
+            x_iter, observations, sp3, t, clk_file, receiver_offset_ecef)
+        if z_final is not None:
+            post_resid = z_final
+            labels = labels_final
+        # Store per-measurement (sv, type) labels aligned with post_resid.
         self.last_residual_labels = labels
-        # Cache the PR H-row per SV.  The join test in NarrowLaneResolver
-        # projects a candidate fix's state-change Δx through each long-term
-        # member's H-row to predict whether the new fix would push any
-        # trusted member's PR residual past the false-fix threshold.  Only
-        # PR rows are cached — phase rows include the SV's own ambiguity
-        # column which is irrelevant for join projection against other SVs.
+        # Cache the PR H-row per SV (NarrowLaneResolver join test).
         self.last_H_by_sv = {}
-        for (sv_i, kind_i, _elev_i), h_row in zip(labels, H_rows):
-            if kind_i == 'pr':
-                self.last_H_by_sv[sv_i] = h_row
+        if H_final is not None:
+            for (sv_i, kind_i, _elev_i), h_row in zip(labels, H_final):
+                if kind_i == 'pr':
+                    self.last_H_by_sv[sv_i] = h_row
         return n_used, post_resid, dict(sys_counts)
 
 
