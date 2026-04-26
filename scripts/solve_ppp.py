@@ -698,9 +698,24 @@ class PPPFilter:
           self.x = x_new
           self.P = (I - K_i @ H_i) @ P_prior @ (...).T + K_i @ R @ K_i.T
 
-        max_iter=None defaults to a class attribute IEKF_MAX_ITER, which
-        defaults to 5.  Set IEKF_MAX_ITER=1 on the class to revert to
-        single-pass behavior (useful for A/B comparison in the harness).
+        max_iter=None defaults to a class attribute IEKF_MAX_ITER (5).
+        Iteration is mainly used to re-converge after MAD outlier
+        rejection (OUTLIER_MAD_K > 0) changes which observations
+        contribute to the update.
+
+        With OUTLIER_MAD_K = 0 (no rejection) and IEKF_MAX_ITER = 1,
+        behavior matches the original single-pass EKF bit-for-bit.
+        Bravo's 2026-04-26 source-read of PRIDE-PPPAR's ``lsq.f90``
+        confirmed PRIDE does NOT iterate within an epoch — it
+        accumulates a normal equation across all epochs and does a
+        single batch solve, with multi-pass outlier editing across
+        the whole dataset.  Our streaming MAD rejection is a
+        bounded subset of that: per-epoch editing without the
+        across-epoch refinement, useful for catching real-world
+        outliers (multipath, SSR stalls, scintillation) but not
+        sufficient to close the 95× gap to PRIDE on clean ABMF
+        reference data (where there are no outliers).  See
+        ``project_to_main_pride_lsq_findings_20260426.md``.
 
         receiver_offset_ecef: optional np.array(3,) offset added to the
             position when computing geometric range (solid Earth tide
@@ -708,6 +723,16 @@ class PPPFilter:
         """
         if max_iter is None:
             max_iter = getattr(self, 'IEKF_MAX_ITER', 5)
+        # MAD-based per-epoch outlier rejection threshold.  K * MAD on
+        # the pre-fit residuals.  K=0 disables.  Typical PPP values
+        # K=3-6.  See docs/future-work.md "MAD-based outlier rejection"
+        # for the SatPulse parallel (servo-side) and the rationale for
+        # MAD vs σ-from-prior-cov: MAD adapts to this epoch's actual
+        # residual distribution, where σ inherits whatever loose
+        # estimate the prior covariance carries.  σ-from-S didn't fire
+        # in ABMF testing 2026-04-26 because the innovation σ was too
+        # loose to flag real outliers; MAD addresses that.
+        outlier_mad_k = getattr(self, 'OUTLIER_MAD_K', 0.0)
         x_prior = self.x.copy()
         P_prior = self.P.copy()
         x_iter = x_prior.copy()
@@ -716,34 +741,74 @@ class PPPFilter:
         labels: list = []
         n_used = 0
         sys_counts: dict = {}
+        # Per-iteration outlier exclusions, keyed by (sv, kind).
+        # Re-detected each iteration since residuals shift as state
+        # converges.  PRIDE's batch redig multi-pass approach is
+        # structurally analogous: edit obs, re-solve, re-edit.
+        excluded_keys: set = set()
 
         for iter_n in range(max_iter):
-            H, z, R, n_used, sys_counts, labels = self._compute_H_z_at(
-                x_iter, observations, sp3, t, clk_file, receiver_offset_ecef)
-            if H is None:  # n_used < 4
+            H_full, z_full, R_full, n_used, sys_counts, labels_full = (
+                self._compute_H_z_at(
+                    x_iter, observations, sp3, t, clk_file,
+                    receiver_offset_ecef))
+            if H_full is None:  # n_used < 4
                 self.x = x_prior
                 self.P = P_prior
                 return n_used, np.array([]), {}
+
+            # MAD outlier detection on PRE-fit residuals (z), per kind
+            # (PR vs phase).  Done BEFORE applying excluded_keys from
+            # prior iterations so the median is computed from the full
+            # observation set on each iteration — drift in the median
+            # then changes which obs are flagged.
+            if outlier_mad_k > 0:
+                for kind in ('pr', 'phi'):
+                    kind_idx = [i for i, lbl in enumerate(labels_full)
+                                if lbl[1] == kind]
+                    if len(kind_idx) < 5:
+                        continue  # need ≥5 for stable MAD
+                    kind_z = z_full[kind_idx]
+                    med = float(np.median(kind_z))
+                    mad = float(np.median(np.abs(kind_z - med)))
+                    if mad < 1e-6:
+                        continue  # residuals all equal — can't detect
+                    threshold = outlier_mad_k * mad
+                    for j, i in enumerate(kind_idx):
+                        if abs(kind_z[j] - med) > threshold:
+                            excluded_keys.add(
+                                (labels_full[i][0], labels_full[i][1]))
+
+            # Apply outlier exclusions.
+            keep_idx = [i for i, (sv_i, kind_i, _e) in enumerate(labels_full)
+                        if (sv_i, kind_i) not in excluded_keys]
+            if len(keep_idx) < 4:
+                # Too aggressive — keep all obs to avoid breaking the
+                # update.  This preserves robustness against
+                # over-rejection from a misconfigured K threshold.
+                keep_idx = list(range(len(labels_full)))
+                excluded_keys = set()
+            H = H_full[keep_idx]
+            z = z_full[keep_idx]
+            R = R_full[np.ix_(keep_idx, keep_idx)]
+            labels = [labels_full[i] for i in keep_idx]
 
             S = H @ P_prior @ H.T + R
             try:
                 K = P_prior @ H.T @ np.linalg.inv(S)
             except np.linalg.LinAlgError:
-                # Fall back to current iterate; covariance unchanged.
                 self.x = x_iter
                 self.P = P_prior
                 return n_used, z, dict(sys_counts)
 
             # IEKF state update (textbook form):
             # x_new = x_prior + K (z(x_iter) + H(x_iter) (x_iter - x_prior))
-            # ─ z_iter is already (obs - h(x_iter)) from _compute_H_z_at,
-            # so we add H @ (x_iter - x_prior) to recenter on x_prior.
             dx = x_iter - x_prior
             x_new = x_prior + K @ (z + H @ dx)
 
-            # Convergence check on position (3D) — IEKF iteration matters
-            # most for the position state's nonlinearity in the geometric
-            # range.  Other states are linear in obs.
+            # Converge if state didn't move and no new outliers
+            # detected this iteration.  Iteration past iter 1 is mainly
+            # to re-converge after MAD rejection changes the obs set.
             if np.linalg.norm(x_new[:3] - x_iter[:3]) < conv_threshold_m:
                 x_iter = x_new
                 break

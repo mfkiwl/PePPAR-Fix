@@ -466,6 +466,12 @@ def run(args) -> int:
         PPPFilter.Q_POS_CONVERGED = q_pos_override
         log.info("PPPFilter.Q_POS_CONVERGED overridden: %.3e (default 1e-4)",
                  q_pos_override)
+    mad_k_override = getattr(args, "outlier_mad_k", None)
+    if mad_k_override is not None:
+        from solve_ppp import PPPFilter
+        PPPFilter.OUTLIER_MAD_K = mad_k_override
+        log.info("PPPFilter.OUTLIER_MAD_K overridden: %.2f (default 0 = off)",
+                 mad_k_override)
     sig_pr_override = getattr(args, "sigma_pr", None)
     if sig_pr_override is not None:
         import solve_ppp as _sp
@@ -1350,6 +1356,14 @@ def main():
                          "to 1e-10) are more defensible and test "
                          "whether the Q2 overconfidence is driven by "
                          "position-state wander vs other mechanisms.")
+    ap.add_argument("--outlier-mad-k", type=float, default=None, metavar="K",
+                    help="Per-epoch MAD-based outlier rejection threshold. "
+                         "Reject obs where |residual - median| > K · MAD, "
+                         "MAD computed separately per kind (PR vs phase). "
+                         "0 disables (default).  Typical PPP values K=3-6. "
+                         "Aggressive K=0.5-2 catches more outliers but risks "
+                         "over-rejecting noisy-but-valid obs.  See "
+                         "project_to_main_pride_lsq_findings_20260426.md.")
     ap.add_argument("--ztd-ou-tau", type=float, default=None, metavar="SECONDS",
                     help="Mean-reversion time constant τ (seconds) for "
                          "the ZTD Ornstein-Uhlenbeck process model.  "
