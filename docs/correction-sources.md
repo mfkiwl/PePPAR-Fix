@@ -54,19 +54,33 @@ Broadcast ephemeris:
 - `BCEP00BKG0` on the Australian mirror
 - `BCEP00CAS0` on products.igs-ip.net
 
-### PPP-AR (future)
+### PPP-AR (validated 2026-04-25)
 
-Use a single AC's complete product set. Recommended ACs (per BKG/Andrea,
-2026-03):
+Use a single AC's complete product set, OR pair an O/C source with
+an OSB-format bias source.  Lab-validated configurations:
 
-| AC | SSR mount | Notes |
-|----|-----------|-------|
-| CAS (Chinese Academy of Sciences) | `SSRA01CAS1` | Commonly recommended |
-| CNES (French space agency) | `SSRA00CNE1` | Commonly recommended |
-| WHU (Wuhan University) | `SSRA00WHU1` + `OSBC00WHU1` | Needs two streams |
+| AC | SSR mount | Engine flag | Status |
+|----|-----------|-------------|--------|
+| CNES O/C + WHU biases (clean) | `SSRA00CNE0` + `OSBC00WHU1` | `--ssr-ntrip-conf ntrip-cnes.conf --ssr-bias-ntrip-conf ntrip-whu.conf --no-primary-biases` | **Production winner** for accuracy + cohort spread (sub-meter, 18 cm spread, day0425h) |
+| CAS (Chinese Academy of Sciences) | `SSRA01CAS1` | `--ssr-ntrip-conf ntrip-cas.conf` | **Validated post-bug-fix 2026-04-25.**  Multi-constellation `gps,gal,bds` works; ~m offset from truth.  Earlier 280 m divergence was an engine bug (commit 485612d) treating IGS-SSR `4076_*` orbit/clock fields as metres when pyrtcm returned millimetres. |
+| CNES (French space agency) alone | `SSRA00CNE0` | `--ssr-ntrip-conf ntrip-cnes.conf` | Works, but biases land ~1 m west of WHU's at our site (open question whether real datum or subtle app bug). |
+| WHU alone | `OSBC00WHU1` | n/a (no orbit/clock) | Biases-only; can't run alone. Pair with CNES or other O/C. |
 
 PPP-AR performance comparison across ACs:
 https://igs.bkg.bund.de/ntrip/ppp
+
+### Open question: CNES vs WHU 1.2 m attractor gap
+
+In the 2026-04-25 30-min long-convergence run, the CNES bias source
+landed -0.77 m east of Leica truth and WHU biases landed +0.45 m east
+on identical CNES O/C — gap of 1.22 m.  Could be a real AC-datum /
+reference-frame difference, or a subtle bias-magnitude-sensitive
+application bug (CNES biases are ±1-2 m per SV; WHU biases are ±0.3
+m per SV).  Resolution requires comparing our PPP solution to a
+reference engine (RTKLIB, PRIDE PPP-AR) on recorded RINEX OBS + SSR
+RTCM — not yet set up.  See `docs/ssr-cross-ac-diagnostic-2026-04-25.md`
+for the investigation log and `feedback_research_established_ar_impls`
+for the verification approach.
 
 ### Alternative: Galileo HAS
 

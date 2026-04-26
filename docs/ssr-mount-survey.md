@@ -45,18 +45,45 @@ Ordered by likelihood of working with our F9T's L5Q (pilot) tracking:
 
 | Mount | Caster | Provider | Biases | Access | Verdict |
 |---|---|---|---|---|---|
-| **OSBC00WHU1** | `products.igs-ip.net` | Wuhan University | Per-code OSB (C1C, C2W, C5I, C5Q, etc.) | IGS login, free | **Strongest candidate** — OSB is per-code by design; validated for GPS+GAL+BDS AR in Geng et al. 2024. |
+| **OSBC00WHU1** | `products.igs-ip.net` | Wuhan University | Per-code OSB (C1C, C2W, C5I, C5Q, etc.) | IGS login, free | **Strongest candidate, validated 2026-04-25** — OSB is per-code by design; in the 2x2 isolation WHU biases on CNES O/C land sub-meter from Leica with 18 cm cohort spread (best result of any tested combination).  See `docs/ssr-cross-ac-diagnostic-2026-04-25.md`. |
 | MADOCA-PPP | JAXA NTRIP | JAXA | GPS/GLONASS/QZSS L1/L2/L5 code + phase | Free R&D registration | Entirely different AC; good second try. |
 | Galileo HAS IDD | GSC-issued | European GNSS Service Centre | GPS + GAL | Free, GSC registration | Already on roadmap (`docs/galileo-has-research.md`). |
-| SSRA01CAS1 | `ntrip.data.gnss.ga.gov.au` | Chinese Academy of Sciences (phase 2) | Code + phase | Existing credentials likely cover it | Unverified — probe its `avail=[…]` list like we did for CNES. |
-| **SSRA00CNE0** | `products.igs-ip.net` | CNES | L1C/L2W/L5I phase | IGS login, free | Our current mount.  Produces sub-ideal GPS AR with F9T L5Q, for reasons we haven't fully isolated. |
+| **SSRA01CAS1** | `ntrip.data.gnss.ga.gov.au` | Chinese Academy of Sciences (phase 2) | Code + phase | Existing credentials work | **Validated 2026-04-25 post-bug-fix** — uses IGS-SSR `4076_*` proprietary message IDs.  An engine bug (commit 485612d) treating pyrtcm's IDF013-021 mm-output as metres caused 280 m position divergence on first try.  Post-fix, CAS is in the same regime as CNES (~m offset, sub-meter cohort).  Multi-constellation `gps,gal,bds` works on CAS post-fix (~+1.7 m east of Leica truth, σ 0.28 m at 13 min).  Open: GAL `sig_id=2` phase bias still unmapped (one signal dropped per SV, ~0.34 m impact). |
+| **SSRA00CNE0** | `products.igs-ip.net` | CNES | L1C/L2W/L5I phase | IGS login, free | Our orbit/clock source.  CNES biases land 1.59 m east of WHU biases on the same orbit/clock (2026-04-25 2x2).  Whether this 1.59 m is a real CNES datum/frame difference or a subtle bias-magnitude-sensitive bug in our application remains an open question — see `docs/ssr-cross-ac-diagnostic-2026-04-25.md` and below. |
 | IGS combined (SSRA02IGS0, …) | `products.igs-ip.net` | IGS RTS Kalman combination | **Orbit + clock only, no phase bias** | IGS login, free | Skip for AR. |
 
-Note CAS's primary mount `SSRA00BKG0` (on `ntrip.data.gnss.ga.gov.au`)
-is already covered by project memory
-[`reference_cas_ssr_mount`](../state/README.md) — 159 phase biases,
-GPS L5Q among them per the memory, though earlier attempts hit signal-
-code mismatches.  Worth re-evaluating in light of the literature above.
+## CAS bug history (2026-04-25)
+
+CAS produced 280 m position divergence on first try, attributed
+incorrectly to a missing `sig_id=2` phase bias map entry.  The real
+cause was an engine bug in `_parse_orbit` / `_parse_clock`: pyrtcm
+returns IDF013-021 (IGS-SSR orbit/clock) in mm and mm/s — same as
+DF365-378 (standard RTCM SSR) — but the engine's IGS-SSR branch used
+the values raw, treating them as already-meters.  Every CAS orbit and
+clock correction was 1000× too large.  Fixed in commit 485612d.
+After the fix, CAS works.  See `docs/ssr-cross-ac-diagnostic-2026-04-25.md`.
+
+## Open question: CNES vs WHU 1.2 m gap
+
+In the 2026-04-25 30-min long-convergence run, CNES + CNES biases
+settled at -0.77 m east of Leica truth and CNES O/C + WHU biases
+settled at +0.45 m east — gap of 1.22 m.  Two possible explanations:
+
+1. **Real AC datum / reference-frame difference** between CNES's bias
+   datum and WHU's.  CNES biases are large per-SV (±1-2 m); WHU biases
+   are small (±0.3 m).  Different ACs anchor their phase biases to
+   different reference networks.
+2. **Subtle application bug** in how we apply the larger CNES biases
+   vs the smaller WHU biases.  No bias-magnitude-sensitive code path
+   is visible in inspection, but we can't fully rule it out without
+   external verification.
+
+Resolution requires comparing our PPP solution to a reference engine
+(RTKLIB, PRIDE PPP-AR) running on the same recorded RINEX OBS + SSR
+RTCM.  If RTKLIB+CNES lands at -0.77 m too → real AC datum.  If RTKLIB+
+CNES lands near 0 → bug is ours.  Memory `feedback_research_established_ar_impls`
+flagged this as the right verification approach but we don't have it
+set up yet (would need a RINEX writer and RTCM capture in the engine).
 
 ## Candidate failure modes beyond L5I/L5Q
 

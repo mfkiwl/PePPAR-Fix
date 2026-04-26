@@ -12,21 +12,36 @@ incrementally.
 ## Cross-AC SSR diagnostic — engine flags + signal-map work
 
 **See `docs/ssr-cross-ac-diagnostic-2026-04-25.md` for the full
-investigation.**  As of 2026-04-25 our PPP+CNES SSR settles 6–9 m
-west of Leica truth on UFO1 — *worse* than the bare F9T NAV2
-autonomous fix.  CAS attempt to cross-check failed because the
-engine's IGS-SSR signal map is missing Galileo `sig_id=2`, and CAS's
-proprietary `4076_NNN` message IDs expose at least one more
-compatibility gap (orbit/clock IOD matching) — CAS test diverged 280
-m inter-host on a 30 m seed.
+investigation.**
+
+**Resolved 2026-04-25:** the CAS 280 m position divergence had a
+clear bug cause — `_parse_orbit` / `_parse_clock` treated pyrtcm's
+IGS-SSR `IDF013-021` mm/mm-per-second output as already-meters,
+making every CAS orbit and clock correction 1000× too large.  Fixed
+in commit 485612d.  Post-fix, CAS produces stable PPP solutions
+in the same regime as CNES (~m offset, sub-meter cohort, multi-
+constellation works).  WHU OSBC00WHU1 paired with CNES O/C is the
+validated sub-meter winner from the 2x2 isolation.
+
+**Open: CNES vs WHU 1.2 m attractor gap.**  In the 30-min long-
+convergence run, CNES bias source landed -0.77 m east of Leica truth,
+WHU biases on the same CNES O/C landed +0.45 m east.  Could be a real
+AC-datum / reference-frame difference (CNES biases ±1-2 m per SV;
+WHU biases ±0.3 m per SV — different bias-magnitude regimes), or a
+subtle bias-magnitude-sensitive application bug we haven't identified.
+Resolution requires comparing our PPP solution to a reference engine
+(RTKLIB, PRIDE PPP-AR) on recorded RINEX OBS + SSR RTCM stream — not
+yet set up.  Per `feedback_research_established_ar_impls`, this is the
+right verification approach.
 
 Engine work for cleaner diagnostics:
 
 A. **`--no-primary-biases`** *(landed 2026-04-25)* — drops biases from
    primary SSR mount, keeps orbit/clock.  Enables the clean 4-cell
-   2x2 (CNES/CAS × orbit-clock/biases).
+   2x2 (CNES × biases-source).
 B. **IGS-SSR signal-map fix** for CAS / MADOCA — adds the missing
-   bias-map entries under the IGS-SSR encoding.  *Open.*
+   GAL `sig_id=2` (E1C phase bias) entry.  Now a polish item — CAS
+   works without it; fix improves coverage by one signal per SV.
 C. **IOD-matching diagnostics** — log SVs whose orbit/clock SSR
    couldn't be matched to broadcast IODs, so we can spot silent
    fallback to broadcast-only orbits when SSR routing is broken.
@@ -35,6 +50,31 @@ D. **`--no-ssr-code-bias` / `--no-ssr-phase-bias`** *(landed
    2026-04-25)* — drop one bias class from BOTH SSR mounts.  Finer
    isolation once the 2x2 narrows the bias to "biases not
    orbit/clock".
+E. **External engine cross-check infrastructure** — RINEX OBS writer
+   + RTCM stream capture in the engine, so we can hand both to RTKLIB
+   or PRIDE PPP-AR for the gold-standard verification.  Resolves the
+   open CNES-vs-WHU bug-or-datum question.  ~1-2 days work.
+
+## Optimum F9T configuration (2026-04-25)
+
+For PePPAR Fix's cross-host PPS-agreement goal, the lab-validated
+configurations as of 2026-04-25:
+
+- **Best accuracy + tightest cohort**: CNES O/C + WHU biases
+  (`--ssr-ntrip-conf ntrip-cnes.conf --ssr-bias-ntrip-conf
+  ntrip-whu.conf --no-primary-biases`), GAL-only.  18 cm cohort spread
+  on the 2x2 winner; sub-meter from Leica.  Use on F9T-20B and
+  L5-firmware F9T-10 hosts.
+- **Multi-constellation (post-CAS-fix)**: CAS `gps,gal,bds`.  ~+1.7 m
+  offset from Leica, σ < 0.4 m at 10-15 min.  Stable.  Avoid mixing
+  TimeHat (F9T-10/TIM 2.20, GPS L5 under-admit) into a multi-const
+  cohort with F9T-20B hosts — fleet spread blows up to meters.
+- **WL+NL vs WL-only**: Bravo's 30-min day0425l shows the NL pipeline
+  engages at 30+ min (didn't engage at 5 min); cohort agreement is
+  sub-cm in both cells.  NL fixing barely happens in our window;
+  Bob's stability-over-accuracy guidance (memory `feedback_stability_
+  over_accuracy_short_term`) makes WL-only acceptable as long as
+  cohort is tight.
 
 ## Three-source position sanity + self-healing FixedPosFilter
 

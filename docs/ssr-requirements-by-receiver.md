@@ -217,7 +217,7 @@ recent peer-reviewed literature (cited inline), and lab probe logs.
 |---|---|---|---|
 | **CNES** SSRA00CNE0, SSRC00CNE0 | CNES (France) | yes | GPS L1C ✓, L2W ✗, L5I (often, currently absent on lab) ✗.  GAL L1C/L5Q/L7Q/L6C ✓✓✓✓.  BDS L2I/L7I/L6I ✓ — **B2a (L5I) currently absent** on live stream (avail=[L2I,L7I,L6I] per day0421b log) |
 | **WHU** OSBC00WHU1 | Wuhan Univ. | yes — per-observable OSB (Geng 2024) | GPS L1C/**L5Q**✓ + L2W (probing for L2L).  GAL L1C/L5Q/L7Q ✓.  BDS L2I/L7I/**L5I** ✓ — uses L5Q as reference signal (Liu 2021) |
-| **CAS** SSRA01CAS1 (`-01` only; `-00` is no-phase) | Chinese Academy of Sciences | yes (~159 biases per memory) | needs probing for L2L / L5Q / B2a coverage; note: GAL E1 phase missing per earlier lab attempt |
+| **CAS** SSRA01CAS1 (`-01` only; `-00` is no-phase) | Chinese Academy of Sciences | yes (~150 biases observed) | **Validated 2026-04-25 post-bug-fix.**  Uses IGS-SSR `4076_*` proprietary message IDs.  An engine bug (commit 485612d) caused 280 m position divergence on first try; fixed.  Post-fix CAS works for multi-constellation `gps,gal,bds` (single-host clkPoC3 ~+1.7 m east of Leica truth, σ 0.28 m at 13 min).  GAL `sig_id=2` IGS-SSR phase bias still unmapped (one signal dropped per SV, ~0.34 m impact). |
 | **CHC** SSRA00CHC1, SSRC00CHC1 | CHC Navigation | yes | claimed full GREC, needs probing |
 | **SHAO** SSRA01SHA*, SSRC01SHA* (`01` only) | Shanghai Astronomical Observatory | partial | needs probing |
 | **IGS combined** SSRA02IGS1, SSRC02IGS1, SSRA03IGS1, SSRC03IGS1 | IGS RTS | **none** | orbit + clock + code only; **not useful for AR** |
@@ -245,13 +245,33 @@ What each free stream publishes for the signals our F9Ts actually track:
 |---|---|---|---|---|---|---|---|---|---|
 | CNES SSRA00CNE0 | ✓ | ✗ (L2W only) | ✗ (L5I only) | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ (currently) |
 | WHU OSBC00WHU1 | ✓ | ? probe | **✓** | ✓ | ✓ | ✓ | ✓ | ✓ | **✓** |
-| CAS SSRA01CAS1 | ✓ | ? probe | ? probe | partial (no E1?) | ? | ? | ✓ | ✓ | ? probe |
+| CAS SSRA01CAS1 (post-fix) | ✓ | ? probe | ? probe | partial (E1C `sig_id=2` unmapped in IGS-SSR map) | ✓ | ✓ | ✓ | ✓ | ? probe |
 | Galileo HAS SL1 | ✓ | **✓ code only; phase TBD** | ✗ | ✓ | ✓ | ✓ | – | – | – |
 | MADOCA-PPP | ✓ FCB | ? | ✓ | partial | ✓ | – | – | – | – |
 
 The bolded items are the gaps we have most acutely — GPS L2L (for L1+L2
 profile receivers) and GPS L5Q (for L1+L5 profile receivers, our
 F9T-20B fleet).  WHU appears to fill both.
+
+## Empirical winners (2026-04-25 testing)
+
+After the 2x2 SSR isolation and CAS bug fix, today's measurements
+favor a small number of configurations.  All numbers are east of
+Leica truth on UFO1 (Leica accuracy ~0.5-1 m, OPUS post-processed
+truth coming in days; ±0.5 m is "indistinguishable from truth"):
+
+| Config | Result | When to use |
+|---|---|---|
+| **CNES O/C + WHU biases (clean), GAL-only, WL-only or WL+NL** | -0.65 to +0.07 m at 30 min, 18 cm cohort spread | Best accuracy + tightest cohort.  Production-candidate. |
+| **CAS gps,gal,bds, WL+NL** | +1.7 to +1.95 m at 13 min, σ < 0.4 m, sub-meter single-host | Multi-constellation needs.  Stable, slightly biased. |
+| CNES alone, GAL-only | -0.77 m at 30 min | Worse than CNES O/C + WHU biases by ~1.6 m. |
+
+**Multi-constellation now usable post-CAS-fix.**  Adding constellations
+beyond GAL on the WHU bias path was previously degraded by TimeHat's
+older firmware under-admitting GPS L5 SVs (4.7 m fleet spread on
+gps,gal in day0425i).  CAS as primary (single-AC, internally consistent
+multi-const) avoids that bias-source mismatch and works on the F9T-20B
+hosts (clkPoC3 + MadHat) cleanly.
 
 ## Best-fit recommendations per F9T variant
 

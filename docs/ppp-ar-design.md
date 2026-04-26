@@ -3,6 +3,18 @@
 > **Future direction**: see `docs/architecture-vision.md` — AR is an
 > extension of AntPosEst, feeding cm-level positions back to DOFreqEst.
 
+> **2026-04-25 update — historical CAS analysis below is partly stale.**
+> The Phase A/B "CAS signal-code mismatch" finding from 2026-04-13 was
+> a partial truth.  The dominant CAS issue was actually an engine
+> unit-scaling bug (IGS-SSR `IDF013-021` mm-output treated as metres,
+> 1000× too large), fixed in commit 485612d.  Post-fix CAS works for
+> multi-constellation `gps,gal,bds` PPP — see
+> `docs/ssr-cross-ac-diagnostic-2026-04-25.md`.  The pilot-vs-data
+> signal-code analysis still holds for the `sig_id=2` GAL E1C
+> phase bias gap (one signal per SV unmapped, ~0.34 m impact).
+> WHU OSBC00WHU1 became the validated bias-source winner — paired
+> with CNES O/C, hits sub-meter from Leica with 18 cm cohort.
+
 Design for adding integer ambiguity resolution to peppar-fix.
 
 ## What we have today (float PPP)
