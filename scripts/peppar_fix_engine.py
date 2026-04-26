@@ -6547,6 +6547,18 @@ Two-phase operation:
                           "achieves 6.2× total reduction vs defaults "
                           "(mean 3D 9.30 → 1.51 m).  See "
                           "project_to_main_qpos_sweep_20260424.md.")
+    pos.add_argument("--outlier-mad-k", type=float, default=None,
+                     metavar="K",
+                     help="Per-epoch MAD-based outlier rejection threshold "
+                          "in PPPFilter.  Reject obs where "
+                          "|residual - median| > K · MAD, computed "
+                          "separately per kind (PR vs phase).  Default off "
+                          "(K=0).  Recommended K=2.0 for production — "
+                          "5.7× ABMF reduction (1.826m → 0.319m) over "
+                          "no-MAD baseline at Q_pos=1e-12.  Aggressive "
+                          "K=0.5 hits 0.191m on clean reference data but "
+                          "may over-reject on noisy lab data.  See "
+                          "project_mad_outlier_rejection_landed_20260426.md.")
     pos.add_argument("--timeout", type=int, default=3600,
                      help="Bootstrap timeout in seconds (default: 3600)")
     pos.add_argument("--watchdog-threshold", type=float, default=0.5,
@@ -6951,6 +6963,11 @@ Two-phase operation:
         # filter (bootstrap + AntPosEstThread fresh).
         from solve_ppp import PPPFilter as _PF
         _PF.Q_POS_CONVERGED = float(args.q_pos_converged)
+    if args.outlier_mad_k is not None:
+        # PPPFilter reads OUTLIER_MAD_K lazily inside _compute_H_z_at.
+        # Same propagation pattern as Q_POS_CONVERGED.
+        from solve_ppp import PPPFilter as _PF
+        _PF.OUTLIER_MAD_K = float(args.outlier_mad_k)
     if args.ar_elev_mask is None:
         args.ar_elev_mask = 25.0
     if args.do_type is None:
@@ -7040,6 +7057,9 @@ Two-phase operation:
     if args.q_pos_converged is not None:
         log.info(f"Q_pos_converged override: {args.q_pos_converged:g} "
                  f"(default 1e-4)")
+    if args.outlier_mad_k is not None:
+        log.info(f"Outlier MAD K override: {args.outlier_mad_k:g} "
+                 f"(default 0 = off; recommended 2.0)")
     if getattr(args, "phase_windup", False):
         log.info("Phase wind-up correction: enabled (Wu 1993)")
     if getattr(args, "gmf", False):
