@@ -165,5 +165,107 @@ def test_unknown_signal_is_skipped(tmp_rnx):
     assert epochs[0].obs["G16"]["L1C"][0] == pytest.approx(1.2e8, abs=1e-3)
 
 
+# ── make_writer_from_args smoke tests ─────────────────────────────── #
+#
+# These cover the bug shapes Bravo found and fixed in commits 1471216
+# + 8fa49fb on engine commit 9597c51:
+#   * NameError on undefined receiver_state at the rinex_writer init
+#   * UnboundLocalError on known_ecef referenced before assignment
+#
+# Both were engine-side scope errors, not RinexWriter API bugs.  The
+# fix was to move all init logic into make_writer_from_args() which
+# uses getattr/.get() defaults — so missing or unset args don't raise.
+# These tests exercise that helper with progressively-sparser args
+# Namespaces to verify nothing in the init path requires more state
+# than the helper signature promises.
+
+
+from argparse import Namespace
+from peppar_fix.rinex_writer import make_writer_from_args
+
+
+def test_make_writer_returns_none_when_rinex_out_unset(tmp_path):
+    """No --rinex-out → no writer.  No exception either."""
+    args = Namespace(rinex_out=None)
+    assert make_writer_from_args(args) is None
+
+
+def test_make_writer_returns_none_when_args_missing_attr(tmp_path):
+    """Args namespace without rinex_out at all → None.  Was a NameError
+    risk before the helper centralized the lookup."""
+    args = Namespace()
+    assert make_writer_from_args(args) is None
+
+
+def test_make_writer_minimal_args_no_optional_state(tmp_path):
+    """Bare minimum: only rinex_out is set; no known_pos, no
+    receiver metadata, no antenna identifier.  The helper must not
+    raise NameError or UnboundLocalError on any unset optional input.
+    This is the regression test for Bravo's 1471216 + 8fa49fb fixes."""
+    out = tmp_path / "minimal.rnx"
+    args = Namespace(rinex_out=str(out))
+    w = make_writer_from_args(args)
+    assert w is not None
+    # Header fields fall back to module defaults.
+    assert w._marker == "UFO1"  # default
+    assert w._antenna_type == "SFESPK6618H     NONE"  # default
+    assert w._approx_xyz == (0.0, 0.0, 0.0)  # no known_pos
+    w.close()
+
+
+def test_make_writer_with_known_pos_derives_approx_xyz(tmp_path):
+    """When --known-pos is supplied, approx_xyz comes from LLA→ECEF.
+    Catches the UnboundLocalError-on-known_ecef bug shape: known_pos
+    parsing must happen inline in the helper, not depend on a variable
+    populated elsewhere in the engine's main()."""
+    out = tmp_path / "known.rnx"
+    args = Namespace(
+        rinex_out=str(out),
+        known_pos="40.0,-90.0,200.0",  # placeholder — coords gitignored
+    )
+    w = make_writer_from_args(args)
+    assert w is not None
+    # ECEF for (40°, -90°, 200m) ≈ (0, -4_892_861, 4_078_114)
+    x, y, z = w._approx_xyz
+    assert abs(x) < 100, f"X={x} expected near 0 for lon=-90"
+    assert -4_900_000 < y < -4_880_000
+    assert 4_070_000 < z < 4_090_000
+    w.close()
+
+
+def test_make_writer_with_full_engine_args(tmp_path):
+    """Engine-realistic args: --rinex-out + --known-pos + --receiver-
+    antenna + --peer-antenna-ref.  All fields propagate to header
+    defaults correctly."""
+    out = tmp_path / "full.rnx"
+    args = Namespace(
+        rinex_out=str(out),
+        known_pos="40.0,-90.0,200.0",  # placeholder
+        receiver_antenna="SFESPK6618H     NONE",
+        peer_antenna_ref="UFO1",
+    )
+    w = make_writer_from_args(args)
+    assert w is not None
+    assert w._marker == "UFO1"
+    assert w._antenna_type == "SFESPK6618H     NONE"
+    w.close()
+
+
+def test_make_writer_known_pos_parse_failure_doesnt_raise(tmp_path):
+    """Garbage --known-pos string: helper should warn but still build
+    a writer with default approx_xyz.  The engine's startup must not
+    fail on a bad config string."""
+    out = tmp_path / "bad-pos.rnx"
+    args = Namespace(
+        rinex_out=str(out),
+        known_pos="this,is,not,coordinates",
+    )
+    # Should NOT raise — helper logs a warning and falls back.
+    w = make_writer_from_args(args)
+    assert w is not None
+    assert w._approx_xyz == (0.0, 0.0, 0.0)
+    w.close()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -5932,51 +5932,15 @@ def run(args):
     serial_kwargs = {}
     if qerr_store:
         serial_kwargs['qerr_store'] = qerr_store
-    rinex_writer_obj = None
-    if getattr(args, 'rinex_out', None):
-        from peppar_fix.rinex_writer import RinexWriter
-        # Look up receiver metadata for the RINEX header from the saved
-        # state file, when available.  Falls back to empty dict — the
-        # RinexWriter() kwargs below use ``.get(key, default)`` so missing
-        # values resolve to sensible header defaults.
-        receiver_meta: dict = {}
-        _rx_uid_for_meta = getattr(args, 'receiver_unique_id', None)
-        if _rx_uid_for_meta:
-            try:
-                from peppar_fix.receiver_state import load_receiver_state
-                _loaded = load_receiver_state(_rx_uid_for_meta)
-                if _loaded:
-                    receiver_meta = _loaded
-            except Exception as _e:
-                log.warning("RINEX writer: receiver-state lookup failed "
-                            "(%s); using header defaults", _e)
-        # known_ecef isn't yet populated at this point in run() — that
-        # happens further down via state-file load + --known-pos parse.
-        # Try the same sources here for the RINEX header's APPROX
-        # POSITION XYZ field.  PRIDE doesn't validate this — it
-        # re-fits position from observations — so any sensible value
-        # works, including (0, 0, 0) on cold start.
-        _approx_xyz = (0.0, 0.0, 0.0)
-        if getattr(args, 'known_pos', None):
-            try:
-                _lat, _lon, _alt = (float(s) for s in args.known_pos.split(','))
-                _approx_xyz = lla_to_ecef(_lat, _lon, _alt)
-            except Exception:
-                pass
-        rinex_writer_obj = RinexWriter(
-            args.rinex_out,
-            marker_name=getattr(args, 'peer_antenna_ref', '') or 'UFO1',
-            approx_xyz=tuple(_approx_xyz),
-            antenna_type=(getattr(args, 'receiver_antenna', None) or
-                          'SFESPK6618H     NONE'),
-            receiver_model=str(receiver_meta.get('module', 'ZED-F9T')),
-            receiver_fw=str(receiver_meta.get('firmware', '')),
-            receiver_serial=str(receiver_meta.get('unique_id_hex', '')),
-            antenna_serial=getattr(args, 'peer_antenna_ref', '') or '',
-            observer='PePPAR Fix engine',
-            agency='lab',
-            interval_s=1.0,
-        )
+    # Build the RINEX writer if --rinex-out was set.  All init logic
+    # lives in peppar_fix.rinex_writer.make_writer_from_args so it's
+    # unit-testable; that module's tests cover the missing-arg /
+    # undefined-variable bug shapes that previously shipped (NameError
+    # on receiver_state, UnboundLocalError on known_ecef — fixed in
+    # 1471216 + 8fa49fb).
+    from peppar_fix.rinex_writer import make_writer_from_args
+    rinex_writer_obj = make_writer_from_args(args, log=log)
+    if rinex_writer_obj is not None:
         log.info(f"RINEX OBS writer: {args.rinex_out}")
         serial_kwargs['rinex_writer'] = rinex_writer_obj
     t_serial = threading.Thread(

@@ -47,6 +47,16 @@ RINEX 3.04 OBS, ASCII.  Per RINEX spec:
 
 We declare the maximal F9T signal set per constellation at header write
 time; absent observations write as blanks (16 spaces).
+
+## Engine integration
+
+``make_writer_from_args(args)`` constructs a configured RinexWriter
+from an argparse-style Namespace.  Returns None if ``--rinex-out``
+isn't set.  Engine's main() calls this once at startup so the
+init-side logic (receiver-meta lookup, approx XYZ derivation) lives
+in this module — both for testability and to prevent the kind of
+NameError/UnboundLocalError bugs that shipped in commit 9597c51 and
+were caught by Bravo (commits 1471216 + 8fa49fb).
 """
 
 from __future__ import annotations
@@ -305,3 +315,80 @@ class RinexWriter:
 
     def __exit__(self, *args):
         self.close()
+
+
+# ── Engine integration helper ─────────────────────────────────────── #
+
+def make_writer_from_args(args, log=None):
+    """Build a RinexWriter from a parsed-args Namespace.
+
+    Returns ``None`` if ``args.rinex_out`` isn't set (the no-op case).
+
+    Lives in this module rather than inline in ``peppar_fix_engine.py``
+    so the init logic is unit-testable and can't ship NameError /
+    UnboundLocalError bugs against undefined call-site locals.
+
+    All optional inputs are looked up via ``getattr(args, name, None)``
+    and ``.get(key, default)``, so missing values resolve cleanly to
+    sensible header defaults.
+
+    Engine should call this at startup once, after argparse has parsed
+    args and before threads start:
+
+    ```python
+    from peppar_fix.rinex_writer import make_writer_from_args
+    rinex_writer_obj = make_writer_from_args(args, log=log)
+    if rinex_writer_obj is not None:
+        serial_kwargs['rinex_writer'] = rinex_writer_obj
+    ```
+    """
+    rinex_out = getattr(args, 'rinex_out', None)
+    if not rinex_out:
+        return None
+
+    # Receiver metadata lookup — feed RinexWriter's header from the
+    # saved receiver-state file when one exists.  Missing fields fall
+    # through to the kwargs' defaults.
+    receiver_meta: dict = {}
+    rx_uid = getattr(args, 'receiver_unique_id', None)
+    if rx_uid:
+        try:
+            from peppar_fix.receiver_state import load_receiver_state
+            loaded = load_receiver_state(rx_uid)
+            if loaded:
+                receiver_meta = loaded
+        except Exception as e:
+            if log is not None:
+                log.warning("RINEX writer: receiver-state lookup failed "
+                            "(%s); using header defaults", e)
+
+    # Derive APPROX POSITION XYZ from --known-pos if supplied.  PRIDE
+    # doesn't validate this — it re-fits position from observations —
+    # so any sensible value works, including (0, 0, 0) on cold start.
+    approx_xyz = (0.0, 0.0, 0.0)
+    known_pos = getattr(args, 'known_pos', None)
+    if known_pos:
+        try:
+            lat, lon, alt = (float(s) for s in known_pos.split(','))
+            # Lazy import to keep this module's deps light.
+            from solve_ppp import lla_to_ecef
+            approx_xyz = lla_to_ecef(lat, lon, alt)
+        except Exception as e:
+            if log is not None:
+                log.warning("RINEX writer: --known-pos parse failed "
+                            "(%s); APPROX XYZ defaulting to 0,0,0", e)
+
+    return RinexWriter(
+        rinex_out,
+        marker_name=getattr(args, 'peer_antenna_ref', '') or 'UFO1',
+        approx_xyz=tuple(approx_xyz),
+        antenna_type=(getattr(args, 'receiver_antenna', None) or
+                      'SFESPK6618H     NONE'),
+        receiver_model=str(receiver_meta.get('module', 'ZED-F9T')),
+        receiver_fw=str(receiver_meta.get('firmware', '')),
+        receiver_serial=str(receiver_meta.get('unique_id_hex', '')),
+        antenna_serial=getattr(args, 'peer_antenna_ref', '') or '',
+        observer='PePPAR Fix engine',
+        agency='lab',
+        interval_s=1.0,
+    )
