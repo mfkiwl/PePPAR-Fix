@@ -472,6 +472,12 @@ def run(args) -> int:
         PPPFilter.OUTLIER_MAD_K = mad_k_override
         log.info("PPPFilter.OUTLIER_MAD_K overridden: %.2f (default 0 = off)",
                  mad_k_override)
+    ztd_pwc_window_s = getattr(args, "ztd_pwc_window_s", None)
+    if ztd_pwc_window_s is not None:
+        from solve_ppp import PPPFilter
+        PPPFilter.ZTD_PWC_WINDOW_S = float(ztd_pwc_window_s)
+        log.info("PPPFilter.ZTD_PWC_WINDOW_S overridden: %.0f s (PWC ZTD)",
+                 ztd_pwc_window_s)
     sig_pr_override = getattr(args, "sigma_pr", None)
     if sig_pr_override is not None:
         import solve_ppp as _sp
@@ -482,6 +488,13 @@ def run(args) -> int:
         import solve_ppp as _sp
         _sp._SIGMA_PHI_IF_OVERRIDE = sig_phi_override
         log.info("SIGMA_PHI_IF overridden: %.4f m (default 0.03)", sig_phi_override)
+    elev_policy = getattr(args, "elev_weight", None)
+    if elev_policy is not None:
+        from solve_ppp import PPPFilter
+        PPPFilter.ELEV_WEIGHT_POLICY = elev_policy
+        log.info("PPPFilter.ELEV_WEIGHT_POLICY = %s "
+                 "(default 'legacy'; 'pride' = 1/(2·sin(e)) below 30°)",
+                 elev_policy)
     ou_tau = getattr(args, "ztd_ou_tau", None)
     ou_sig = getattr(args, "ztd_ou_sigma", None)
     if (ou_tau is not None) ^ (ou_sig is not None):
@@ -1356,6 +1369,16 @@ def main():
                          "to 1e-10) are more defensible and test "
                          "whether the Q2 overconfidence is driven by "
                          "position-state wander vs other mechanisms.")
+    ap.add_argument("--elev-weight", choices=["legacy", "pride"],
+                    default=None,
+                    help="Elevation-weighting policy for observation σ. "
+                         "'legacy' (default): 1/sin(e) at all elevations.  "
+                         "'pride': 1/(2·sin(e)) below 30°, no extra "
+                         "weighting above — matches PRIDE-PPPAR's "
+                         "gpsmod.f90 policy; expected to help close some "
+                         "of the 95× streaming-EKF-vs-PRIDE gap on clean "
+                         "reference data per "
+                         "project_to_main_pride_lsq_findings_20260426.")
     ap.add_argument("--outlier-mad-k", type=float, default=None, metavar="K",
                     help="Per-epoch MAD-based outlier rejection threshold. "
                          "Reject obs where |residual - median| > K · MAD, "
@@ -1364,6 +1387,15 @@ def main():
                          "Aggressive K=0.5-2 catches more outliers but risks "
                          "over-rejecting noisy-but-valid obs.  See "
                          "project_to_main_pride_lsq_findings_20260426.md.")
+    ap.add_argument("--ztd-pwc-window-s", type=float, default=None,
+                    metavar="SECONDS",
+                    help="Enable PRIDE-style piece-wise constant ZTD model "
+                         "with N-second segment length (typical 3600 = "
+                         "PWC-60).  Within a segment, ZTD process noise ≈ "
+                         "0; at segment boundaries, P[ZTD] is re-inflated "
+                         "to seed sigma so a fresh estimate forms.  "
+                         "Disabled by default (random walk).  See "
+                         "project_to_main_pride_single_pass_20260426.md.")
     ap.add_argument("--ztd-ou-tau", type=float, default=None, metavar="SECONDS",
                     help="Mean-reversion time constant τ (seconds) for "
                          "the ZTD Ornstein-Uhlenbeck process model.  "
