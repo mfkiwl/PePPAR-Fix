@@ -583,7 +583,7 @@ class Nav2PositionStore:
 
 def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                    ssr=None, qerr_store=None, config_queue=None, driver=None,
-                   raw_callback=None, nav2_store=None):
+                   raw_callback=None, nav2_store=None, rinex_writer=None):
     """Read UBX messages from a GNSS device.
 
     Puts (timestamp, observations_list) tuples onto obs_queue for each
@@ -1018,6 +1018,32 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     # Compute GPS time from RAWX header
                     gps_epoch = datetime(1980, 1, 6, tzinfo=timezone.utc)
                     gps_time = gps_epoch + timedelta(weeks=week, seconds=rcvTow)
+
+                    # Optional: write a RINEX OBS record for offline
+                    # cross-engine verification (PRIDE PPP-AR, RTKLIB).
+                    # Re-shape raw_obs from {sv:{role:{sig_name,...}}}
+                    # to {sv:{sig_name:{pr,cp,cno,lock_ms,half_cyc}}}.
+                    if rinex_writer is not None:
+                        try:
+                            rnx_obs = {}
+                            for sv, roles in raw_obs.items():
+                                per_sig = {}
+                                for role, fields in roles.items():
+                                    sig = fields.get('sig_name')
+                                    if sig is None:
+                                        continue
+                                    per_sig[sig] = {
+                                        'pr':       fields.get('pr'),
+                                        'cp':       fields.get('cp'),
+                                        'cno':      fields.get('cno'),
+                                        'lock_ms':  fields.get('lock_ms'),
+                                        'half_cyc': fields.get('half_cyc', True),
+                                    }
+                                if per_sig:
+                                    rnx_obs[sv] = per_sig
+                            rinex_writer.write_epoch(gps_time, rnx_obs)
+                        except Exception as e:
+                            log.warning(f"rinex_writer.write_epoch failed: {e}")
 
                     recv_mono = None
                     queue_remains = None

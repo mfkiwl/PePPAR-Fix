@@ -1,0 +1,307 @@
+"""RINEX 3.04 OBS writer for PePPAR Fix engine observations.
+
+Sister module to ``scripts/regression/rinex_reader.py``.  The reader
+parses observed RINEX OBS files for the regression harness; this writer
+emits a RINEX OBS file from the live engine's observation stream so we
+can hand the recorded session to a reference engine (PRIDE PPP-AR,
+RTKLIB) for cross-verification.
+
+## Why this exists (2026-04-25)
+
+The 2x2 SSR isolation showed CNES biases land ~1.2 m west of WHU biases
+on the same orbit/clock at our site.  Could be a real AC datum
+difference or a subtle bias-magnitude-sensitive bug in our application.
+To distinguish, we need to feed the SAME observations our engine
+processed into a reference PPP engine (e.g. PRIDE PPP-AR) with each
+AC's products.  PRIDE consumes RINEX OBS; this writer produces it.
+
+## Usage
+
+```python
+from peppar_fix.rinex_writer import RinexWriter
+
+w = RinexWriter(
+    "/tmp/run.rnx",
+    marker_name="UFO1",
+    approx_xyz=(157544.0, -4756190.0, 4232770.0),  # rough is fine
+    antenna_type="SFESPK6618H     NONE",
+    receiver_model="ZED-F9T",
+    receiver_fw="TIM 2.25",
+)
+
+# Per epoch in serial_reader's loop, after raw_obs is built:
+w.write_epoch(epoch_dt, raw_obs)
+# raw_obs format: { 'G16': { 'GPS-L1CA': {'pr': ..., 'cp': ..., 'cno': ..., 'half_cyc': ..., 'lock_ms': ...}, ... }, ... }
+
+w.close()
+```
+
+## Format
+
+RINEX 3.04 OBS, ASCII.  Per RINEX spec:
+- Header in fixed-column format with line markers in cols 61-80
+- Epoch line: ``> YYYY MM DD HH MM SS.sssssss EF NN``
+- Per-SV line: ``Gnn`` then 16-char wide observation fields (3-decimal
+  pseudorange/phase + 1 char LLI + 1 char SSI), in the order declared
+  by SYS / # / OBS TYPES.
+
+We declare the maximal F9T signal set per constellation at header write
+time; absent observations write as blanks (16 spaces).
+"""
+
+from __future__ import annotations
+
+import math
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Per-system observation type list (RINEX 3.x 3-char codes), in the
+# order they will appear per epoch.  Covers the maximal F9T fleet
+# (F9T-10/L2 and L5 profiles, F9T-20B).  Each (sys, sig_internal)
+# maps to one (band, attr) where the RINEX type letter is C, L, S
+# (pseudorange / carrier phase / SNR).  Doppler omitted — engine
+# doesn't write it today.
+#
+# Internal sig name → (band+attr, RINEX-type-prefix)
+_INTERNAL_TO_BAND_ATTR: dict[str, str] = {
+    # GPS
+    "GPS-L1CA": "1C",
+    "GPS-L2CL": "2L",
+    "GPS-L2W":  "2W",
+    "GPS-L5Q":  "5Q",
+    "GPS-L5I":  "5I",
+    # Galileo
+    "GAL-E1C":  "1C",
+    "GAL-E1B":  "1B",
+    "GAL-E5aQ": "5Q",
+    "GAL-E5aI": "5I",
+    "GAL-E5bQ": "7Q",
+    "GAL-E5bI": "7I",
+    # BeiDou
+    "BDS-B1I":  "2I",
+    "BDS-B2I":  "7I",
+    "BDS-B2aI": "5I",
+    "BDS-B2aQ": "5Q",
+    "BDS-B3I":  "6I",
+}
+
+# Per-system declared observation types (header order).  Choose a
+# superset that covers any F9T tracking profile we might run.  Order
+# matters: per-epoch fields are emitted in this order.
+_SYS_OBS_TYPES: dict[str, list[str]] = {
+    "G": ["C1C", "L1C", "S1C",
+          "C2L", "L2L", "S2L",
+          "C2W", "L2W", "S2W",
+          "C5Q", "L5Q", "S5Q"],
+    "E": ["C1C", "L1C", "S1C",
+          "C5Q", "L5Q", "S5Q",
+          "C7Q", "L7Q", "S7Q"],
+    "C": ["C2I", "L2I", "S2I",
+          "C7I", "L7I", "S7I",
+          "C5I", "L5I", "S5I",
+          "C5Q", "L5Q", "S5Q",
+          "C6I", "L6I", "S6I"],
+}
+
+
+def _sys_prefix(sv: str) -> str:
+    """SV id 'G16' → 'G'; supports G, E, C, R, J, S, I."""
+    return sv[0]
+
+
+def _internal_to_obs_codes(sig_internal: str) -> tuple[str, str, str]:
+    """Internal sig name like 'GPS-L1CA' → ('C1C', 'L1C', 'S1C')."""
+    band_attr = _INTERNAL_TO_BAND_ATTR.get(sig_internal)
+    if band_attr is None:
+        raise ValueError(f"unknown internal signal name: {sig_internal!r}")
+    return f"C{band_attr}", f"L{band_attr}", f"S{band_attr}"
+
+
+def _fmt_obs(value: float | None, lli: int = 0, ssi: int = 0) -> str:
+    """Format one observation field — 14.3 + LLI(1) + SSI(1) = 16 chars.
+
+    Blank if value is None or NaN.  Per RINEX 3.x §5.5: missing values
+    are 16 spaces.  LLI: 0=no slip, 1=lost-lock-since-last; bit 1 (=2)
+    half-cycle ambiguity present.  SSI: 1-9 mapped from C/N0; 0=undef.
+    """
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return " " * 16
+    return f"{value:14.3f}{lli:1d}{ssi:1d}"
+
+
+def _cno_to_ssi(cno: float | None) -> int:
+    """Map C/N0 (dB-Hz) to RINEX SSI 1-9.  See RINEX 3.x §5.5.
+
+    1 ≈ < 12 dB-Hz (≈ minimum possible)
+    9 ≈ ≥ 54 dB-Hz (≈ maximum)
+    Linear in between, clamped.
+    """
+    if cno is None or (isinstance(cno, float) and math.isnan(cno)):
+        return 0
+    ssi = int((cno - 12.0) / 6.0) + 1
+    return max(1, min(9, ssi))
+
+
+class RinexWriter:
+    """Stream-write a RINEX 3.04 OBS file as the engine processes epochs.
+
+    Lazy header: emitted on the first ``write_epoch`` call so we can
+    populate TIME OF FIRST OBS from the actual data.
+    """
+
+    def __init__(self, path: str | Path, marker_name: str,
+                 approx_xyz: tuple[float, float, float],
+                 antenna_type: str,
+                 receiver_model: str = "ZED-F9T",
+                 receiver_fw: str = "",
+                 receiver_serial: str = "",
+                 antenna_serial: str = "",
+                 observer: str = "PePPAR Fix",
+                 agency: str = "",
+                 interval_s: float = 1.0):
+        self._path = Path(path)
+        self._marker = marker_name
+        self._approx_xyz = approx_xyz
+        self._antenna_type = antenna_type
+        self._rx_model = receiver_model
+        self._rx_fw = receiver_fw
+        self._rx_serial = receiver_serial
+        self._ant_serial = antenna_serial
+        self._observer = observer
+        self._agency = agency
+        self._interval = interval_s
+        self._fp = open(self._path, "w")
+        self._header_written = False
+        self._last_lock_ms: dict[tuple[str, str], int] = {}
+        self._epoch_count = 0
+
+    def _write_header(self, first_epoch: datetime) -> None:
+        """Emit the RINEX 3.04 OBS header with TIME OF FIRST OBS set."""
+        f = self._fp
+        # Version line — fixed columns
+        f.write(f"{'3.04':>9} {'':<11}"
+                f"{'OBSERVATION DATA':<20}{'M':<20}"
+                f"RINEX VERSION / TYPE\n")
+        # Pgm / Run by / Date
+        now = datetime.now(timezone.utc).strftime("%Y%m%d %H%M%S UTC")
+        f.write(f"{'PePPAR Fix engine':<20}{self._observer:<20}"
+                f"{now:<20}PGM / RUN BY / DATE\n")
+        # Marker + observer + agency
+        f.write(f"{self._marker:<60}MARKER NAME\n")
+        f.write(f"{'GEODETIC':<20}{'':<40}MARKER TYPE\n")
+        f.write(f"{self._observer:<20}{self._agency:<40}OBSERVER / AGENCY\n")
+        # Receiver: type + version + serial
+        f.write(f"{self._rx_serial:<20}{self._rx_model:<20}"
+                f"{self._rx_fw:<20}REC # / TYPE / VERS\n")
+        f.write(f"{self._ant_serial:<20}{self._antenna_type:<40}"
+                f"ANT # / TYPE\n")
+        x, y, z = self._approx_xyz
+        f.write(f"{x:14.4f}{y:14.4f}{z:14.4f}{'':<18}APPROX POSITION XYZ\n")
+        # Antenna delta H/E/N (we don't track these — use 0 0 0)
+        f.write(f"{0.0:14.4f}{0.0:14.4f}{0.0:14.4f}{'':<18}"
+                f"ANTENNA: DELTA H/E/N\n")
+        # Per-system obs types
+        for sys_id in ("G", "E", "C"):
+            obs = _SYS_OBS_TYPES[sys_id]
+            n = len(obs)
+            # First continuation line: "X NN OBS1 OBS2 ... OBS13" (max
+            # 13 codes per line per RINEX 3.x).
+            head = f"{sys_id:<1}  {n:>3}"
+            cells = "".join(f" {c}" for c in obs[:13])
+            tail = " " * (60 - len(head) - len(cells))
+            f.write(f"{head}{cells}{tail}SYS / # / OBS TYPES\n")
+            for chunk_start in range(13, n, 13):
+                cells = "".join(f" {c}" for c in obs[chunk_start:chunk_start+13])
+                f.write(f"{'':<6}{cells:<54}SYS / # / OBS TYPES\n")
+        # Interval
+        f.write(f"{self._interval:10.3f}{'':<50}INTERVAL\n")
+        # Time of first obs (GPS time scale)
+        f.write(
+            f"{first_epoch.year:6d}"
+            f"{first_epoch.month:6d}"
+            f"{first_epoch.day:6d}"
+            f"{first_epoch.hour:6d}"
+            f"{first_epoch.minute:6d}"
+            f"{first_epoch.second + first_epoch.microsecond * 1e-6:13.7f}"
+            f"     GPS         "
+            f"TIME OF FIRST OBS\n")
+        f.write(f"{'':<60}END OF HEADER\n")
+
+    def write_epoch(self, epoch_dt: datetime,
+                    raw_obs: dict[str, dict[str, dict]]) -> None:
+        """Write one epoch of observations.
+
+        epoch_dt: epoch timestamp (GPS-time-equivalent UTC).
+        raw_obs: { sv: { sig_internal: { 'pr': float, 'cp': float,
+                  'cno': float, 'half_cyc': bool, 'lock_ms': int }, ... }, ... }
+
+        SVs / signals not present are silently omitted (RINEX writer
+        emits blank fields for any declared obs-type the SV didn't
+        track this epoch).
+        """
+        f = self._fp
+        if not self._header_written:
+            self._write_header(epoch_dt)
+            self._header_written = True
+
+        usable_svs = [sv for sv, sigs in raw_obs.items()
+                      if _sys_prefix(sv) in _SYS_OBS_TYPES and sigs]
+        n = len(usable_svs)
+        if n == 0:
+            return
+
+        sec = epoch_dt.second + epoch_dt.microsecond * 1e-6
+        f.write(f"> {epoch_dt.year:4d} "
+                f"{epoch_dt.month:2d} {epoch_dt.day:2d} "
+                f"{epoch_dt.hour:2d} {epoch_dt.minute:2d}"
+                f"{sec:11.7f}  0{n:3d}\n")
+
+        for sv in sorted(usable_svs):
+            sys_id = _sys_prefix(sv)
+            obs_codes = _SYS_OBS_TYPES[sys_id]
+            cells: dict[str, str] = {}
+            for sig_internal, fields in raw_obs[sv].items():
+                try:
+                    c_code, l_code, s_code = _internal_to_obs_codes(sig_internal)
+                except ValueError:
+                    continue
+                # LLI bit 0 = lost-lock since last; we infer from a drop
+                # in lock_ms.
+                lock_ms = fields.get("lock_ms")
+                key = (sv, sig_internal)
+                last = self._last_lock_ms.get(key)
+                lli = 0
+                if (lock_ms is not None and last is not None
+                        and lock_ms < last):
+                    lli = 1
+                if lock_ms is not None:
+                    self._last_lock_ms[key] = lock_ms
+                if not fields.get("half_cyc", True):
+                    lli |= 2  # bit 1 = half-cycle ambiguity
+                ssi = _cno_to_ssi(fields.get("cno"))
+                cp_cyc = fields.get("cp")  # cycles
+                pr_m = fields.get("pr")    # metres
+                if c_code in obs_codes:
+                    cells[c_code] = _fmt_obs(pr_m, lli, ssi)
+                if l_code in obs_codes:
+                    cells[l_code] = _fmt_obs(cp_cyc, lli, ssi)
+                if s_code in obs_codes:
+                    cells[s_code] = _fmt_obs(fields.get("cno"), 0, 0)
+
+            line = sv + "".join(cells.get(c, " " * 16) for c in obs_codes)
+            f.write(line + "\n")
+        self._epoch_count += 1
+        if self._epoch_count % 60 == 0:
+            self._fp.flush()
+
+    def close(self) -> None:
+        if self._fp:
+            self._fp.flush()
+            self._fp.close()
+            self._fp = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()

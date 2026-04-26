@@ -5905,6 +5905,26 @@ def run(args):
     serial_kwargs = {}
     if qerr_store:
         serial_kwargs['qerr_store'] = qerr_store
+    rinex_writer_obj = None
+    if getattr(args, 'rinex_out', None):
+        from peppar_fix.rinex_writer import RinexWriter
+        receiver_meta = receiver_state.identity if receiver_state else {}
+        rinex_writer_obj = RinexWriter(
+            args.rinex_out,
+            marker_name=getattr(args, 'peer_antenna_ref', '') or 'UFO1',
+            approx_xyz=tuple(known_ecef) if known_ecef is not None else (0.0, 0.0, 0.0),
+            antenna_type=(getattr(args, 'receiver_antenna', None) or
+                          'SFESPK6618H     NONE'),
+            receiver_model=str(receiver_meta.get('module', 'ZED-F9T')),
+            receiver_fw=str(receiver_meta.get('firmware', '')),
+            receiver_serial=str(receiver_meta.get('unique_id_hex', '')),
+            antenna_serial=getattr(args, 'peer_antenna_ref', '') or '',
+            observer='PePPAR Fix engine',
+            agency='lab',
+            interval_s=1.0,
+        )
+        log.info(f"RINEX OBS writer: {args.rinex_out}")
+        serial_kwargs['rinex_writer'] = rinex_writer_obj
     t_serial = threading.Thread(
         target=serial_reader,
         args=(args.serial, args.baud, obs_queue, stop_event, beph, systems, ssr),
@@ -6828,6 +6848,13 @@ Two-phase operation:
     # Output
     out = ap.add_argument_group("Output")
     out.add_argument("--out", help="Solution CSV output file")
+    out.add_argument("--rinex-out", default=None,
+                     help="Optional path to write a RINEX 3.04 OBS file "
+                          "of the observations the engine processed.  "
+                          "For offline cross-engine verification (PRIDE "
+                          "PPP-AR, RTKLIB) — see "
+                          "docs/ssr-cross-ac-diagnostic-2026-04-25.md.  "
+                          "Off by default (no overhead).")
     out.add_argument("--duration", type=int, default=None,
                      help="Run duration in seconds (0 = unlimited)")
     out.add_argument("--gate-stats", help="Optional JSON output for strict sink gate statistics")
