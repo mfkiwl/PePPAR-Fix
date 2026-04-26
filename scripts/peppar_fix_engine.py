@@ -5950,10 +5950,23 @@ def run(args):
             except Exception as _e:
                 log.warning("RINEX writer: receiver-state lookup failed "
                             "(%s); using header defaults", _e)
+        # known_ecef isn't yet populated at this point in run() — that
+        # happens further down via state-file load + --known-pos parse.
+        # Try the same sources here for the RINEX header's APPROX
+        # POSITION XYZ field.  PRIDE doesn't validate this — it
+        # re-fits position from observations — so any sensible value
+        # works, including (0, 0, 0) on cold start.
+        _approx_xyz = (0.0, 0.0, 0.0)
+        if getattr(args, 'known_pos', None):
+            try:
+                _lat, _lon, _alt = (float(s) for s in args.known_pos.split(','))
+                _approx_xyz = lla_to_ecef(_lat, _lon, _alt)
+            except Exception:
+                pass
         rinex_writer_obj = RinexWriter(
             args.rinex_out,
             marker_name=getattr(args, 'peer_antenna_ref', '') or 'UFO1',
-            approx_xyz=tuple(known_ecef) if known_ecef is not None else (0.0, 0.0, 0.0),
+            approx_xyz=tuple(_approx_xyz),
             antenna_type=(getattr(args, 'receiver_antenna', None) or
                           'SFESPK6618H     NONE'),
             receiver_model=str(receiver_meta.get('module', 'ZED-F9T')),
