@@ -435,32 +435,45 @@ class LogReader:
             self.state.engine_peer_bus_active = True
 
     def _parse_phase_bias_lookup(self, line: str) -> None:
-        """Look for ``Phase bias lookup: <sv> f1=...(HIT|MISS) f2=...(HIT|MISS)``.
+        """Detect NL-capable constellations from phase-bias lookup logs.
 
-        Engine emits one per SV as it's first processed with SSR
-        biases active.  Both HITs → constellation of this SV can
-        reach NL (the IF ambiguity has a matched phase-bias pair).
+        Engine emits one log line per (SV, signal-pair) the first time
+        that pair's biases are looked up — and re-emits whenever the
+        bias values change.  Two log line formats are recognized:
 
-        We latch the constellation as NL-capable on the first HIT-
-        HIT and never downgrade.  A single confirmed SV proves the
-        bias pair exists in the stream for that system — other SVs
-        of the same constellation may fall in and out of individual
-        HIT status (newly-arrived SVs, stale biases) but the
-        capability is a property of the correction stream, not of
-        any one SV.
+        Old format (pre-2026-04-25):
+            ``Phase bias lookup: G24 f1=...(HIT) f2=...(HIT) avail=...``
+        New format (commit 24a30ab and later):
+            ``[PB_APPLIED] G24 f1=GPS-L1CA→C1C val=+0.123m
+                                f2=GPS-L5Q→C5Q val=+0.456m avail=...``
 
-        The complement is the useful signal here: if no SV of
-        constellation X ever shows HIT-HIT, X stays out of the set
-        and the widget renders ``-`` for NL cells — matches the
-        ptpmon+CNES reality where GPS's L2W tracking never lines
-        up with CNES's L2L phase-bias publication.
+        In the new format, HIT is signaled by a numeric ``val=±N.NNNm``
+        and MISS by the literal ``val=MISSm``.  Both formats encode the
+        same information; the parser accepts either.
+
+        Both HITs → constellation of this SV can reach NL.  We latch
+        the constellation as NL-capable on the first HIT-HIT and never
+        downgrade.  A single confirmed SV proves the bias pair exists
+        in the stream for that system — other SVs may fall in and out
+        of individual HIT status, but capability is a property of the
+        correction stream, not of any one SV.
+
+        The complement is the useful signal: if no SV of constellation
+        X ever shows HIT-HIT, X stays out of the set and the widget
+        renders ``-`` for NL cells.
         """
-        m = _PHASE_BIAS_LOOKUP_RE.search(line)
-        if m is None:
-            return
-        sv = m.group("sv")
-        f1_ok = m.group("f1_status") == "HIT"
-        f2_ok = m.group("f2_status") == "HIT"
+        m = _PB_APPLIED_RE.search(line)
+        if m is not None:
+            sv = m.group("sv")
+            f1_ok = m.group("f1_val") != "MISS"
+            f2_ok = m.group("f2_val") != "MISS"
+        else:
+            m = _PHASE_BIAS_LOOKUP_RE.search(line)
+            if m is None:
+                return
+            sv = m.group("sv")
+            f1_ok = m.group("f1_status") == "HIT"
+            f2_ok = m.group("f2_status") == "HIT"
         if not (f1_ok and f2_ok):
             return
         prefix = sv[:1]
@@ -592,6 +605,17 @@ _PHASE_BIAS_LOOKUP_RE = re.compile(
     r"Phase bias lookup: (?P<sv>[A-Z]\d{2,3})\s+"
     r"f1=.*?\((?P<f1_status>HIT|MISS)\)\s+"
     r"f2=.*?\((?P<f2_status>HIT|MISS)\)"
+)
+
+# Matches the engine's newer ``[PB_APPLIED]`` form (commit 24a30ab).
+# Capture the SV id and the two ``val=...m`` fields.  HIT shows the
+# numeric value (e.g. ``val=+0.123m`` or ``val=-2.876m``), MISS shows
+# the literal ``val=MISSm``.  We capture the value-or-MISS token; the
+# parser distinguishes by string compare to "MISS".
+_PB_APPLIED_RE = re.compile(
+    r"\[PB_APPLIED\]\s+(?P<sv>[A-Z]\d{2,3})\s+"
+    r"f1=\S+→\S+\s+val=(?P<f1_val>MISS|[-+]?[\d.]+)m\s+"
+    r"f2=\S+→\S+\s+val=(?P<f2_val>MISS|[-+]?[\d.]+)m"
 )
 
 # Matches ``[AntPosEst 4200] positionσ=0.023m pos=(LAT, LON, ALT) ...``.

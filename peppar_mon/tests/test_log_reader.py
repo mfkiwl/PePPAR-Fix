@@ -506,6 +506,47 @@ class PhaseBiasCapabilityTest(unittest.TestCase):
         _wait_until(lambda: r.state.lines_read >= 2)
         self.assertNotIn("G", r.state.nl_capable_constellations)
 
+    def test_pb_applied_new_format_both_hit(self):
+        """Engine commit 24a30ab changed the log format from
+        ``Phase bias lookup: ... (HIT)`` to ``[PB_APPLIED] ... val=±N.NNNm``.
+        Both formats must produce NL-capability latching, otherwise
+        peppar-mon shows ``-`` for hosts running newer engines (Phase 1
+        overnight ran with this format and Anchoring column went blank).
+        """
+        self.path.write_text(
+            "2026-04-25 22:00:00,000 INFO [PB_APPLIED] E34 "
+            "f1=GAL-E1C→C1C val=+0.123m f2=GAL-E5bQ→C7Q val=+0.456m "
+            "avail=['L1C', 'L5Q', 'L7Q']\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: "E" in r.state.nl_capable_constellations)
+        self.assertIn("E", r.state.nl_capable_constellations)
+
+    def test_pb_applied_new_format_miss_keeps_out(self):
+        """[PB_APPLIED] line where f2 has ``val=MISSm`` → not a HIT-HIT,
+        constellation stays out of nl_capable_constellations."""
+        self.path.write_text(
+            "2026-04-25 22:00:00,000 INFO [PB_APPLIED] G32 "
+            "f1=GPS-L1CA→C1C val=-0.004m f2=GPS-L5Q→C5Q val=MISSm "
+            "avail=['C1C', 'C2W', 'C5I']\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.lines_read >= 1)
+        self.assertNotIn("G", r.state.nl_capable_constellations)
+
+    def test_pb_applied_negative_value_counts_as_hit(self):
+        """Negative bias values (e.g. ``val=-2.876m``) are valid HITs —
+        the regex must accept signed floats and not interpret the
+        leading ``-`` as the MISS marker."""
+        self.path.write_text(
+            "2026-04-25 22:00:00,000 INFO [PB_APPLIED] E04 "
+            "f1=GAL-E1C→C1C val=-0.287m f2=GAL-E5aQ→C5Q val=-0.498m "
+            "avail=['L1C', 'L5Q', 'L7Q']\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: "E" in r.state.nl_capable_constellations)
+        self.assertIn("E", r.state.nl_capable_constellations)
+
     def test_one_hit_hit_sv_is_enough(self):
         """Capability latches on the first HIT-HIT for any SV of a
         constellation; subsequent MISS-containing lookups for other
