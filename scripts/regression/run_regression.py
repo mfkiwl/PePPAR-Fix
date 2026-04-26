@@ -858,7 +858,8 @@ def run(args) -> int:
                 offset_ecef = _enu_to_ecef @ np.array(
                     [e_off, n_off, u_off])
                 seeded_ecef = truth_ecef + offset_ecef
-                filt = PPPFilter()
+                filt = PPPFilter(clock_model=getattr(
+                    args, 'clock_model', None) or 'random_walk')
                 filt.initialize(
                     seeded_ecef, init_clk, systems=systems_lower)
                 # Force σ_pos to the requested converged-mode tightness.
@@ -871,7 +872,8 @@ def run(args) -> int:
                          "σ_pos = %.3f m (converged-mode entry)",
                          e_off, n_off, u_off, seed_sigma)
             else:
-                filt = PPPFilter()
+                filt = PPPFilter(clock_model=getattr(
+                    args, 'clock_model', None) or 'random_walk')
                 filt.initialize(
                     init_ecef, init_clk, systems=systems_lower)
 
@@ -1387,6 +1389,17 @@ def main():
                          "Aggressive K=0.5-2 catches more outliers but risks "
                          "over-rejecting noisy-but-valid obs.  See "
                          "project_to_main_pride_lsq_findings_20260426.md.")
+    ap.add_argument("--clock-model",
+                    choices=["random_walk", "calibrated_white", "wno"],
+                    default=None,
+                    help="Receiver clock state model in PPPFilter. "
+                         "'random_walk' (default): Q_clk ≈ unconstrained "
+                         "between epochs.  'calibrated_white': Q_clk "
+                         "from rx TCXO ADEV.  'wno': PRIDE-style white-"
+                         "noise — per-epoch P[CLK] reset to wide prior "
+                         "with cross-covariance zeroed; clock is an "
+                         "independent unknown each epoch.  See "
+                         "project_to_main_pride_single_pass_20260426.md.")
     ap.add_argument("--ztd-pwc-window-s", type=float, default=None,
                     metavar="SECONDS",
                     help="Enable PRIDE-style piece-wise constant ZTD model "

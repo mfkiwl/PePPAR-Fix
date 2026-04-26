@@ -113,7 +113,17 @@ BDS_MIN_PRN = 19  # Exclude BDS-2 GEO/IGSO
 F9T_TCXO_ADEV_1S_DEFAULT = 1e-8  # fractional frequency (dimensionless)
 CLOCK_RW_Q_DEFAULT = 1e6  # m²/s, the legacy random-walk Q coefficient
 
-CLOCK_MODELS = ('random_walk', 'calibrated_white')
+CLOCK_MODELS = ('random_walk', 'calibrated_white', 'wno')
+
+# 'wno' (PRIDE-style white-noise rx clock): the clock is treated as an
+# independent unknown at every epoch — no time correlation carried
+# forward.  Implemented by setting P[IDX_CLK,IDX_CLK] = WNO_CLK_PRIOR_VAR
+# and zeroing the cross-covariance with all other states at the start of
+# every predict().  Mathematically equivalent to Q_clk → ∞ between
+# epochs.  PRIDE-PPPAR uses WNO for the receiver clock; in batch LSE
+# this manifests as a fresh per-epoch parameter.  In streaming EKF the
+# per-epoch prior reset is the analogous operation.
+WNO_CLK_PRIOR_VAR = 1e10  # m² — wide-open prior, like initialize() uses
 
 # F9T signal name → RINEX observation code mapping
 SIG_TO_RINEX = {
@@ -375,7 +385,20 @@ class PPPFilter:
             q_pos = getattr(self, "Q_POS_CONVERGED", 1e-4)
         for i in range(3):
             Q[i, i] = q_pos * dt
-        Q[IDX_CLK, IDX_CLK] = self._q_clk() * dt
+        # Clock prior.  WNO mode resets the per-epoch prior on IDX_CLK
+        # by overwriting P[IDX_CLK,IDX_CLK] and zeroing the cross-
+        # covariance with all other states — this makes the clock an
+        # independent unknown each epoch, matching PRIDE-PPPAR's
+        # batch-LSE WNO formulation.  Other modes accumulate Q_clk
+        # additively (RW or calibrated_white).
+        if self.clock_model == 'wno':
+            self.P[IDX_CLK, :] = 0.0
+            self.P[:, IDX_CLK] = 0.0
+            self.P[IDX_CLK, IDX_CLK] = WNO_CLK_PRIOR_VAR
+            # Q[IDX_CLK,IDX_CLK] stays 0 — prior already absorbs
+            # all uncertainty.
+        else:
+            Q[IDX_CLK, IDX_CLK] = self._q_clk() * dt
         # Pinned ISBs (single-constellation runs) get no process noise so
         # they stay fixed at zero; IDX_CLK absorbs the reference system clock.
         pinned = getattr(self, '_pinned_isbs', set())
