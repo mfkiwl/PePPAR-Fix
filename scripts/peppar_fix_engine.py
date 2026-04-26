@@ -5935,7 +5935,21 @@ def run(args):
     rinex_writer_obj = None
     if getattr(args, 'rinex_out', None):
         from peppar_fix.rinex_writer import RinexWriter
-        receiver_meta = receiver_state.identity if receiver_state else {}
+        # Look up receiver metadata for the RINEX header from the saved
+        # state file, when available.  Falls back to empty dict — the
+        # RinexWriter() kwargs below use ``.get(key, default)`` so missing
+        # values resolve to sensible header defaults.
+        receiver_meta: dict = {}
+        _rx_uid_for_meta = getattr(args, 'receiver_unique_id', None)
+        if _rx_uid_for_meta:
+            try:
+                from peppar_fix.receiver_state import load_receiver_state
+                _loaded = load_receiver_state(_rx_uid_for_meta)
+                if _loaded:
+                    receiver_meta = _loaded
+            except Exception as _e:
+                log.warning("RINEX writer: receiver-state lookup failed "
+                            "(%s); using header defaults", _e)
         rinex_writer_obj = RinexWriter(
             args.rinex_out,
             marker_name=getattr(args, 'peer_antenna_ref', '') or 'UFO1',
