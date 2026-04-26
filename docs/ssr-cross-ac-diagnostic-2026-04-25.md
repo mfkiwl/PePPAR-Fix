@@ -156,34 +156,59 @@ autonomous code-only fix.**  Inter-host agreement under SSR is tight,
 which rules out per-host noise — it's a systematic obs-model bias on
 the SSR application path or in CNES products.
 
-## CAS attempt — invalid for diagnostic
+## CAS attempt — initial diagnosis was wrong; real bug found
 
 Tried CAS (SSRA01CAS1 on the GA Australian mirror) as a second
 provider: if CAS pulls in the same direction as CNES → bug is in our
 SSR application code; opposite direction → CNES product reference
-issue.  Result was unusable:
+issue.  Result was unusable on first try:
 
-- CAS uses IGS-SSR proprietary message IDs (`4076_NNN`) where CNES
-  uses standard RTCM (1060/1066/1243/1261).
-- Engine routes the messages but warns once at startup:
-  ```
-  WARNING Phase bias: unmapped signal E sig_id=2 (bias=-0.3377 m)
-          — add to signal map
-  ```
-  CAS's IGS-SSR signal-ID encoding for Galileo doesn't have an entry
-  in the engine's bias-map table.  That single GAL signal's bias is
-  silently dropped.
-- Result: filter divergence not convergence.  +30 m seed → ended -64
-  to -337 m E of truth (UFO1 inter-host spread **279 m**).  -30 m
-  seed → ended +370 to +384 m E of truth.  σ converged to ~1 m but
-  position is wildly wrong.
-- The single dropped phase bias (-0.34 m) can't account for 300 m of
-  divergence — there's almost certainly a second compatibility issue
-  too (orbit/clock IOD matching against broadcast under IGS-SSR
-  encoding, message-vintage handling, or per-SV ID translation).
+- Filter divergence not convergence.  +30 m seed → ended -64 to -337
+  m E of truth (UFO1 inter-host spread **279 m**).  -30 m seed →
+  ended +370 to +384 m E of truth.  σ converged to ~1 m but position
+  was wildly wrong.
 
-**Conclusion: CAS is not a usable diagnostic until the engine's
-IGS-SSR signal-map and IOD-matching paths are fixed.**
+**Initial diagnosis (wrong) — blamed signal-map gap.**  Engine warned
+"unmapped signal E sig_id=2 (bias=-0.3377 m)" once at startup.  We
+attributed the divergence to that, plus presumed IOD-matching gaps.
+But the dropped phase bias is 0.34 m — can't possibly cause 280 m.
+
+**Real cause (found 2026-04-25 evening) — IGS-SSR orbit/clock 1000×
+unit-scaling bug.**  pyrtcm decodes both standard RTCM SSR
+(`DF365`-`DF378`) and IGS SSR (`IDF013`-`IDF021`) orbit/clock
+fields with their spec's per-LSB scale factor — both return values
+in mm and mm/s.  The engine correctly /1000-converted the DF* path
+but used IDF* values raw, treating mm as already-metres.  Every
+IGS-SSR-format AC's orbit and clock corrections were 1000× too
+large.  CAS is the only IGS-SSR AC we use, so the bug only
+manifested there.
+
+Verified via pyrtcm field defs:
+```
+"DF365":  (INT, 22, 0.1, "Delta Radial"),
+"IDF013": (INT, 22, 0.1, "Delta Orbit Radial"),
+```
+Identical scale factors, both return mm.
+
+**Fix landed in commit `485612d`** — divides IDF013-021 by 1000 in
+the IGS-SSR branches of `_parse_orbit` and `_parse_clock`.
+5 regression tests in `tests/test_ssr_igs_unit_scaling.py` all pass.
+
+**Post-fix CAS validation on clkPoC3 (5-min single host):**
+
+| | east of Leica truth | σ |
+|---|---|---|
+| CAS pre-fix (5-min) | -64 m to -337 m | 1.0 m (filter "thinks" it's solved) |
+| **CAS post-fix (5-min)** | **-1.85 m mean ± 0.38 m** | 0.87 m |
+
+Reduction ~150× on absolute error.  CAS now produces PPP solutions
+in the same regime as CNES (-0.77 m) and WHU (+0.45 m).  The
+remaining ~1.85 m offset is consistent with normal AC datum
+differences.
+
+The signal-map gap (sig_id=2 unmapped) is a real but minor remaining
+item — CAS works without it, fixing it improves coverage by one
+signal per SV.  The disc_counter bug remains separately tracked.
 
 ## Path forward
 
