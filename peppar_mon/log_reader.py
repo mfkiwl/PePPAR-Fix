@@ -143,6 +143,23 @@ class LogState:
     #: observation or when the engine runs without a nav2_store.
     nav2_delta_m: Optional[float] = None
 
+    #: Latest n= count from the AntPosEst summary line — the number
+    #: of SVs actually contributing to the current epoch's filter
+    #: solution (post-mask, post-bias-availability).  Used as the
+    #: ground truth for "how many SVs are currently active."  The
+    #: per-constellation SvStateTable counts (derived from
+    #: ``sv_states``) should be in the same ballpark; a wide gap
+    #: triggers ``sv_state_count_warning`` to flag drift between
+    #: the state-machine's view and the filter's view.
+    antenna_n_active: Optional[int] = None
+
+    #: Set when len(non-WAITING sv_states) drifts substantially from
+    #: ``antenna_n_active`` — the state machine has zombie SVs that
+    #: stopped being observed but never received a → SET transition.
+    #: A non-None value here is a signal to investigate whether the
+    #: engine's stale-obs sweep is firing as expected.
+    sv_state_count_warning: Optional[str] = None
+
     #: Latest worstσ (m) — the largest per-SV position-sensitivity
     #: sigma produced by the engine's null-mode eigenvalue monitor
     #: (engine commit e5637d9).  Effectively the filter's
@@ -343,6 +360,31 @@ class LogReader:
             float(m.group("lon")),
             float(m.group("alt")),
         )
+        n_active_str = m.group("n_active")
+        if n_active_str is not None:
+            n_active = int(n_active_str)
+            self.state.antenna_n_active = n_active
+            # Cross-check against the SV state machine's count: how
+            # many SVs are in any non-WAITING state?  WAITING is the
+            # cooldown bucket after a slip — those SVs aren't active
+            # in the solution by definition.  TRACKING records can
+            # be created by monitor lookups before the SV is ever
+            # observed; exclude those too.
+            sm_active = sum(1 for s in self.state.sv_states.values()
+                            if s not in ("WAITING", "TRACKING"))
+            # Only warn on a substantial gap.  Some drift is
+            # expected: the filter rejects SVs per epoch on
+            # residuals; the state machine reflects the most recent
+            # transition.  A gap of >5 suggests zombie SVs the
+            # engine's stale-obs sweep should have dropped.
+            if sm_active > n_active + 5:
+                self.state.sv_state_count_warning = (
+                    f"sv_state_machine sees {sm_active} non-WAITING SVs "
+                    f"but AntPosEst only n={n_active}; "
+                    f"diff={sm_active - n_active}. Possible stale SV "
+                    "records — engine SET sweep may not be firing.")
+            else:
+                self.state.sv_state_count_warning = None
         nav2 = m.group("nav2d")
         if nav2 is not None:
             self.state.nav2_delta_m = float(nav2)
@@ -436,6 +478,15 @@ class LogReader:
         post-transition state; the history isn't needed for the
         table view.
 
+        Special handling: the engine emits ``→ SET`` (synthetic
+        transition, not a real enum value) when an SV's record is
+        forgotten via the stale-obs sweep — i.e. the SV has set
+        below horizon.  We treat SET as removal: pop the SV from
+        ``sv_states`` so it no longer appears as an active SV in
+        the per-constellation count widgets.  Without this, SVs
+        that physically set stay visible forever in their last-
+        observed state — confusing for long-term monitoring.
+
         Updates ``self.state.sv_states`` by copy-on-write so readers
         always see a consistent snapshot.  Python dict copies are
         cheap for the 20–40 SVs we typically track.
@@ -445,9 +496,11 @@ class LogReader:
             return
         sv = m.group("sv")
         new_state = m.group("to")
-        # copy-on-write to keep readers race-free.
         new_dict = dict(self.state.sv_states)
-        new_dict[sv] = new_state
+        if new_state == "SET":
+            new_dict.pop(sv, None)
+        else:
+            new_dict[sv] = new_state
         self.state.sv_states = new_dict
 
     def _parse_state_line(self, line: str) -> None:
@@ -562,6 +615,7 @@ _ANTPOSEST_LINE_RE = re.compile(
     r"\[AntPosEst \d+\]\s+"
     r"positionσ=(?P<sigma>[\d.]+)m\s+"
     r"pos=\((?P<lat>-?[\d.]+),\s*(?P<lon>-?[\d.]+),\s*(?P<alt>-?[\d.]+)\)"
+    r"(?:\s+n=(?P<n_active>\d+))?"
     r"(?:.*?nav2Δ=(?P<nav2d>[\d.]+)m)?"
     r"(?:.*?ZTD=(?P<ztd_mm>[-+]?\d+)(?:±(?P<ztd_sigma_mm>\d+))?mm)?"
     r"(?:.*?tide=(?P<tide_mm>\d+)mm\(U(?P<tide_u_mm>[-+]?\d+)\))?"

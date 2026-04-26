@@ -2473,14 +2473,25 @@ class AntPosEstThread(threading.Thread):
             for obs in observations:
                 self._sv_state.mark_seen(obs['sv'], self._n_epochs)
             if self._n_epochs % 60 == 0:  # sweep every ~1 min
-                dropped = self._sv_state.forget_stale(self._n_epochs, 600)
+                dropped = self._sv_state.forget_stale_with_states(
+                    self._n_epochs, 600)
                 # Keep the promoter's candidate map in sync — when a
                 # record is forgotten (arc boundary), any in-flight
-                # candidate for that SV is also stale.
-                for sv in dropped:
+                # candidate for that SV is also stale.  Also emit a
+                # synthetic [SV_STATE] → SET transition so downstream
+                # log readers (peppar-mon) can drop the SV from their
+                # current-state view.  Without this, the SV stays
+                # visible in peppar-mon forever in its last-observed
+                # state — confusing because it sets out of view but
+                # we never log a transition out.
+                for sv, prev_state in dropped:
                     self._promoter.forget(sv)
                     self._false_fix.forget(sv)
                     self._setting_drop.forget(sv)
+                    log.info(
+                        "[SV_STATE] %s: %s → SET (epoch=%d, "
+                        "reason=stale_obs:%d epochs)",
+                        sv, prev_state.value, self._n_epochs, 600)
             for ev in self._promoter.evaluate(self._n_epochs):
                 log.info(
                     "Promoted %s → ANCHORED (Δaz=%.1f°, first=%s, now=%.0f°)",

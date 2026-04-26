@@ -251,10 +251,60 @@ class AntPosEstLineTest(unittest.TestCase):
         self.assertEqual(
             r.state.antenna_position, (40.123456, -90.123456, 198.2),
         )
+        self.assertEqual(r.state.antenna_n_active, 12)
         self.assertEqual(r.state.nav2_delta_m, 2.7)
         self.assertEqual(r.state.worst_sigma_m, 1.5)
         self.assertAlmostEqual(r.state.ztd_m, 0.274, places=6)
         self.assertEqual(r.state.ztd_sigma_mm, 3)
+
+    def test_n_active_consistency_warning_fires_on_zombie_svs(self):
+        """If sv_states has lots of non-WAITING SVs but AntPosEst's n=
+        is small, that's a zombie-SV signal — the engine's stale-obs
+        sweep didn't fire and SVs are accumulating in state-machine
+        view that aren't really active.  Trigger a warning."""
+        floating_lines = "".join(
+            f"2026-04-21 07:00:00,{i:03d} INFO [SV_STATE] G{i:02d}: "
+            "TRACKING → FLOATING (epoch=10)\n"
+            for i in range(1, 16)
+        )
+        antposest_line = (
+            "2026-04-21 07:01:00,000 INFO   [AntPosEst 60] "
+            "positionσ=0.5m pos=(40.0, -90.0, 200.0) n=8 amb=8 "
+            "WL: 0/0 fixed NL: 0 fixed\n"
+        )
+        self.path.write_text(floating_lines + antposest_line)
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.sv_state_count_warning is not None)
+        self.assertIsNotNone(r.state.sv_state_count_warning)
+        self.assertIn("stale", r.state.sv_state_count_warning.lower())
+        # Once the engine emits SET for the missing 7+, the warning clears.
+        with open(self.path, 'a') as f:
+            for i in range(1, 8):  # remove first 7 SVs via SET
+                f.write(f"2026-04-21 07:02:00,000 INFO [SV_STATE] G{i:02d}: "
+                        "FLOATING → SET (epoch=120, reason=stale_obs:600 epochs)\n")
+            f.write("2026-04-21 07:03:00,000 INFO   [AntPosEst 180] "
+                    "positionσ=0.5m pos=(40.0, -90.0, 200.0) n=8 amb=8 "
+                    "WL: 0/0 fixed NL: 0 fixed\n")
+        _wait_until(lambda: r.state.sv_state_count_warning is None)
+        self.assertIsNone(r.state.sv_state_count_warning)
+
+    def test_n_active_no_warning_when_close(self):
+        """A small gap (filter rejects a few SVs per epoch) is normal —
+        no warning."""
+        floating_lines = "".join(
+            f"2026-04-21 07:00:00,{i:03d} INFO [SV_STATE] G{i:02d}: "
+            "TRACKING → FLOATING (epoch=10)\n"
+            for i in range(1, 11)
+        )
+        antposest_line = (
+            "2026-04-21 07:01:00,000 INFO   [AntPosEst 60] "
+            "positionσ=0.5m pos=(40.0, -90.0, 200.0) n=8 amb=8 "
+            "WL: 0/0 fixed NL: 0 fixed\n"
+        )
+        self.path.write_text(floating_lines + antposest_line)
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.antenna_n_active == 8)
+        self.assertIsNone(r.state.sv_state_count_warning)
 
     def test_earth_tide_fields(self):
         """``tide=<mm>mm(U±<mm>)`` captures total magnitude and the
@@ -542,6 +592,25 @@ class SvStateParsingTest(unittest.TestCase):
         r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
         _wait_until(lambda: r.state.sv_states.get("E21") == "WAITING")
         self.assertEqual(r.state.sv_states.get("E21"), "WAITING")
+
+    def test_set_transition_removes_sv(self):
+        """``→ SET`` (synthetic transition emitted by the engine when
+        the stale-obs sweep forgets a record) is treated as removal:
+        the SV pops out of sv_states.  Without this, SVs that physically
+        set out of the sky stay in the long-term-monitoring view forever
+        in their last-observed state."""
+        self.path.write_text(
+            "2026-04-21 07:00:00,000 INFO [SV_STATE] G05: TRACKING → "
+            "FLOATING (epoch=10)\n"
+            "2026-04-21 07:00:30,000 INFO [SV_STATE] G05: FLOATING → "
+            "CONVERGING (epoch=40)\n"
+            "2026-04-21 08:00:00,000 INFO [SV_STATE] G05: CONVERGING → "
+            "SET (epoch=3000, reason=stale_obs:600 epochs)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: "G05" not in r.state.sv_states
+                    and r.state.lines_read >= 3)
+        self.assertNotIn("G05", r.state.sv_states)
 
     def test_non_sv_state_lines_ignored(self):
         """Lines without the [SV_STATE] tag must not leak into

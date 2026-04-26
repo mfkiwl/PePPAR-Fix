@@ -331,16 +331,33 @@ class SvStateTracker:
         detection: when an SV hasn't been observed for long enough
         that it's probably set, drop its record so the next arc
         starts clean.
+
+        Callers that need the prior state (to emit a transition log
+        line on drop) should use ``forget_stale_with_states``.
+        """
+        return [sv for sv, _ in self.forget_stale_with_states(
+            epoch, stale_after_epochs)]
+
+    def forget_stale_with_states(self, epoch: int,
+                                 stale_after_epochs: int
+                                 ) -> list[tuple[str, SvAmbState]]:
+        """Same as ``forget_stale`` but returns ``(sv, prev_state)`` pairs.
+
+        Lets the engine emit a synthetic ``→ SET`` transition log line
+        per dropped SV so peppar-mon (and any other current-state
+        viewer) can remove the SV from its display.  Without this,
+        SVs that physically set out of the sky stay visible in
+        downstream tools forever in their last-observed state.
         """
         stale_cutoff = int(epoch) - int(stale_after_epochs)
-        dropped = []
+        dropped: list[tuple[str, SvAmbState]] = []
         for sv, rec in list(self._records.items()):
             # Records with last_seen_epoch == 0 were never observed
             # (TRACKING records created by monitor lookups).  Leave them.
             if rec.last_seen_epoch <= 0:
                 continue
             if rec.last_seen_epoch < stale_cutoff:
-                dropped.append(sv)
+                dropped.append((sv, rec.state))
                 self._records.pop(sv, None)
         return dropped
 
