@@ -882,6 +882,8 @@ def start_ntrip_threads(args, beph, ssr, stop_event):
         )
         t.start()
         threads.append(t)
+        # peppar-mon contract: peppar_mon/log_reader.py:_EPH_STREAM_RE
+        # parses HOST:PORT/MOUNT to display the eph mount name.
         log.info(f"Ephemeris stream: {args.ntrip_caster}:{args.ntrip_port}/{args.eph_mount}")
 
     if args.ssr_mount:
@@ -912,6 +914,8 @@ def start_ntrip_threads(args, beph, ssr, stop_event):
         )
         t.start()
         threads.append(t)
+        # peppar-mon contract: peppar_mon/log_reader.py:_SSR_STREAM_RE
+        # parses HOST:PORT/MOUNT to display the SSR mount name.
         log.info(f"SSR stream: {ssr_host}:{ssr_p}/{args.ssr_mount}")
         if getattr(args, 'no_primary_biases', False):
             log.info("Primary SSR biases (code + phase) suppressed "
@@ -2488,6 +2492,11 @@ class AntPosEstThread(threading.Thread):
                     self._promoter.forget(sv)
                     self._false_fix.forget(sv)
                     self._setting_drop.forget(sv)
+                    # peppar-mon contract: peppar_mon/log_reader.py
+                    # treats ``→ SET`` as removal from sv_states.
+                    # SET is not a real SvAmbState enum value; it's a
+                    # synthetic transition tag the same _SV_STATE_LINE_RE
+                    # parses from the standard transition format.
                     log.info(
                         "[SV_STATE] %s: %s → SET (epoch=%d, "
                         "reason=stale_obs:%d epochs)",
@@ -2639,6 +2648,13 @@ class AntPosEstThread(threading.Thread):
                 nm_sigma = self._null_mode_sigma_max(filt)
                 worst_tag = (f" worstσ={nm_sigma:.1f}m"
                              if nm_sigma is not None else "")
+                # peppar-mon contract: peppar_mon/log_reader.py:
+                # _ANTPOSEST_LINE_RE parses this format (positionσ,
+                # pos, n=, plus optional nav2Δ/ZTD/tide/worstσ tags).
+                # The peppar-mon zombie-SV warning compares ``n=`` to
+                # the count in sv_states; keep n= present and accurate.
+                # Renaming or reordering fields requires updating the
+                # regex + tests.
                 log.info(
                     "  [AntPosEst %d] positionσ=%.3fm pos=(%.8f, %.8f, %.3f) "
                     "n=%d amb=%d %s %s%s%s%s%s%s%s%s",

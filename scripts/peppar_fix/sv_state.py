@@ -283,6 +283,11 @@ class SvStateTracker:
         dur_frag = ""
         if to is SvAmbState.WAITING and cooldown_epochs is not None:
             dur_frag = f", squelch={int(cooldown_epochs)}s"
+        # peppar-mon contract: peppar_mon/log_reader.py:_SV_STATE_LINE_RE
+        # parses this format.  The synthetic ``→ SET`` variant emitted
+        # from peppar_fix_engine.py (stale-obs sweep) is matched by the
+        # same regex; peppar-mon treats SET as removal from sv_states.
+        # Keep the prefix, sv-id format, and arrow stable.
         log.info(
             "[SV_STATE] %s: %s → %s (epoch=%d, %s%s, reason=%s)",
             sv, from_state.value, to.value, epoch, elev_frag,

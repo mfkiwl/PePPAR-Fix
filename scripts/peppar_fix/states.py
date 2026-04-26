@@ -53,6 +53,9 @@ class StateMachine:
         self.state = initial_state
         self._entered_at = time.monotonic()
         self._transition_count = 0
+        # peppar-mon contract: peppar_mon/log_reader.py:_STATE_LINE_RE
+        # parses this format.  Changing the prefix, separator, or token
+        # format requires updating that regex + its tests.
         log.info("[STATE] %s: → %s (initial)", name, initial_state.value)
 
     def transition(self, new_state, reason=""):
@@ -64,6 +67,8 @@ class StateMachine:
         self._entered_at = time.monotonic()
         self._transition_count += 1
         reason_suffix = f" ({reason})" if reason else ""
+        # peppar-mon contract: peppar_mon/log_reader.py:_STATE_LINE_RE
+        # parses this format.
         log.info("[STATE] %s: %s → %s after %.0fs%s",
                  self.name, old.value, new_state.value, elapsed, reason_suffix)
 
@@ -170,6 +175,9 @@ class AntPosEst(StateMachine):
             cleared.append("reached_anchoring")
             self.reached_anchoring = False
         if cleared:
+            # peppar-mon contract: handled by peppar_mon/log_reader.py
+            # alongside the standard transition lines.  This variant is
+            # the latch-clear emitted on FixSetIntegrityMonitor trips.
             log.info("[STATE] AntPosEst: %s cleared (%s)",
                      " + ".join(cleared),
                      reason or "no reason given")

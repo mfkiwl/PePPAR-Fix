@@ -572,11 +572,49 @@ class LogReader:
                 )
 
 
+# ════════════════════════════════════════════════════════════════════
+# REGEX → ENGINE EMISSION SITE MAP
+# ════════════════════════════════════════════════════════════════════
+# Each regex below pairs with one or more log.info(...) emission sites
+# in the engine.  Both sides carry a ``peppar-mon contract:`` comment
+# pointing at the other.
+#
+# When ADDING a new regex here, add a matching ``peppar-mon contract:``
+# comment near the engine log.info(...) that produces it, naming this
+# regex by its module-attribute name.  Otherwise a future engine-side
+# change to the format will silently break peppar-mon.
+#
+# When CHANGING an existing regex (or the engine-side format), update
+# both sides + the corresponding test in peppar_mon/tests/test_log_reader.py.
+#
+# Current map (regex → engine site):
+#
+#   _STATE_LINE_RE        scripts/peppar_fix/states.py
+#                         (StateMachine.__init__ + .transition + latch
+#                         clear in AntPosEst.clear_latches)
+#   _SV_STATE_LINE_RE     scripts/peppar_fix/sv_state.py
+#                         (SvRecordSet.transition); also synthetic
+#                         ``→ SET`` from scripts/peppar_fix_engine.py
+#                         in the stale-obs sweep
+#   _PHASE_BIAS_LOOKUP_RE legacy — no current engine emitter (replaced
+#                         by [PB_APPLIED] in 2026-04-25 commit 24a30ab).
+#                         Retained for back-compat with archived logs.
+#   _PB_APPLIED_RE        scripts/realtime_ppp.py:[PB_APPLIED] log
+#                         in the per-epoch phase-bias-application path
+#   _ANTPOSEST_LINE_RE    scripts/peppar_fix_engine.py [AntPosEst N]
+#                         summary log emitted every ~10 epochs
+#   _EPH_STREAM_RE        scripts/peppar_fix_engine.py and
+#                         scripts/realtime_ppp.py "Ephemeris stream:"
+#   _SSR_STREAM_RE        same files, "SSR stream:" startup line
+#   _PEER_BUS_ACTIVE_RE   scripts/peer_publisher.py "peer-bus active:"
+# ════════════════════════════════════════════════════════════════════
+
 # Matches both ``[STATE] AntPosEst: → surveying (initial)`` and
 # ``[STATE] AntPosEst: converging → anchoring after 393s (details)``.
 # Anchoring on ``[STATE]`` avoids false positives from other log lines
 # that happen to contain an arrow.  The ``from`` group is optional to
 # handle the initial-state log line which has no from-state.
+# Engine source: scripts/peppar_fix/states.py
 _STATE_LINE_RE = re.compile(
     r"\[STATE\] (?P<machine>\w+): "
     r"(?:(?P<from>[\w_]+) )?→ (?P<to>[\w_]+)\b"
@@ -587,6 +625,9 @@ _STATE_LINE_RE = re.compile(
 # digits.  States are the SvAmbState enum values, all uppercase with
 # underscores.  The parenthesised details are not captured — the
 # table only needs the current state.
+# Engine source: scripts/peppar_fix/sv_state.py (SvRecordSet.transition)
+# plus synthetic ``→ SET`` from scripts/peppar_fix_engine.py
+# (stale-obs sweep, see ``forget_stale_with_states`` callsite).
 _SV_STATE_LINE_RE = re.compile(
     r"\[SV_STATE\] (?P<sv>[A-Z]\d{2,3}): "
     r"(?P<from>[A-Z_]+) → (?P<to>[A-Z_]+)\b"
@@ -598,9 +639,10 @@ _SV_STATE_LINE_RE = re.compile(
 # after ``avail=`` aren't used.  The signal-mapping itself contains
 # a tuple in parens (``('C1C', 'L1C')``), so the regex between
 # ``f1=`` and ``(HIT|MISS)`` uses non-greedy ``.*?`` to skip past
-# the tuple and lock onto the status parens.  Engine's format is
-# stable because it's part of the log contract
-# (scripts/realtime_ppp.py).
+# the tuple and lock onto the status parens.
+# Engine source: NONE — legacy format.  Replaced by [PB_APPLIED]
+# format in scripts/realtime_ppp.py at commit 24a30ab (2026-04-25).
+# Retained here for back-compat with archived logs.
 _PHASE_BIAS_LOOKUP_RE = re.compile(
     r"Phase bias lookup: (?P<sv>[A-Z]\d{2,3})\s+"
     r"f1=.*?\((?P<f1_status>HIT|MISS)\)\s+"
@@ -612,6 +654,8 @@ _PHASE_BIAS_LOOKUP_RE = re.compile(
 # numeric value (e.g. ``val=+0.123m`` or ``val=-2.876m``), MISS shows
 # the literal ``val=MISSm``.  We capture the value-or-MISS token; the
 # parser distinguishes by string compare to "MISS".
+# Engine source: scripts/realtime_ppp.py per-epoch phase-bias log
+# (search the file for "[PB_APPLIED]").
 _PB_APPLIED_RE = re.compile(
     r"\[PB_APPLIED\]\s+(?P<sv>[A-Z]\d{2,3})\s+"
     r"f1=\S+→\S+\s+val=(?P<f1_val>MISS|[-+]?[\d.]+)m\s+"
@@ -635,6 +679,10 @@ _PB_APPLIED_RE = re.compile(
 # only match the new name; older pre-rename logs won't parse
 # (acceptable — peppar-mon's support window is the current
 # engine).
+# Engine source: scripts/peppar_fix_engine.py per-epoch summary
+# log (search for "[AntPosEst %d] positionσ").  The captured
+# ``n=N`` field feeds the zombie-SV consistency check; keep it
+# present and accurate.
 _ANTPOSEST_LINE_RE = re.compile(
     r"\[AntPosEst \d+\]\s+"
     r"positionσ=(?P<sigma>[\d.]+)m\s+"
@@ -649,9 +697,14 @@ _ANTPOSEST_LINE_RE = re.compile(
 # Startup lines identifying the correction streams the engine
 # connected to.  Emitted once at engine boot, replayed by the
 # log reader.
+# Engine source: scripts/peppar_fix_engine.py and
+# scripts/realtime_ppp.py — both modules emit on connection.
 _EPH_STREAM_RE = re.compile(
     r"Ephemeris stream:\s*(?P<host>[\w.-]+):(?P<port>\d+)/(?P<mount>[\w_]+)"
 )
+# Engine source: same as _EPH_STREAM_RE — the SSR stream startup
+# log line lives in scripts/peppar_fix_engine.py (and a duplicate
+# in scripts/realtime_ppp.py for the standalone-mode entry point).
 _SSR_STREAM_RE = re.compile(
     r"SSR stream:\s*(?P<host>[\w.-]+):(?P<port>\d+)/(?P<mount>[\w_]+)"
 )
@@ -662,4 +715,5 @@ _SSR_STREAM_RE = re.compile(
 # fleet mode uses this to decide whether to keep its own
 # LogToBusBridge running or retire it in favour of the engine's
 # native publishing.
+# Engine source: scripts/peer_publisher.py
 _PEER_BUS_ACTIVE_RE = re.compile(r"peer-bus active:")

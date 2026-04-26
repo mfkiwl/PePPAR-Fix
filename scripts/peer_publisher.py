@@ -72,6 +72,12 @@ def initialize(spec: str, *, host: str, antenna_ref: str = "",
             )
             _bus = UDPMulticastBus(host=host, identity=identity, **kwargs)
             _host = host
+            # peppar-mon contract:
+            # peppar_mon/log_reader.py:_PEER_BUS_ACTIVE_RE matches the
+            # ``peer-bus active:`` prefix to set the engine_peer_bus_
+            # active flag.  Fleet mode uses that to decide whether the
+            # engine is publishing on its own peer bus.  Keep the
+            # prefix stable.
             log.info("peer-bus active: udp-multicast host=%s group=%s port=%s "
                      "antenna_ref=%r site_ref=%r",
                      host, kwargs.get("group", "default"),

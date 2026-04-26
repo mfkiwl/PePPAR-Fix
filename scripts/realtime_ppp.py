@@ -900,6 +900,13 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         pb_f2_q = round(pb_f2, 3) if pb_f2 is not None else None
                         snap_pb = (pb_f1_q, pb_f2_q, avail_pb)
                         if ssr._pb_lookup_logged.get(lk) != snap_pb:
+                            # peppar-mon contract:
+                            # peppar_mon/log_reader.py:_PB_APPLIED_RE
+                            # parses this format.  HIT vs MISS is
+                            # detected from the ``val=...m`` field —
+                            # numeric value = HIT, literal "MISS" =
+                            # MISS.  peppar-mon latches NL-capable
+                            # constellations on first HIT-HIT.
                             log.info(
                                 "[PB_APPLIED] %s f1=%s→%s val=%sm "
                                 "f2=%s→%s val=%sm avail=%s",
@@ -1325,6 +1332,8 @@ def run_realtime(args):
         )
         t_eph.start()
         ntrip_threads.append(t_eph)
+        # peppar-mon contract: peppar_mon/log_reader.py:_EPH_STREAM_RE
+        # parses HOST:PORT/MOUNT.  Same format as the engine wrapper.
         log.info(f"Ephemeris stream: {args.caster}:{args.port}/{args.eph_mount}")
 
     if args.ssr_mount:
@@ -1341,6 +1350,8 @@ def run_realtime(args):
         )
         t_ssr.start()
         ntrip_threads.append(t_ssr)
+        # peppar-mon contract: peppar_mon/log_reader.py:_SSR_STREAM_RE
+        # parses HOST:PORT/MOUNT.
         log.info(f"SSR stream: {args.caster}:{args.port}/{args.ssr_mount}")
 
     # Wait for initial ephemeris before starting serial
