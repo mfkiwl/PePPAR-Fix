@@ -6547,6 +6547,15 @@ Two-phase operation:
                           "achieves 6.2× total reduction vs defaults "
                           "(mean 3D 9.30 → 1.51 m).  See "
                           "project_to_main_qpos_sweep_20260424.md.")
+    pos.add_argument("--ztd-pwc-window-s", type=float, default=None,
+                     metavar="SECONDS",
+                     help="Enable PRIDE-style piece-wise constant ZTD with "
+                          "N-second segment length (3600 = PWC-60).  "
+                          "Within a segment ZTD process noise ≈ 0; at "
+                          "segment boundaries P[ZTD] is re-inflated to "
+                          "seed sigma so a fresh estimate forms.  Default "
+                          "disabled (random walk).  See "
+                          "project_to_main_pride_single_pass_20260426.md.")
     pos.add_argument("--outlier-mad-k", type=float, default=None,
                      metavar="K",
                      help="Per-epoch MAD-based outlier rejection threshold "
@@ -6968,6 +6977,9 @@ Two-phase operation:
         # Same propagation pattern as Q_POS_CONVERGED.
         from solve_ppp import PPPFilter as _PF
         _PF.OUTLIER_MAD_K = float(args.outlier_mad_k)
+    if args.ztd_pwc_window_s is not None:
+        from solve_ppp import PPPFilter as _PF
+        _PF.ZTD_PWC_WINDOW_S = float(args.ztd_pwc_window_s)
     if args.ar_elev_mask is None:
         args.ar_elev_mask = 25.0
     if args.do_type is None:
@@ -7060,6 +7072,9 @@ Two-phase operation:
     if args.outlier_mad_k is not None:
         log.info(f"Outlier MAD K override: {args.outlier_mad_k:g} "
                  f"(default 0 = off; recommended 2.0)")
+    if args.ztd_pwc_window_s is not None:
+        log.info(f"ZTD PWC window: {args.ztd_pwc_window_s:g} s "
+                 f"(default RW; PRIDE-style PWC-60 = 3600)")
     if getattr(args, "phase_windup", False):
         log.info("Phase wind-up correction: enabled (Wu 1993)")
     if getattr(args, "gmf", False):

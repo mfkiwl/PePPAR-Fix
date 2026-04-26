@@ -329,6 +329,7 @@ class PPPFilter:
             1e6,
             0.5**2,  # ZTD residual: 0.5m initial sigma
         ])
+        self._ztd_window_elapsed = 0.0  # PWC-60 segment timer (s)
         # Pin ISBs whose reference system isn't present.  Priority order:
         # GPS > GAL > BDS — the highest-priority present system is the
         # reference and its x[IDX_CLK] absorbs the clock.
@@ -382,7 +383,25 @@ class PPPFilter:
             Q[IDX_ISB_GAL, IDX_ISB_GAL] = 1.0 * dt
         if IDX_ISB_BDS not in pinned:
             Q[IDX_ISB_BDS, IDX_ISB_BDS] = 1.0 * dt
-        Q[IDX_ZTD, IDX_ZTD] = (5e-5)**2 * dt  # ~5 cm/hour RMS (IGS standard)
+        # ZTD model.  Two regimes:
+        # - default (RW): Q = (5e-5)² · dt — ~5 cm/hour RMS, IGS standard.
+        # - PWC-N (PRIDE-style piece-wise constant): Q ≈ 0 within an
+        #   N-second segment; at segment boundary, inflate P[IDX_ZTD]
+        #   back to seed sigma (0.5²) so a fresh estimate forms.
+        #   Enable by setting class attr ZTD_PWC_WINDOW_S > 0
+        #   (e.g. 3600 for PRIDE's PWC-60).
+        ztd_pwc_window_s = getattr(self, "ZTD_PWC_WINDOW_S", 0.0)
+        if ztd_pwc_window_s > 0:
+            elapsed = getattr(self, "_ztd_window_elapsed", 0.0) + dt
+            if elapsed >= ztd_pwc_window_s:
+                # Segment boundary — let ZTD re-form by inflating P.
+                self.P[IDX_ZTD, IDX_ZTD] = 0.5**2
+                elapsed = 0.0
+            else:
+                Q[IDX_ZTD, IDX_ZTD] = (1e-7)**2 * dt  # ~negligible
+            self._ztd_window_elapsed = elapsed
+        else:
+            Q[IDX_ZTD, IDX_ZTD] = (5e-5)**2 * dt  # ~5 cm/hour RMS (IGS standard)
         self.P = self.P + Q
 
     def _q_clk(self):
