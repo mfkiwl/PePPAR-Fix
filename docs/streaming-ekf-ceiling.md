@@ -4,6 +4,20 @@ This doc tracks where PePPAR-Fix's streaming-EKF PPP solution
 sits relative to the published-literature ceiling for static-
 receiver PPP, and what closes the remaining gap.
 
+## A note on units (σ_pos vs ADEV)
+
+Where this doc says σ(τ), σ_H, σ_U, etc., we mean **position
+deviation** in meters — the σ_x analog (phase deviation), not σ_y
+(Allan deviation of fractional frequency).  Standard ADEV is
+inherently dimensionless because of an internal 1/τ normalization
+that converts phase units to dimensionless.  We compute the
+position-domain version (no 1/τ factor) so the result is in
+meters — directly meaningful as "how much does the position
+estimate scatter at averaging time τ."  The IGS baseline numbers
+below and the lab snapshot are all in meters, all consistent.
+See `scripts/overlay/pos_adev.py` module docstring for the
+full derivation.
+
 ## Why this doc exists
 
 Bravo's PRIDE-vs-streaming work

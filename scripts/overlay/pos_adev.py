@@ -1,16 +1,34 @@
 #!/usr/bin/env python3
-"""Allan-deviation-style σ(τ) for position time series.
+"""Position deviation σ_pos(τ) and modified position deviation for static-receiver
+position time series.
 
-Borrows the standard ADEV form from oscillator stability analysis
-and applies it to E/N/U position estimates from a static GNSS
-receiver:
+Pedantic naming note (per Bob 2026-04-27): standard ADEV / MDEV are
+inherently dimensionless when applied to fractional frequency
+y = (f − f₀)/f₀, because of an internal 1/τ normalization that
+converts phase units (seconds) to dimensionless.  What this
+module computes is more precisely **position deviation σ_pos(τ)**
+and **modified position deviation mod σ_pos(τ)** — the analogs of
+σ_x (phase deviation) and σ_mod,x, with **units of meters**.  The
+1/τ normalization is omitted because we want absolute drift in
+meters at averaging window τ, not a velocity-like fractional rate.
 
-    σ_pos(τ) = sqrt( 0.5 · < (x̄_{k+1}(τ) − x̄_k(τ))² > )
+Both estimators have units of meters.  Cross-comparison between
+ADEV-form and MDEV-form values is dimensionally clean.  The
+function names below retain the colloquial `adev_` / `mdev_`
+prefixes for familiarity, but the docstrings spell out the precise
+identity.
 
-where x̄_k(τ) is the mean position over the k-th window of length τ.
-The 0.5 prefactor is the classic Allan convention; the
-overlapping-windows estimator (each k advancing by one sample) is
-used for statistical efficiency on short records.
+The basic formula:
+
+    σ_pos(τ)      = sqrt( 0.5 · < (x̄_{k+m}(m) − x̄_k(m))² > )
+    mod σ_pos(τ)  = sqrt( 1/(2 m²) · < (Σ_{i=0}^{m−1}
+                            [x_{i+2m} − 2 x_{i+m} + x_i])² > )
+
+where x̄_k(m) is the mean of m consecutive samples starting at k,
+m = τ/τ₀ (averaging factor), and τ₀ is the sampling interval.
+The 0.5 prefactor is the classic Allan convention.  The overlapping-
+windows estimator (each k advancing by one sample) is used for
+statistical efficiency on short records.
 
 At short τ this captures epoch-to-epoch noise; at long τ it
 captures systematic drift.  For a perfectly stable receiver,
@@ -19,10 +37,14 @@ plateaus (bounded random walk) or grows monotonically
 (deterministic drift).
 
 The metric isn't novel — geodesy has been using PSD slope κ
-(`P(f) ∝ f^−κ`) and MLE noise model fits since Williams 2003.  See
-`memory/project_to_main_bravo_charlie_position_stability_lit_20260426`
+(`P(f) ∝ f^−κ`) and MLE noise model fits since Williams 2003.
+See `memory/project_to_main_bravo_charlie_position_stability_lit_20260426`
 for the literature synthesis and how σ_pos(τ) maps to the
-geodetic vocabulary.
+geodetic vocabulary.  Note that the lit memo's "MDEV separates
+white-PM from flicker-PM that ADEV conflates" claim was written
+under the dimensionless σ_y assumption; in this position-domain
+form (σ_x analog) the slope-difference between ADEV and MDEV is
+muted, but the shape distinction is preserved.
 
 Inputs supported:
   - peppar-fix engine `[AntPosEst]` log lines (lat, lon, alt)
@@ -204,13 +226,21 @@ def regrid(samples, dt: float = 1.0):
 # ── The estimator ────────────────────────────────────────────────────────── #
 
 def adev_pos_overlapping(values: list[float], m: int) -> float | None:
-    """Overlapping Allan deviation of position averages at window m samples.
+    """Overlapping position deviation σ_pos at averaging window of m samples.
 
-    σ²(m·τ₀) = 0.5 · < (x̄_{k+m}(m) − x̄_k(m))² >
+    Strictly: this is the σ_x analog (phase deviation), NOT σ_y (Allan
+    deviation of fractional frequency).  Standard ADEV is dimensionless;
+    this estimator returns σ in the same units as the input (meters,
+    when input is ENU position in meters).
+
+        σ_pos²(m·τ₀) = 0.5 · < (x̄_{k+m}(m) − x̄_k(m))² >
 
     where x̄_k(m) is the mean of m consecutive samples starting at k,
     and adjacent windows are separated by m samples (non-overlapping
     in the difference, but overlapping in the start indices).
+
+    Units check: x̄_k is in meters; the difference and squared mean
+    of differences are in meters²; sqrt gives meters. ✓
 
     Returns None if N < 2m (not enough data for any pair of
     non-overlapping windows).
@@ -231,28 +261,40 @@ def adev_pos_overlapping(values: list[float], m: int) -> float | None:
 
 
 def mdev_pos_overlapping(values: list[float], m: int) -> float | None:
-    """Modified Allan deviation of position averages at window m samples.
+    """Overlapping modified position deviation mod σ_pos at window of m samples.
 
-    Canonical MDEV form (Allan & Barnes 1981) applied to position-as-
-    value (no τ² normalization, since position is the quantity of
-    interest, not phase):
+    Strictly: this is the σ_mod,x analog (modified phase deviation),
+    NOT σ_mod,y (modified Allan deviation of fractional frequency).
+    Same dimensional reasoning as adev_pos_overlapping above — units
+    of meters, no τ² normalization.
 
-        σ²_pos_mdev(m·τ₀) = 1 / (2 m² (N − 3m + 1)) ·
-                            Σ_j ( Σ_{i=j}^{j+m-1}
-                                  [x_{i+2m} − 2 x_{i+m} + x_i] )²
+        mod σ_pos²(m·τ₀) = 1 / (2 m² (N − 3m + 1)) ·
+                          Σ_j ( Σ_{i=j}^{j+m-1}
+                                [x_{i+2m} − 2 x_{i+m} + x_i] )²
 
     Equivalently: form the m-sample running-mean series y_k, then
-    take the second difference y_{k+2m} − 2 y_{k+m} + y_k.  MDEV is
-    the RMS of those second differences across all valid starting
-    positions k, divided by sqrt(2).
+    take the second difference y_{k+2m} − 2 y_{k+m} + y_k.  This
+    estimator is the RMS of those second differences across all valid
+    starting positions k, divided by sqrt(2).
 
-    Why use it: per the lit synthesis in
-    project_to_main_bravo_charlie_position_stability_lit_20260426,
-    MDEV separates white-PM from flicker-PM that ADEV conflates —
-    more diagnostic for the white-noise-plus-walks regime that lab
-    position estimates exhibit.  At short τ:
-        white-position:    ADEV slope −0.5,  MDEV slope −1.5
-        flicker-position:  ADEV slope ~0,    MDEV slope −0.5
+    Units check: x_i in meters → second-difference x_{i+2m} − 2x_{i+m}
+    + x_i in meters → window-sum of m of them in m·meters → squared
+    in m²·meters² → divide by 2m² (the m² is dimensionless count) →
+    meters² → sqrt gives meters. ✓
+
+    Same units as adev_pos_overlapping; cross-comparison is fair.
+
+    Why use it alongside the ADEV form: per the lit synthesis in
+    `project_to_main_bravo_charlie_position_stability_lit_20260426`,
+    MDEV separates white-PM from flicker-PM that ADEV conflates.
+    That claim was written under the dimensionless σ_y assumption;
+    in this σ_x / position-domain form the slope-shifting τ
+    normalization is absent and the slope-difference is muted.
+    The shape difference between the two estimators is still
+    informative — MDEV's m-window of second differences is genuinely
+    different from ADEV's first difference of m-window means — but
+    the textbook "white-PM has ADEV slope −0.5 vs MDEV slope −1.5"
+    refers to σ_y form, not what's computed here.
 
     Returns None if N < 3m (not enough data).
     """
@@ -318,8 +360,10 @@ def main() -> int:
     )
     p.add_argument(
         "--metric", choices=("adev", "mdev", "both"), default="both",
-        help="stability metric (default: both — ADEV is intuitive, MDEV "
-             "separates white-PM from flicker-PM)",
+        help="stability metric (default: both).  Names are colloquial: "
+             "what's computed is position-domain σ_x / σ_mod,x analogs "
+             "with units of meters, NOT dimensionless σ_y / σ_mod,y. "
+             "See module docstring.",
     )
     args = p.parse_args()
 
