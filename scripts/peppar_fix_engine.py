@@ -2693,11 +2693,16 @@ class AntPosEstThread(threading.Thread):
                 # gate AR on this yet (planned).
                 if self._n_epochs % 10 == 0:  # 1/10 epochs to bound log volume
                     p_wl_ib, n_wl = mw.wl_bootstrap_success_rate()
-                    log.info(
-                        "  [WL_AR_READINESS] p_wl_ib=%.4f n=%d "
-                        "(>0.99=PAR-ready, >0.999=full)",
-                        p_wl_ib, n_wl,
-                    )
+                    if p_wl_ib is None:
+                        log.info(
+                            "  [WL_AR_READINESS] p_wl_ib=- n=0 "
+                            "(no SVs warmed up)")
+                    else:
+                        log.info(
+                            "  [WL_AR_READINESS] p_wl_ib=%.4f n=%d "
+                            "(>0.99=PAR-ready, >0.999=full)",
+                            p_wl_ib, n_wl,
+                        )
                     # NL AR readiness — Charlie A1.  Pulled from
                     # NlResolver.last_ar_readiness (set every resolve_nl
                     # call, regardless of whether LAMBDA attempted).

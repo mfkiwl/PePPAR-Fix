@@ -317,6 +317,11 @@ class MelbourneWubbenaTracker:
             n += 1
             if p < 1e-10:
                 return 0.0, n
+        # n=0 means no SV had enough epochs to qualify — empty product
+        # is mathematically 1.0 but semantically "no signal."  Return
+        # None to flag this honestly (caller decides how to display).
+        if n == 0:
+            return None, 0
         return p, n
 
     def integrality_snapshot(self):
