@@ -749,5 +749,103 @@ class CohortLineTest(unittest.TestCase):
         self.assertEqual(calls["n"], 1)
 
 
+class ArReadinessLineTest(unittest.TestCase):
+    """``WL P_IB: 0.9876 (n=5) ✓PAR-ready``.
+
+    Threshold semantics from Geng et al. 2010 + the engine emission's
+    own parenthetical (``>0.99=PAR-ready, >0.999=full``):
+
+      * < 0.99  → ``diagnose`` (red) — float not ready for AR
+      * ≥ 0.99  → ``✓PAR-ready`` (yellow) — partial AR green-light
+      * ≥ 0.999 → ``✓full-AR`` (green) — full AR green-light
+
+    Tests exercise the pure ``build_ar_readiness_line`` so we don't
+    need a Textual app context.
+    """
+
+    def test_waiting_when_no_data(self):
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(wl_p_ib=None, wl_p_ib_n=None)
+        s = out.plain
+        self.assertIn("WL P_IB:", s)
+        self.assertIn("(waiting)", s)
+
+    def test_full_ar_threshold(self):
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(wl_p_ib=0.9991, wl_p_ib_n=8)
+        s = out.plain
+        self.assertIn("0.9991", s)
+        self.assertIn("(n=8)", s)
+        self.assertIn("✓full-AR", s)
+        self.assertNotIn("PAR-ready", s)
+        self.assertNotIn("diagnose", s)
+
+    def test_par_ready_threshold(self):
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(wl_p_ib=0.9950, wl_p_ib_n=5)
+        s = out.plain
+        self.assertIn("0.9950", s)
+        self.assertIn("✓PAR-ready", s)
+        self.assertNotIn("full-AR", s)
+
+    def test_diagnose_threshold(self):
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(wl_p_ib=0.85, wl_p_ib_n=3)
+        s = out.plain
+        self.assertIn("diagnose", s)
+        self.assertNotIn("✓", s)
+
+    def test_exact_par_boundary(self):
+        """≥ 0.99 is PAR-ready (inclusive)."""
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(wl_p_ib=0.99, wl_p_ib_n=4)
+        self.assertIn("✓PAR-ready", out.plain)
+
+    def test_exact_full_boundary(self):
+        """≥ 0.999 is full-AR (inclusive)."""
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(wl_p_ib=0.999, wl_p_ib_n=6)
+        self.assertIn("✓full-AR", out.plain)
+
+    def test_zero_n_with_value(self):
+        """Engine cold-start can emit p=0.0 n=0; widget renders n=0
+        rather than hiding the count."""
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(wl_p_ib=0.0, wl_p_ib_n=0)
+        s = out.plain
+        self.assertIn("0.0000", s)
+        self.assertIn("(n=0)", s)
+        self.assertIn("diagnose", s)
+
+    def test_threshold_styling(self):
+        """The threshold tag carries Rich style markup so the
+        terminal colours it.  Verify the diagnose span has a red
+        style applied."""
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(wl_p_ib=0.85, wl_p_ib_n=2)
+        spans_with_diagnose = [
+            (out.plain[s.start:s.end], s.style)
+            for s in out.spans
+            if "diagnose" in out.plain[s.start:s.end]
+        ]
+        self.assertTrue(spans_with_diagnose)
+        styles = " ".join(str(st) for _, st in spans_with_diagnose)
+        self.assertIn("red", styles)
+
+    def test_update_state_diff_triggers_refresh(self):
+        """Unchanged inputs no-op, changed inputs fire refresh()."""
+        from peppar_mon.widgets import ArReadinessLine
+        w = ArReadinessLine(wl_p_ib=0.99, wl_p_ib_n=4)
+        calls = {"n": 0}
+
+        def fake_refresh():
+            calls["n"] += 1
+        w.refresh = fake_refresh  # type: ignore[method-assign]
+
+        w.update_state(wl_p_ib=0.99, wl_p_ib_n=4)  # no-op
+        w.update_state(wl_p_ib=0.999, wl_p_ib_n=4)  # changed
+        self.assertEqual(calls["n"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

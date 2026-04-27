@@ -261,6 +261,21 @@ class LogState:
     #: sanity-checking "one trip per day" expectation at a glance.
     fix_set_integrity_trip_count: int = 0
 
+    #: Latest WL Integer Bootstrap success rate (Teunissen 1998/1999),
+    #: parsed from ``[WL_AR_READINESS] p_wl_ib=... n=...`` log lines
+    #: (engine commit 6e9cca6, every ~10 epochs).  Range [0, 1].  Per
+    #: Geng et al. 2010 + Charlie's AR-readiness diagnostic memo:
+    #: > 0.999 = full WL AR; > 0.99 = partial AR (PAR); < 0.99 =
+    #: diagnose.  None until the engine has emitted at least one
+    #: line (older builds didn't).
+    wl_p_ib: Optional[float] = None
+
+    #: Number of warmed-up SVs (≥ 20-epoch MW history) contributing
+    #: to ``wl_p_ib``.  Tells the operator how thin the float is —
+    #: P_IB = 0.99 with n=2 is much weaker evidence than the same
+    #: P_IB at n=8.
+    wl_p_ib_n: Optional[int] = None
+
 
 @dataclass(frozen=True)
 class FixSetIntegrityTrip:
@@ -391,6 +406,7 @@ class LogReader:
         self._parse_peer_bus_active(line)
         self._parse_cohort_line(line)
         self._parse_fix_set_integrity_trip(line)
+        self._parse_wl_ar_readiness_line(line)
 
     def _parse_antposest_line(self, line: str) -> None:
         """Extract position + σ + nav2Δ from ``[AntPosEst N] ...``.
@@ -536,6 +552,31 @@ class LogReader:
             params=m.group("params").strip(),
         )
         self.state.fix_set_integrity_trip_count += 1
+
+    def _parse_wl_ar_readiness_line(self, line: str) -> None:
+        """Parse ``[WL_AR_READINESS] p_wl_ib=0.9876 n=5 (...)``.
+
+        Engine emits one of these every 10 epochs alongside
+        [AntPosEst] (per commit 6e9cca6).  ``p_wl_ib`` is the
+        Teunissen 1998/1999 Integer Bootstrap success rate on the
+        wide-lane sub-block of Q_â — the right "is the float ready
+        for WL AR?" gate per Geng et al. 2010.  ``n`` is the count
+        of warmed-up SVs (≥ 20 epochs of MW history).
+
+        Decision thresholds (from the commit message):
+          * > 0.999 = full WL AR green-light
+          * > 0.99  = partial AR (PAR) green-light
+          * < 0.99  = diagnose Q_â per-SV before AR push
+
+        Both fields update on every observation; older engine
+        builds without commit 6e9cca6 simply leave the state
+        fields at None.
+        """
+        m = _WL_AR_READINESS_RE.search(line)
+        if m is None:
+            return
+        self.state.wl_p_ib = float(m.group("p"))
+        self.state.wl_p_ib_n = int(m.group("n"))
 
     def _parse_stream_lines(self, line: str) -> None:
         """Capture the NTRIP correction-stream identifiers.
@@ -871,6 +912,20 @@ _COHORT_POS_RE = re.compile(
 _COHORT_ZTD_RE = re.compile(
     r"ztd_cohort_n=(?P<n>\d+)\s+"
     r"Δztd=(?P<d>[-+]?\d+\.\d+)mm"
+)
+
+# Matches ``  [WL_AR_READINESS] p_wl_ib=0.9876 n=5 (>0.99=PAR-ready, >0.999=full)``.
+# Engine emission from commit 6e9cca6 (Charlie A2): the Teunissen
+# 1998/1999 Integer Bootstrap success rate on the WL sub-block of
+# Q_â, plus the count of SVs contributing.  We only capture the
+# two numbers — the parenthetical hint to the operator is fixed
+# text and not parsed.  ``p_wl_ib`` is a probability in [0,1] so
+# the regex accepts ``0.NNNN`` or ``1.0000``; ``n`` is a small
+# integer (typical 3-12 SVs).
+_WL_AR_READINESS_RE = re.compile(
+    r"\[WL_AR_READINESS\]\s+"
+    r"p_wl_ib=(?P<p>[\d.]+)\s+"
+    r"n=(?P<n>\d+)"
 )
 
 # Matches ``[FIX_SET_INTEGRITY] TRIPPED reason=<r> <params> at pos=[...]``.

@@ -35,7 +35,7 @@ from textual.widgets import Static, Header, Footer
 from peppar_mon._util import format_elapsed_short, format_uptime
 from peppar_mon.log_reader import LogReader
 from peppar_mon.widgets import (
-    AntennaPositionLine, CohortLine, FilterStateLine, FleetStateLine,
+    AntennaPositionLine, ArReadinessLine, CohortLine, FilterStateLine, FleetStateLine,
     SecondOpinionLine, StateBar, SvStateTable,
 )
 
@@ -180,6 +180,17 @@ class PepparMonApp(App):
                 yield CohortLine(
                     id="cohort", classes="top-row-right",
                 )
+            # Row 3¾: AR-readiness — WL Integer Bootstrap success
+            # rate from engine's [WL_AR_READINESS] line (commit
+            # 6e9cca6).  Tells the operator at a glance whether
+            # the float is ready for a WL AR push; PAR/full
+            # thresholds per Geng et al. 2010.  Stage 2 of B1
+            # (NL P_IB) lands once A1 ships in the engine.
+            with Horizontal(classes="top-row"):
+                yield Static("", classes="top-row-left")
+                yield ArReadinessLine(
+                    id="ar-readiness", classes="top-row-right",
+                )
             # Row 4 (fleet mode only): cross-host summary.
             if self._fleet_mode:
                 with Horizontal(classes="top-row"):
@@ -299,6 +310,10 @@ class PepparMonApp(App):
             cohort_delta_ztd_mm=s.cohort_delta_ztd_mm,
             last_trip=s.fix_set_integrity_last_trip,
             elapsed_since_trip_s=elapsed_since_trip_s,
+        )
+        self.query_one("#ar-readiness", ArReadinessLine).update_state(
+            wl_p_ib=s.wl_p_ib,
+            wl_p_ib_n=s.wl_p_ib_n,
         )
         if self._aggregator is not None:
             from peppar_mon.fleet import compute_summary

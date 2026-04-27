@@ -839,5 +839,78 @@ class FixSetIntegrityTripParsingTest(unittest.TestCase):
         self.assertEqual(r.state.fix_set_integrity_trip_count, 0)
 
 
+class WlArReadinessParsingTest(unittest.TestCase):
+    """``[WL_AR_READINESS] p_wl_ib=... n=...`` carries the WL Integer
+    Bootstrap success rate that gates "is the float ready for WL AR?"
+    Engine commit 6e9cca6 emits this every ~10 epochs alongside
+    [AntPosEst]."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "engine.log"
+
+    def test_readiness_line_parsed(self):
+        # Engine emits with leading double-space indentation matching
+        # the [AntPosEst] line; the regex anchor doesn't depend on
+        # that, but the test mirrors the real format anyway.
+        self.path.write_text(
+            "2026-04-27 09:00:00,000 INFO   [WL_AR_READINESS] "
+            "p_wl_ib=0.9876 n=5 (>0.99=PAR-ready, >0.999=full)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.wl_p_ib is not None)
+        self.assertAlmostEqual(r.state.wl_p_ib, 0.9876)
+        self.assertEqual(r.state.wl_p_ib_n, 5)
+
+    def test_full_ar_value(self):
+        """4-9s precision in the engine emission must round-trip."""
+        self.path.write_text(
+            "2026-04-27 09:00:00,000 INFO   [WL_AR_READINESS] "
+            "p_wl_ib=0.9999 n=8 (>0.99=PAR-ready, >0.999=full)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.wl_p_ib is not None)
+        self.assertAlmostEqual(r.state.wl_p_ib, 0.9999)
+        self.assertEqual(r.state.wl_p_ib_n, 8)
+
+    def test_zero_n_handled(self):
+        """Cold start before any SV warms up — engine emits n=0.
+        Must parse cleanly; widget will distinguish (waiting) from
+        (active but n=0) at render time."""
+        self.path.write_text(
+            "2026-04-27 09:00:00,000 INFO   [WL_AR_READINESS] "
+            "p_wl_ib=0.0000 n=0 (>0.99=PAR-ready, >0.999=full)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.wl_p_ib is not None)
+        self.assertEqual(r.state.wl_p_ib, 0.0)
+        self.assertEqual(r.state.wl_p_ib_n, 0)
+
+    def test_later_line_replaces_earlier(self):
+        """Engine emits one of these every 10 epochs; the latest
+        wins so the operator sees current readiness, not stale."""
+        self.path.write_text(
+            "2026-04-27 09:00:00,000 INFO   [WL_AR_READINESS] "
+            "p_wl_ib=0.5000 n=2 (>0.99=PAR-ready, >0.999=full)\n"
+            "2026-04-27 09:00:10,000 INFO   [WL_AR_READINESS] "
+            "p_wl_ib=0.9950 n=4 (>0.99=PAR-ready, >0.999=full)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.wl_p_ib_n == 4)
+        self.assertAlmostEqual(r.state.wl_p_ib, 0.995)
+        self.assertEqual(r.state.wl_p_ib_n, 4)
+
+    def test_unrelated_line_ignored(self):
+        self.path.write_text(
+            "2026-04-27 09:00:00,000 INFO some other line "
+            "mentioning p_wl_ib=0.99 n=5 without the tag\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.lines_read >= 1)
+        self.assertIsNone(r.state.wl_p_ib)
+        self.assertIsNone(r.state.wl_p_ib_n)
+
+
 if __name__ == "__main__":
     unittest.main()

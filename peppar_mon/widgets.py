@@ -967,3 +967,109 @@ def _format_mm_cm(mm: float) -> str:
     if abs(mm) < 1000:
         return f"{mm / 10:.0f} cm"
     return f"{mm / 1000:.2f} m"
+
+
+# Decision thresholds from Geng et al. 2010 + Charlie's literature
+# memo, also documented in the engine emission's parenthetical:
+# < 0.99  = diagnose Q_â per-SV; AR push not advised (red)
+# ≥ 0.99  = partial AR (PAR) green-light (yellow)
+# ≥ 0.999 = full AR green-light (green)
+_AR_READINESS_PAR = 0.99
+_AR_READINESS_FULL = 0.999
+
+
+class ArReadinessLine(Widget):
+    """Single-line WL Integer Bootstrap success rate readout.
+
+    Layout when the engine has emitted [WL_AR_READINESS]::
+
+        WL P_IB: 0.9876 (n=5) ✓PAR-ready
+
+    Color-coded against the Geng et al. 2010 thresholds:
+
+      * P_IB ≥ 0.999 → green (full WL AR green-light)
+      * P_IB ≥ 0.99  → yellow (partial AR / PAR-ready)
+      * P_IB < 0.99  → red (diagnose Q_â per-SV before AR push)
+
+    Before the engine emits the first [WL_AR_READINESS] line —
+    older engine builds without commit 6e9cca6, or the first
+    ~10 epochs of a new run — the line shows
+    ``WL P_IB: (waiting)``.
+
+    Stage 1 of B1 (per dayplan I-142015-main): WL only.  Stage 2
+    will add NL P_IB once A1 (NL P_IB emission) ships.
+    """
+
+    DEFAULT_CSS = """
+    ArReadinessLine {
+        height: 1;
+        width: auto;
+    }
+    """
+
+    def __init__(
+        self,
+        *,
+        wl_p_ib: Optional[float] = None,
+        wl_p_ib_n: Optional[int] = None,
+        id: Optional[str] = None,  # noqa: A002
+        classes: Optional[str] = None,
+    ) -> None:
+        super().__init__(id=id, classes=classes)
+        self._p = wl_p_ib
+        self._n = wl_p_ib_n
+
+    def update_state(
+        self,
+        *,
+        wl_p_ib: Optional[float],
+        wl_p_ib_n: Optional[int],
+    ) -> None:
+        if wl_p_ib == self._p and wl_p_ib_n == self._n:
+            return
+        self._p = wl_p_ib
+        self._n = wl_p_ib_n
+        self.refresh()
+
+    def render(self) -> Text:
+        return build_ar_readiness_line(
+            wl_p_ib=self._p,
+            wl_p_ib_n=self._n,
+        )
+
+
+def build_ar_readiness_line(
+    *,
+    wl_p_ib: Optional[float],
+    wl_p_ib_n: Optional[int],
+) -> Text:
+    """Pure renderer for ``ArReadinessLine``.
+
+    Split out so unit tests exercise the threshold + color logic
+    without instantiating a Textual widget.  Returns a ``rich.Text``
+    with style markup for the threshold tag.
+
+    Threshold tag is whichever of three labels applies:
+    ``✓full-AR`` (green), ``✓PAR-ready`` (yellow), or
+    ``diagnose`` (red).  The check / no-check distinction marks
+    whether the float is *ready for an AR push* — ``diagnose``
+    has no check because it explicitly is not.
+    """
+    t = Text()
+    t.append("WL P_IB: ", style="bold")
+    if wl_p_ib is None:
+        t.append("(waiting)")
+        return t
+    # Four decimals matches the engine's ``%.4f`` emission format,
+    # so the monitor reads the same number the log line shows.
+    t.append(f"{wl_p_ib:.4f}")
+    if wl_p_ib_n is not None:
+        t.append(f" (n={wl_p_ib_n})")
+    t.append(" ")
+    if wl_p_ib >= _AR_READINESS_FULL:
+        t.append("✓full-AR", style="bold green")
+    elif wl_p_ib >= _AR_READINESS_PAR:
+        t.append("✓PAR-ready", style="bold yellow")
+    else:
+        t.append("diagnose", style="bold red")
+    return t
