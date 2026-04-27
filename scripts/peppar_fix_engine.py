@@ -1202,6 +1202,12 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
         if n_used < 4:
             continue
 
+        # Soft ZTD-residual prior (engine flag --ztd-tie-sigma).  Same
+        # mechanism as the AntPosEstThread loop applies post-update.
+        _ztd_tie = getattr(args, "ztd_tie_sigma", None)
+        if _ztd_tie:
+            filt.apply_ztd_tie(_ztd_tie)
+
         n_epochs += 1
 
         pos_ecef = filt.x[:3]
@@ -1404,7 +1410,8 @@ class AntPosEstThread(threading.Thread):
                  rx_tcxo_adev_1s=None,
                  phase_windup_enabled=False,
                  gmf_enabled=False,
-                 slip_rate_limit_s=0.0):
+                 slip_rate_limit_s=0.0,
+                 ztd_tie_sigma=None):
         super().__init__(daemon=True, name="AntPosEst")
         # Phase 3 wind-up (Wu 1993): per-SV cumulative wind-up tracker
         # + carrier-phase correction applied before filter.update().
@@ -1418,6 +1425,10 @@ class AntPosEstThread(threading.Thread):
             from peppar_fix.phase_windup import PhaseWindupTracker
             self._windup_tracker = PhaseWindupTracker()
         self._gmf_enabled = bool(gmf_enabled)
+        self._ztd_tie_sigma = (float(ztd_tie_sigma)
+                               if ztd_tie_sigma is not None
+                               and float(ztd_tie_sigma) > 0
+                               else None)
         self._gmf_provider = None  # built lazily on first epoch with
                                     # usable position (needs rcv lat/lon)
         # ANTEX parser + receiver antenna type (Phase 2 of obs-model
@@ -2275,6 +2286,13 @@ class AntPosEstThread(threading.Thread):
                 receiver_offset_ecef=tide_offset)
             if n_used < 4:
                 continue
+
+            # Soft prior on residual ZTD (post-update rank-1 EKF
+            # pseudo-measurement z=0).  Constrains the position-altitude/
+            # ZTD/clock null-mode that otherwise lets the filter wander
+            # m-scale.  No-op when self._ztd_tie_sigma is None or <= 0.
+            if getattr(self, "_ztd_tie_sigma", None):
+                filt.apply_ztd_tie(self._ztd_tie_sigma)
 
             self._n_epochs += 1
 
@@ -6172,6 +6190,7 @@ def run(args):
             gmf_enabled=bool(getattr(args, "gmf", False)),
             slip_rate_limit_s=float(
                 getattr(args, "slip_rate_limit_s", 0.0)),
+            ztd_tie_sigma=getattr(args, "ztd_tie_sigma", None),
         )
         ape_thread.start()
 
@@ -6552,6 +6571,19 @@ Two-phase operation:
                           "achieves 6.2× total reduction vs defaults "
                           "(mean 3D 9.30 → 1.51 m).  See "
                           "project_to_main_qpos_sweep_20260424.md.")
+    pos.add_argument("--ztd-tie-sigma", type=float, default=None,
+                     metavar="SIGMA_M",
+                     help="Soft prior on residual ZTD as a per-epoch "
+                          "rank-1 EKF pseudo-measurement (z=0, σ=SIGMA_M). "
+                          "Constrains the (position-altitude, ZTD, clock) "
+                          "null direction that otherwise lets the streaming "
+                          "EKF wander metres on lab data despite stable "
+                          "lock.  Recommended ~0.05 m (matches the IGS-"
+                          "standard Q_ZTD random-walk scale and the "
+                          "empirical 18 cm / 24 h ABMF wet-residual "
+                          "variation).  Default disabled.  See "
+                          "docs/ssr-phase-bias-step-handling.md and the "
+                          "harness ``--ztd-tie`` flag (same mechanism).")
     pos.add_argument("--ztd-pwc-window-s", type=float, default=None,
                      metavar="SECONDS",
                      help="Enable PRIDE-style piece-wise constant ZTD with "

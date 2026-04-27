@@ -439,6 +439,35 @@ class PPPFilter:
         sigma_y = self.rx_tcxo_adev_1s
         return (C * sigma_y) ** 2
 
+    def apply_ztd_tie(self, sigma_m: float) -> None:
+        """Apply a soft prior on the residual ZTD state as a rank-1 EKF
+        update (pseudo-measurement z=0, h=e_ZTD, R=σ²).
+
+        Motivation: the (position-altitude, ZTD, clock, mean-ambiguity)
+        tuple forms a near-null direction at typical receiver
+        geometries.  Streaming-EKF observations alone don't constrain
+        this direction; small per-epoch noise gets absorbed along it
+        and the filter wanders (day0426 smoke runs: ZTD swung 1.7m
+        and altitude 18m within 5 minutes despite stable lock).
+
+        IDX_ZTD is the *residual* on top of Saastamoinen+GMF bulk
+        tropo, so a soft prior z=0 with σ ≈ 0.05 m says "the residual
+        should be small (Saastamoinen handles the bulk)".  Filter can
+        deviate when observations strongly support it.  This is an
+        *intentional* constraint on the null-mode, not a hard pin.
+
+        See docs/ssr-phase-bias-step-handling.md (the slip-detection
+        side of the same family of issues) and Bravo's day0423 PRIDE
+        gps-only filter degeneracy memo for the underlying analysis.
+        """
+        if sigma_m is None or sigma_m <= 0:
+            return
+        y = -float(self.x[IDX_ZTD])                     # z=0 minus state
+        S = float(self.P[IDX_ZTD, IDX_ZTD]) + sigma_m ** 2
+        K = self.P[:, IDX_ZTD] / S
+        self.x = self.x + K * y
+        self.P = self.P - np.outer(K, self.P[IDX_ZTD, :])
+
     def add_ambiguity(self, sv, N_init_m):
         idx = len(self.x) - N_BASE
         self.sv_to_idx[sv] = idx
