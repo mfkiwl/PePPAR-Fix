@@ -351,5 +351,52 @@ class TestStalePrune(unittest.TestCase):
         self.assertIn('G02', mon._prev)
 
 
+class TestSlipRateLimiter(unittest.TestCase):
+    """min_slip_interval_s suppresses repeat slip events on the same SV
+    within the configured window — see day0426 trajectory analysis memo
+    on per-SV state-machine churn during E29-style multi-epoch slip
+    storms."""
+
+    def _drop_lock(self, sv, t, lock_ms_after, mon, epoch):
+        # Two-epoch sequence to exercise UBX locktime-drop detector.
+        mon.check([{'sv': sv, 'lock_duration_ms': 5000, 'cno': 45}],
+                  t_mono_s=t - 1.0, epoch=epoch)
+        return mon.check(
+            [{'sv': sv, 'lock_duration_ms': lock_ms_after, 'cno': 45}],
+            t_mono_s=t, epoch=epoch + 1)
+
+    def test_disabled_by_default(self):
+        mon = CycleSlipMonitor()
+        ev1 = self._drop_lock('E12', 1.0, 100, mon, 0)
+        ev2 = self._drop_lock('E12', 5.0, 100, mon, 2)
+        self.assertEqual(len(ev1), 1)
+        self.assertEqual(len(ev2), 1, "default = no rate limit")
+
+    def test_suppresses_within_window(self):
+        mon = CycleSlipMonitor(min_slip_interval_s=10.0)
+        ev1 = self._drop_lock('E12', 1.0, 100, mon, 0)
+        ev2 = self._drop_lock('E12', 5.0, 100, mon, 2)  # within 10s
+        self.assertEqual(len(ev1), 1)
+        self.assertEqual(len(ev2), 0, "within window should suppress")
+        # Counted as suppressed, not as a slip.
+        self.assertEqual(mon.stats()['E12']['suppressed'], 1)
+        self.assertEqual(mon.stats()['E12']['total'], 1)
+
+    def test_fires_after_window(self):
+        mon = CycleSlipMonitor(min_slip_interval_s=10.0)
+        ev1 = self._drop_lock('E12', 1.0, 100, mon, 0)
+        ev2 = self._drop_lock('E12', 15.0, 100, mon, 2)  # past 10s
+        self.assertEqual(len(ev1), 1)
+        self.assertEqual(len(ev2), 1, "past window should fire")
+        self.assertEqual(mon.stats()['E12']['total'], 2)
+
+    def test_per_sv_independent(self):
+        mon = CycleSlipMonitor(min_slip_interval_s=30.0)
+        ev1 = self._drop_lock('E12', 1.0, 100, mon, 0)
+        ev2 = self._drop_lock('E33', 5.0, 100, mon, 2)  # different SV
+        self.assertEqual(len(ev1), 1)
+        self.assertEqual(len(ev2), 1, "per-SV — E33 not suppressed by E12")
+
+
 if __name__ == '__main__':
     unittest.main()

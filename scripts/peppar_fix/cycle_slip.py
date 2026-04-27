@@ -173,7 +173,7 @@ class CycleSlipMonitor:
     """
 
     def __init__(self, *, mw_tracker=None, stale_after_s: float = 60.0,
-                 csv_writer=None):
+                 csv_writer=None, min_slip_interval_s: float = 0.0):
         self._prev: dict[str, _PrevObs] = {}
         self._mw_tracker = mw_tracker
         self._stale_after_s = stale_after_s
@@ -182,6 +182,18 @@ class CycleSlipMonitor:
         # Antenna-quality counters
         self._count_total: dict[str, int] = {}
         self._count_by_reason: dict[str, dict[str, int]] = {}
+        # Slip-rate-limiter: suppress per-SV events that fire within
+        # min_slip_interval_s of the previous emitted event for the same
+        # SV.  Prevents the per-SV state machine from churning during a
+        # multi-epoch disturbance (one E29-style slip storm currently fires
+        # 4-10× consecutive events).  0.0 = disabled (legacy).  Bravo's
+        # day0426 trajectory analysis recommends ~30-300 s; tighter values
+        # accept some real consecutive slips, looser values prefer state-
+        # machine stability.  Per-SV last-emit timestamp + suppressed count
+        # are diagnostics-only (not in the event stream).
+        self._min_slip_interval_s = float(min_slip_interval_s)
+        self._last_slip_t: dict[str, float] = {}
+        self._count_suppressed: dict[str, int] = {}
 
     # ── core ─────────────────────────────────────────────────────── #
 
@@ -281,29 +293,44 @@ class CycleSlipMonitor:
                         reasons.append("mw_jump")
 
             if reasons:
-                ev = SlipEvent(
-                    sv=sv,
-                    epoch=epoch,
-                    reasons=reasons,
-                    lock_ms=lock_ms,
-                    cno=cno,
-                    elevation_deg=elevations.get(sv),
-                    azimuth_deg=azimuths.get(sv),
-                    ipp_sza_deg=ipp_szas.get(sv),
-                    gap_s=gap_s,
-                    gf_jump_m=gf_delta,
-                    mw_jump_cyc=mw_delta_cyc,
-                )
-                events.append(ev)
-                self._count_total[sv] = self._count_total.get(sv, 0) + 1
-                per_reason = self._count_by_reason.setdefault(sv, {})
-                for r in reasons:
-                    per_reason[r] = per_reason.get(r, 0) + 1
-                if self._csv_writer is not None:
-                    try:
-                        self._csv_writer.writerow(ev.as_csv_row())
-                    except Exception:
-                        log.warning("slip csv write failed", exc_info=True)
+                # Slip-rate-limiter: if the last emitted event for this SV
+                # was less than min_slip_interval_s ago, treat this jump as
+                # continuation of the same disturbance.  Prevents the per-
+                # SV state machine from cycling FLOAT→CONVERGING→ANCHORING
+                # multiple times within one slip storm.  See the day0426
+                # trajectory analysis memo.
+                last_t = self._last_slip_t.get(sv)
+                if (self._min_slip_interval_s > 0
+                        and last_t is not None
+                        and (t_mono_s - last_t) < self._min_slip_interval_s):
+                    self._count_suppressed[sv] = (
+                        self._count_suppressed.get(sv, 0) + 1)
+                else:
+                    ev = SlipEvent(
+                        sv=sv,
+                        epoch=epoch,
+                        reasons=reasons,
+                        lock_ms=lock_ms,
+                        cno=cno,
+                        elevation_deg=elevations.get(sv),
+                        azimuth_deg=azimuths.get(sv),
+                        ipp_sza_deg=ipp_szas.get(sv),
+                        gap_s=gap_s,
+                        gf_jump_m=gf_delta,
+                        mw_jump_cyc=mw_delta_cyc,
+                    )
+                    events.append(ev)
+                    self._last_slip_t[sv] = t_mono_s
+                    self._count_total[sv] = self._count_total.get(sv, 0) + 1
+                    per_reason = self._count_by_reason.setdefault(sv, {})
+                    for r in reasons:
+                        per_reason[r] = per_reason.get(r, 0) + 1
+                    if self._csv_writer is not None:
+                        try:
+                            self._csv_writer.writerow(ev.as_csv_row())
+                        except Exception:
+                            log.warning("slip csv write failed",
+                                        exc_info=True)
 
             # Store RAW phase for the next epoch's GF comparison — see
             # detector 3 above for why.
@@ -338,7 +365,8 @@ class CycleSlipMonitor:
     def stats(self) -> dict[str, dict]:
         return {
             sv: {'total': self._count_total[sv],
-                 'by_reason': dict(self._count_by_reason.get(sv, {}))}
+                 'by_reason': dict(self._count_by_reason.get(sv, {})),
+                 'suppressed': self._count_suppressed.get(sv, 0)}
             for sv in self._count_total
         }
 

@@ -1056,7 +1056,8 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
         wl_only=bool(getattr(args, "wl_only", False)),
     )
     slip_monitor = CycleSlipMonitor(
-        mw_tracker=mw_tracker, csv_writer=_slip_csv_writer())
+        mw_tracker=mw_tracker, csv_writer=_slip_csv_writer(),
+        min_slip_interval_s=float(getattr(args, 'slip_rate_limit_s', 0.0)))
 
     prev_t = None
     prev_pos_ecef = None
@@ -1402,7 +1403,8 @@ class AntPosEstThread(threading.Thread):
                  clock_model="random_walk",
                  rx_tcxo_adev_1s=None,
                  phase_windup_enabled=False,
-                 gmf_enabled=False):
+                 gmf_enabled=False,
+                 slip_rate_limit_s=0.0):
         super().__init__(daemon=True, name="AntPosEst")
         # Phase 3 wind-up (Wu 1993): per-SV cumulative wind-up tracker
         # + carrier-phase correction applied before filter.update().
@@ -1577,7 +1579,8 @@ class AntPosEstThread(threading.Thread):
         # ANCHORED from the tracker instead of raw NL-fix count.
         self._promoter = AnchoringSvPromoter(self._sv_state)
         self._slip_monitor = CycleSlipMonitor(
-            mw_tracker=self._mw, csv_writer=_slip_csv_writer())
+            mw_tracker=self._mw, csv_writer=_slip_csv_writer(),
+            min_slip_interval_s=float(slip_rate_limit_s))
 
     @property
     def decimation(self):
@@ -6167,6 +6170,8 @@ def run(args):
             rx_tcxo_adev_1s=getattr(args, "rx_tcxo_adev_1s", None),
             phase_windup_enabled=bool(getattr(args, "phase_windup", False)),
             gmf_enabled=bool(getattr(args, "gmf", False)),
+            slip_rate_limit_s=float(
+                getattr(args, "slip_rate_limit_s", 0.0)),
         )
         ape_thread.start()
 
@@ -6853,6 +6858,21 @@ Two-phase operation:
                            "confidence, lock_ms, cno, elev, gap_s, and "
                            "per-detector magnitudes.  Used for post-hoc "
                            "antenna/mount quality reporting.")
+    ticc.add_argument("--slip-rate-limit-s", type=float, default=0.0,
+                      metavar="SECONDS",
+                      help="Per-SV slip-event rate limiter (seconds).  "
+                           "When > 0, suppress slip events that fire "
+                           "within N s of the previous emitted event "
+                           "for the same SV — treats them as continuation "
+                           "of one slip storm rather than separate events. "
+                           "Prevents per-SV state machine churn during "
+                           "multi-epoch disturbances (E29-style 4-10× "
+                           "consecutive firings cycle FLOAT→ANCHORING "
+                           "repeatedly, blocking convergence).  0 = "
+                           "disabled (legacy).  Bravo's day0426 "
+                           "trajectory analysis recommends 30-300 s; "
+                           "see project_to_main_trajectory_analysis_"
+                           "day0426_20260426.md.")
     ticc.add_argument("--qerr-log", default=None,
                       help="Optional raw qErr CSV log path.  Each row "
                            "captures one TIM-TP message from the F9T with "
