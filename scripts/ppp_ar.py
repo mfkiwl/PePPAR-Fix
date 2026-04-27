@@ -410,6 +410,10 @@ class NarrowLaneResolver:
         self.last_ratio = 0.0   # LAMBDA ratio test value (0 = not attempted)
         self.last_method = ""   # "lambda" or "rounding"
         self.last_success_rate = 0.0  # bootstrap success rate (0 = not computed)
+        # AR readiness — Charlie A1.  Computed every resolve_nl call,
+        # not just when LAMBDA attempts.  None if too few candidates.
+        self.last_ar_readiness = None
+        self.last_screened_count = 0
         # LAMBDA P_bootstrap threshold.  Classical PPP-AR literature uses 0.999,
         # but day0419f NL_DIAG data (see project_nl_diag_classification_20260419
         # and project_ptpmon_nl_diag_result_20260419) showed P saturates at
@@ -663,6 +667,13 @@ class NarrowLaneResolver:
                 diag.update(sv, result=RESULT_SKIP_PRESCREEN,
                             reason=f"frac={n1_frac:.3f} sigma={sigma_n1:.3f}")
 
+        # AR-readiness metric — Charlie's A1 (gap memo).  Compute P_IB
+        # on the screened set every epoch, regardless of whether LAMBDA
+        # actually attempts.  Tells us "would AR succeed if it tried
+        # right now?"  Stored on self for the engine to log.
+        self.last_screened_count = len(screened)
+        self.last_ar_readiness = self._compute_ar_readiness(filt, screened)
+
         # Try LAMBDA when >= 4 candidates pass pre-screen
         if len(screened) >= 4:
             newly_fixed = self._attempt_lambda(filt, screened)
@@ -759,6 +770,44 @@ class NarrowLaneResolver:
         if diag is not None:
             diag.emit()
         return newly_fixed
+
+    def _compute_ar_readiness(self, filt, screened):
+        """NL Integer Bootstrap success rate on the current screened set.
+
+        Charlie's A1 (gap memo).  Returns P_IB ∈ [0, 1] derived from
+        Q_â (NL submatrix) → LAMBDA decorrelation → Teunissen
+        bootstrap-success product.  Returns None when too few
+        candidates (< 2) to compute meaningfully.
+
+        Logged by the engine as [AR_READINESS] alongside
+        [WL_AR_READINESS].  Decision rule (Geng et al. 2010):
+
+        - P_IB > 0.999 sustained → full NL AR ready
+        - P_IB > 0.99  sustained → partial NL AR ready
+        - P_IB < 0.99 → diagnose Q_â per-SV before NL push
+        """
+        n = len(screened)
+        if n < 2:
+            return None
+        si_arr = np.array([c[2] for c in screened], dtype=int)
+        lambda_nls = np.array([c[7] for c in screened])
+        Qa_nl = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                Qa_nl[i, j] = filt.P[si_arr[i], si_arr[j]] / (
+                    lambda_nls[i] * lambda_nls[j])
+        try:
+            eigvals = np.linalg.eigvalsh(Qa_nl)
+        except np.linalg.LinAlgError:
+            return None
+        Qa_reg = Qa_nl.copy()
+        if eigvals.min() <= 0:
+            Qa_reg += np.eye(n) * max(1e-10, -eigvals.min() * 2)
+        try:
+            _, _, D_diag = lambda_decorrelate(Qa_reg)
+        except Exception:
+            return None
+        return bootstrap_success_rate(D_diag)
 
     def _attempt_lambda(self, filt, screened):
         """Try LAMBDA resolution on screened candidates.

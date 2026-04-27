@@ -2698,6 +2698,21 @@ class AntPosEstThread(threading.Thread):
                         "(>0.99=PAR-ready, >0.999=full)",
                         p_wl_ib, n_wl,
                     )
+                    # NL AR readiness — Charlie A1.  Pulled from
+                    # NlResolver.last_ar_readiness (set every resolve_nl
+                    # call, regardless of whether LAMBDA attempted).
+                    p_nl_ib = getattr(nl, 'last_ar_readiness', None)
+                    n_screened = getattr(nl, 'last_screened_count', 0)
+                    if p_nl_ib is None:
+                        log.info(
+                            "  [AR_READINESS] p_nl_ib=- n=%d "
+                            "(too few screened)", n_screened)
+                    else:
+                        log.info(
+                            "  [AR_READINESS] p_nl_ib=%.4f n=%d "
+                            "(>0.99=PAR-ready, >0.999=full)",
+                            p_nl_ib, n_screened,
+                        )
                 # WL integrality snapshot every 60 epochs (~1/min).  Shows
                 # what WL integers the MW tracker would commit — even in
                 # wl-only mode where those commits aren't applied to the
