@@ -834,6 +834,29 @@ class SSRState:
             return None
         return pb.bias_m
 
+    def get_phase_bias_disc(self, prn, signal_code):
+        """Return the IGS-SSR Signal Discontinuity Counter (IDF031) for
+        (prn, signal_code), or None if no current phase bias.
+
+        Path B SSR-discontinuity detection (see
+        docs/ssr-phase-bias-step-handling.md): the AC increments this
+        counter at every bias-segment boundary (yaw maneuvers, datum
+        changes, integer rollovers).  Comparing the counter across
+        epochs catches sub-threshold AC-driven drift that the Path A
+        |Δbias|>0.5 cyc thresholding misses.
+
+        pyrtcm parses IDF031 as part of IGS-SSR phase-bias messages
+        (4076_026/046/066/086/106).  ssr_corrections._parse_phase_bias
+        already extracts it into BiasCorrection.disc_counter.
+        """
+        pb = self._phase_bias.get(prn, {}).get(signal_code)
+        if pb is None:
+            return None
+        age = (datetime.now(timezone.utc) - pb.rx_time).total_seconds()
+        if age > MAX_BIAS_AGE:
+            return None
+        return pb.disc_counter
+
     def summary(self):
         """Return a string summarizing current SSR state."""
         return (f"SSR: {self.n_orbit} orbit, {self.n_clock} clock, "

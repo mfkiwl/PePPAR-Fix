@@ -895,18 +895,54 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         # E36 mw=5-7c with lock=64.5s, gf<1cm).
                         if not hasattr(ssr, '_pb_prev_value'):
                             ssr._pb_prev_value = {}
+                        if not hasattr(ssr, '_pb_prev_disc'):
+                            ssr._pb_prev_disc = {}
+                        # Path B detection: compare IGS-SSR IDF031
+                        # discontinuity counter against prior epoch's
+                        # value.  AC increments on segment boundary
+                        # (yaw maneuver, datum change, integer rollover).
+                        # Catches sub-threshold AC-driven drift that
+                        # Path A's |Δ|>0.5 cyc test misses.  Both
+                        # triggers OR together — flag set on either
+                        # condition.
+                        disc_f1 = ssr.get_phase_bias_disc(
+                            sv, rinex_f1[1]) if (
+                            ssr is not None and rinex_f1) else None
+                        if disc_f1 is None and rinex_f1:
+                            disc_f1 = ssr.get_phase_bias_disc(
+                                sv, rinex_f1[0])
+                        disc_f2 = ssr.get_phase_bias_disc(
+                            sv, rinex_f2[1]) if (
+                            ssr is not None and rinex_f2) else None
+                        if disc_f2 is None and rinex_f2:
+                            disc_f2 = ssr.get_phase_bias_disc(
+                                sv, rinex_f2[0])
                         if pb_f1 is not None:
                             prev = ssr._pb_prev_value.get((sv, 'f1'))
                             if prev is not None and wl_f1:
                                 if abs((pb_f1 - prev) / wl_f1) > 0.5:
-                                    phase_bias_stepped = True
+                                    phase_bias_stepped = True  # Path A
                             ssr._pb_prev_value[(sv, 'f1')] = pb_f1
+                        if disc_f1 is not None:
+                            prev_disc = ssr._pb_prev_disc.get(
+                                (sv, 'f1'))
+                            if (prev_disc is not None
+                                    and disc_f1 != prev_disc):
+                                phase_bias_stepped = True  # Path B
+                            ssr._pb_prev_disc[(sv, 'f1')] = disc_f1
                         if pb_f2 is not None:
                             prev = ssr._pb_prev_value.get((sv, 'f2'))
                             if prev is not None and wl_f2:
                                 if abs((pb_f2 - prev) / wl_f2) > 0.5:
-                                    phase_bias_stepped = True
+                                    phase_bias_stepped = True  # Path A
                             ssr._pb_prev_value[(sv, 'f2')] = pb_f2
+                        if disc_f2 is not None:
+                            prev_disc = ssr._pb_prev_disc.get(
+                                (sv, 'f2'))
+                            if (prev_disc is not None
+                                    and disc_f2 != prev_disc):
+                                phase_bias_stepped = True  # Path B
+                            ssr._pb_prev_disc[(sv, 'f2')] = disc_f2
                         if pb_f1 is not None:
                             cp_f1 -= pb_f1 / wl_f1  # meters → cycles
                         if pb_f2 is not None:
