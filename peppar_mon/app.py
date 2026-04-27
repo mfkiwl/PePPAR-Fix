@@ -314,6 +314,9 @@ class PepparMonApp(App):
         self.query_one("#ar-readiness", ArReadinessLine).update_state(
             wl_p_ib=s.wl_p_ib,
             wl_p_ib_n=s.wl_p_ib_n,
+            nl_p_ib=s.nl_p_ib,
+            nl_p_ib_n=s.nl_p_ib_n,
+            nl_screened_too_few=s.nl_screened_too_few,
         )
         if self._aggregator is not None:
             from peppar_mon.fleet import compute_summary

@@ -912,5 +912,119 @@ class WlArReadinessParsingTest(unittest.TestCase):
         self.assertIsNone(r.state.wl_p_ib_n)
 
 
+class NlArReadinessParsingTest(unittest.TestCase):
+    """``[AR_READINESS] p_nl_ib=... n=...`` carries the NL Integer
+    Bootstrap success rate (engine commit 3cc429e, Charlie A1).
+    Two emission forms:
+      * Numeric: ``p_nl_ib=0.NNNN n=N (>0.99=PAR-ready, ...)``
+      * "Too few screened": ``p_nl_ib=- n=N (too few screened)``
+    Critical: the [AR_READINESS] tag must NOT match the WL line
+    [WL_AR_READINESS] which contains AR_READINESS as a substring.
+    """
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.path = Path(self._tmpdir.name) / "engine.log"
+
+    def test_numeric_form_parsed(self):
+        self.path.write_text(
+            "2026-04-27 10:00:00,000 INFO   [AR_READINESS] "
+            "p_nl_ib=0.9234 n=4 (>0.99=PAR-ready, >0.999=full)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.nl_p_ib is not None)
+        self.assertAlmostEqual(r.state.nl_p_ib, 0.9234)
+        self.assertEqual(r.state.nl_p_ib_n, 4)
+        self.assertFalse(r.state.nl_screened_too_few)
+
+    def test_too_few_screened_form_parsed(self):
+        """Engine emits this when fewer than 2 SVs pass NL pre-screen.
+        nl_p_ib stays None; nl_screened_too_few flips to True; n is
+        still captured so the widget can show the screened count."""
+        self.path.write_text(
+            "2026-04-27 10:00:00,000 INFO   [AR_READINESS] "
+            "p_nl_ib=- n=2 (too few screened)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.nl_p_ib_n is not None)
+        self.assertIsNone(r.state.nl_p_ib)
+        self.assertEqual(r.state.nl_p_ib_n, 2)
+        self.assertTrue(r.state.nl_screened_too_few)
+
+    def test_wl_line_does_not_match_nl_pattern(self):
+        """The NL regex must reject the WL line.  ``[WL_AR_READINESS]``
+        contains ``AR_READINESS`` as a substring; a naive regex
+        would match both.  Verify a WL-only log doesn't populate
+        the nl_* fields."""
+        self.path.write_text(
+            "2026-04-27 10:00:00,000 INFO   [WL_AR_READINESS] "
+            "p_wl_ib=0.9876 n=5 (>0.99=PAR-ready, >0.999=full)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.wl_p_ib is not None)
+        # WL captured…
+        self.assertAlmostEqual(r.state.wl_p_ib, 0.9876)
+        # …but no NL leak from the field-name disambiguation.
+        self.assertIsNone(r.state.nl_p_ib)
+        self.assertIsNone(r.state.nl_p_ib_n)
+        self.assertFalse(r.state.nl_screened_too_few)
+
+    def test_too_few_then_numeric_clears_flag(self):
+        """If a later epoch's NL becomes computable (enough SVs
+        pass pre-screen), the too_few flag must clear.  Otherwise
+        the widget shows stale "(too few screened)" alongside a
+        valid numeric P_NL_IB."""
+        self.path.write_text(
+            "2026-04-27 10:00:00,000 INFO   [AR_READINESS] "
+            "p_nl_ib=- n=1 (too few screened)\n"
+            "2026-04-27 10:00:10,000 INFO   [AR_READINESS] "
+            "p_nl_ib=0.5500 n=3 (>0.99=PAR-ready, >0.999=full)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(
+            lambda: r.state.nl_p_ib is not None
+            and not r.state.nl_screened_too_few
+        )
+        self.assertAlmostEqual(r.state.nl_p_ib, 0.55)
+        self.assertEqual(r.state.nl_p_ib_n, 3)
+        self.assertFalse(r.state.nl_screened_too_few)
+
+    def test_numeric_then_too_few_sets_flag(self):
+        """Reverse direction: numeric P_NL_IB followed by a too-few
+        epoch — flag must flip on, nl_p_ib must clear so the
+        widget doesn't render a stale value."""
+        self.path.write_text(
+            "2026-04-27 10:00:00,000 INFO   [AR_READINESS] "
+            "p_nl_ib=0.7500 n=3 (>0.99=PAR-ready, >0.999=full)\n"
+            "2026-04-27 10:00:10,000 INFO   [AR_READINESS] "
+            "p_nl_ib=- n=1 (too few screened)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(lambda: r.state.nl_screened_too_few)
+        self.assertIsNone(r.state.nl_p_ib)
+        self.assertEqual(r.state.nl_p_ib_n, 1)
+        self.assertTrue(r.state.nl_screened_too_few)
+
+    def test_wl_and_nl_lines_in_sequence(self):
+        """Engine emits both lines back-to-back every 10 epochs.
+        Both fields must populate independently; neither leaks."""
+        self.path.write_text(
+            "2026-04-27 10:00:00,000 INFO   [WL_AR_READINESS] "
+            "p_wl_ib=0.9876 n=5 (>0.99=PAR-ready, >0.999=full)\n"
+            "2026-04-27 10:00:00,001 INFO   [AR_READINESS] "
+            "p_nl_ib=0.9234 n=4 (>0.99=PAR-ready, >0.999=full)\n"
+        )
+        r = LogReader(self.path); r.start(); self.addCleanup(r.stop)
+        _wait_until(
+            lambda: r.state.wl_p_ib is not None
+            and r.state.nl_p_ib is not None
+        )
+        self.assertAlmostEqual(r.state.wl_p_ib, 0.9876)
+        self.assertEqual(r.state.wl_p_ib_n, 5)
+        self.assertAlmostEqual(r.state.nl_p_ib, 0.9234)
+        self.assertEqual(r.state.nl_p_ib_n, 4)
+
+
 if __name__ == "__main__":
     unittest.main()

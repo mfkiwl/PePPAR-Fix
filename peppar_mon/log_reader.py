@@ -276,6 +276,32 @@ class LogState:
     #: P_IB at n=8.
     wl_p_ib_n: Optional[int] = None
 
+    #: Latest NL Integer Bootstrap success rate (Teunissen 1998/1999),
+    #: parsed from ``[AR_READINESS] p_nl_ib=... n=...`` log lines
+    #: (engine commit 3cc429e, Charlie A1).  Range [0, 1].  Same
+    #: thresholds as ``wl_p_ib`` (>0.999=full, >0.99=PAR, <0.99
+    #: diagnose).  ``None`` means one of two things, distinguished
+    #: by ``nl_screened_too_few``:
+    #:   * Engine has not emitted [AR_READINESS] yet (older build,
+    #:     or first ~10 epochs).  ``nl_screened_too_few`` is False.
+    #:   * Engine emitted ``p_nl_ib=- n=N (too few screened)`` —
+    #:     fewer than 2 SVs passed the NL pre-screen, so P_IB is
+    #:     undefined.  ``nl_screened_too_few`` is True; ``nl_p_ib_n``
+    #:     carries the screened count.
+    nl_p_ib: Optional[float] = None
+
+    #: Number of SVs in the NL pre-screened candidate set.  Always
+    #: populated when [AR_READINESS] has been observed even if
+    #: ``nl_p_ib`` is None (the "too few screened" case).
+    nl_p_ib_n: Optional[int] = None
+
+    #: True when the most recent [AR_READINESS] line carried the
+    #: ``p_nl_ib=- n=N (too few screened)`` form — distinguishes the
+    #: "no signal yet" state (False, also nl_p_ib None) from "signal
+    #: says NL not viable this epoch" (True).  Resets to False the
+    #: moment a numeric P_NL_IB lands.
+    nl_screened_too_few: bool = False
+
 
 @dataclass(frozen=True)
 class FixSetIntegrityTrip:
@@ -407,6 +433,7 @@ class LogReader:
         self._parse_cohort_line(line)
         self._parse_fix_set_integrity_trip(line)
         self._parse_wl_ar_readiness_line(line)
+        self._parse_ar_readiness_line(line)
 
     def _parse_antposest_line(self, line: str) -> None:
         """Extract position + σ + nav2Δ from ``[AntPosEst N] ...``.
@@ -577,6 +604,41 @@ class LogReader:
             return
         self.state.wl_p_ib = float(m.group("p"))
         self.state.wl_p_ib_n = int(m.group("n"))
+
+    def _parse_ar_readiness_line(self, line: str) -> None:
+        """Parse ``[AR_READINESS] p_nl_ib=... n=... (...)``.
+
+        Engine emits one of these every 10 epochs alongside the
+        WL line (commit 3cc429e, Charlie A1).  Two forms:
+
+          * ``p_nl_ib=0.9876 n=5 (>0.99=PAR-ready, >0.999=full)`` —
+            normal case, ``nl_p_ib`` set, ``nl_screened_too_few``
+            False.
+          * ``p_nl_ib=- n=2 (too few screened)`` — fewer than 2
+            SVs passed the NL pre-screen so P_IB is undefined;
+            ``nl_p_ib`` stays None, ``nl_screened_too_few`` True.
+
+        Both forms update ``nl_p_ib_n`` so the widget can display
+        the screened count regardless of whether P_IB is computable.
+
+        The tag is ``[AR_READINESS]`` not ``[NL_AR_READINESS]`` —
+        distinct from the WL line by the field name (``p_nl_ib``
+        vs ``p_wl_ib``) and by the absence of the ``WL_`` prefix.
+        Be careful the regex doesn't match the WL line: anchor on
+        the field name not the bracket, since ``[WL_AR_READINESS]``
+        contains ``AR_READINESS`` as a substring.
+        """
+        m = _AR_READINESS_NUMERIC_RE.search(line)
+        if m is not None:
+            self.state.nl_p_ib = float(m.group("p"))
+            self.state.nl_p_ib_n = int(m.group("n"))
+            self.state.nl_screened_too_few = False
+            return
+        m = _AR_READINESS_TOO_FEW_RE.search(line)
+        if m is not None:
+            self.state.nl_p_ib = None
+            self.state.nl_p_ib_n = int(m.group("n"))
+            self.state.nl_screened_too_few = True
 
     def _parse_stream_lines(self, line: str) -> None:
         """Capture the NTRIP correction-stream identifiers.
@@ -912,6 +974,34 @@ _COHORT_POS_RE = re.compile(
 _COHORT_ZTD_RE = re.compile(
     r"ztd_cohort_n=(?P<n>\d+)\s+"
     r"Δztd=(?P<d>[-+]?\d+\.\d+)mm"
+)
+
+# Matches the NL form ``  [AR_READINESS] p_nl_ib=0.9876 n=5 (...)`` —
+# the engine emission from commit 3cc429e (Charlie A1).  Two
+# tag-disambiguating constraints:
+#
+#   1. The bracket prefix must be ``[AR_READINESS]`` exactly, NOT
+#      ``[WL_AR_READINESS]``.  We anchor on a non-letter / non-
+#      underscore boundary before the ``[`` so the ``WL_`` prefix
+#      doesn't slide into the match.
+#   2. The ``p_nl_ib=`` field name distinguishes it from
+#      ``p_wl_ib=`` regardless.  Belt + suspenders.
+#
+# Two forms emitted by the engine:
+#   * Numeric: ``p_nl_ib=0.NNNN n=N (>0.99=PAR-ready, >0.999=full)``
+#   * "Too few screened": ``p_nl_ib=- n=N (too few screened)``
+# Separate regexes keep parsing simple and the state-update logic
+# obvious — order of attempts in _parse_ar_readiness_line.
+_AR_READINESS_NUMERIC_RE = re.compile(
+    r"(?<![A-Z_])\[AR_READINESS\]\s+"
+    r"p_nl_ib=(?P<p>[\d.]+)\s+"
+    r"n=(?P<n>\d+)"
+)
+_AR_READINESS_TOO_FEW_RE = re.compile(
+    r"(?<![A-Z_])\[AR_READINESS\]\s+"
+    r"p_nl_ib=-\s+"
+    r"n=(?P<n>\d+)\s*"
+    r"\(too few screened\)"
 )
 
 # Matches ``  [WL_AR_READINESS] p_wl_ib=0.9876 n=5 (>0.99=PAR-ready, >0.999=full)``.

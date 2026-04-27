@@ -979,25 +979,33 @@ _AR_READINESS_FULL = 0.999
 
 
 class ArReadinessLine(Widget):
-    """Single-line WL Integer Bootstrap success rate readout.
+    """Single-line WL + NL Integer Bootstrap success rate readout.
 
-    Layout when the engine has emitted [WL_AR_READINESS]::
+    Layout when both metrics are live::
 
-        WL P_IB: 0.9876 (n=5) ✓PAR-ready
+        WL P_IB: 0.9876 (n=5) ✓PAR-ready  •  NL P_IB: 0.9234 (n=4) diagnose
 
-    Color-coded against the Geng et al. 2010 thresholds:
+    NL has three variant forms in addition to the numeric value:
 
-      * P_IB ≥ 0.999 → green (full WL AR green-light)
-      * P_IB ≥ 0.99  → yellow (partial AR / PAR-ready)
-      * P_IB < 0.99  → red (diagnose Q_â per-SV before AR push)
+      * ``NL P_IB: (waiting)`` — engine hasn't emitted [AR_READINESS]
+        yet (older build, or first ~10 epochs)
+      * ``NL P_IB: (too few screened, n=2)`` — engine emitted
+        ``p_nl_ib=- n=N (too few screened)`` because fewer than 2 SVs
+        pass NL pre-screen.  Distinct from "waiting" — engine IS
+        live, but the float doesn't have enough NL-eligible SVs this
+        epoch.  This is the dominant state on today's lab data per
+        the wl_drift cycling finding.
 
-    Before the engine emits the first [WL_AR_READINESS] line —
-    older engine builds without commit 6e9cca6, or the first
-    ~10 epochs of a new run — the line shows
-    ``WL P_IB: (waiting)``.
+    Color-coded against the Geng et al. 2010 thresholds (same for
+    WL and NL):
 
-    Stage 1 of B1 (per dayplan I-142015-main): WL only.  Stage 2
-    will add NL P_IB once A1 (NL P_IB emission) ships.
+      * P_IB ≥ 0.999 → green (full AR green-light)
+      * P_IB ≥ 0.99  → yellow (PAR-ready)
+      * P_IB < 0.99  → red (diagnose Q_â per-SV)
+
+    Stage 2 of B1 (per dayplan I-165112-bravo): adds NL alongside
+    WL on the same row.  Stage 1 (I-142015-main) shipped the WL
+    half at 5c1fb7a; this stage extends it.
     """
 
     DEFAULT_CSS = """
@@ -1012,64 +1020,116 @@ class ArReadinessLine(Widget):
         *,
         wl_p_ib: Optional[float] = None,
         wl_p_ib_n: Optional[int] = None,
+        nl_p_ib: Optional[float] = None,
+        nl_p_ib_n: Optional[int] = None,
+        nl_screened_too_few: bool = False,
         id: Optional[str] = None,  # noqa: A002
         classes: Optional[str] = None,
     ) -> None:
         super().__init__(id=id, classes=classes)
-        self._p = wl_p_ib
-        self._n = wl_p_ib_n
+        self._wl_p = wl_p_ib
+        self._wl_n = wl_p_ib_n
+        self._nl_p = nl_p_ib
+        self._nl_n = nl_p_ib_n
+        self._nl_too_few = nl_screened_too_few
 
     def update_state(
         self,
         *,
         wl_p_ib: Optional[float],
         wl_p_ib_n: Optional[int],
+        nl_p_ib: Optional[float] = None,
+        nl_p_ib_n: Optional[int] = None,
+        nl_screened_too_few: bool = False,
     ) -> None:
-        if wl_p_ib == self._p and wl_p_ib_n == self._n:
+        if (
+            wl_p_ib == self._wl_p
+            and wl_p_ib_n == self._wl_n
+            and nl_p_ib == self._nl_p
+            and nl_p_ib_n == self._nl_n
+            and nl_screened_too_few == self._nl_too_few
+        ):
             return
-        self._p = wl_p_ib
-        self._n = wl_p_ib_n
+        self._wl_p = wl_p_ib
+        self._wl_n = wl_p_ib_n
+        self._nl_p = nl_p_ib
+        self._nl_n = nl_p_ib_n
+        self._nl_too_few = nl_screened_too_few
         self.refresh()
 
     def render(self) -> Text:
         return build_ar_readiness_line(
-            wl_p_ib=self._p,
-            wl_p_ib_n=self._n,
+            wl_p_ib=self._wl_p,
+            wl_p_ib_n=self._wl_n,
+            nl_p_ib=self._nl_p,
+            nl_p_ib_n=self._nl_n,
+            nl_screened_too_few=self._nl_too_few,
         )
+
+
+def _append_pib_segment(
+    t: Text,
+    *,
+    label: str,
+    p_ib: Optional[float],
+    n: Optional[int],
+    too_few: bool = False,
+) -> None:
+    """Append a ``LABEL P_IB: value (n=N) <threshold>`` segment to t.
+
+    Handles three states uniformly: waiting (no data), too-few-
+    screened (emission says undefined), and numeric (compute
+    threshold).  WL never has the too-few state (its tracker
+    doesn't pre-screen the same way); NL can have any of the
+    three.
+    """
+    t.append(f"{label} P_IB: ", style="bold")
+    if too_few:
+        n_str = f"n={n}" if n is not None else "n=?"
+        t.append(f"(too few screened, {n_str})", style="dim")
+        return
+    if p_ib is None:
+        t.append("(waiting)")
+        return
+    # Four decimals matches the engine's ``%.4f`` emission format,
+    # so the monitor reads the same number the log line shows.
+    t.append(f"{p_ib:.4f}")
+    if n is not None:
+        t.append(f" (n={n})")
+    t.append(" ")
+    if p_ib >= _AR_READINESS_FULL:
+        t.append("✓full-AR", style="bold green")
+    elif p_ib >= _AR_READINESS_PAR:
+        t.append("✓PAR-ready", style="bold yellow")
+    else:
+        t.append("diagnose", style="bold red")
 
 
 def build_ar_readiness_line(
     *,
     wl_p_ib: Optional[float],
     wl_p_ib_n: Optional[int],
+    nl_p_ib: Optional[float] = None,
+    nl_p_ib_n: Optional[int] = None,
+    nl_screened_too_few: bool = False,
 ) -> Text:
     """Pure renderer for ``ArReadinessLine``.
 
     Split out so unit tests exercise the threshold + color logic
     without instantiating a Textual widget.  Returns a ``rich.Text``
-    with style markup for the threshold tag.
+    with style markup for the threshold tags.
 
-    Threshold tag is whichever of three labels applies:
-    ``✓full-AR`` (green), ``✓PAR-ready`` (yellow), or
-    ``diagnose`` (red).  The check / no-check distinction marks
-    whether the float is *ready for an AR push* — ``diagnose``
-    has no check because it explicitly is not.
+    Layout: WL segment, then a bullet separator, then NL segment.
+    Both segments use the same threshold colour rules — green for
+    full-AR, yellow for PAR-ready, red for diagnose.  NL has an
+    additional dim "(too few screened)" form when the engine
+    couldn't compute P_NL_IB this epoch.
     """
     t = Text()
-    t.append("WL P_IB: ", style="bold")
-    if wl_p_ib is None:
-        t.append("(waiting)")
-        return t
-    # Four decimals matches the engine's ``%.4f`` emission format,
-    # so the monitor reads the same number the log line shows.
-    t.append(f"{wl_p_ib:.4f}")
-    if wl_p_ib_n is not None:
-        t.append(f" (n={wl_p_ib_n})")
-    t.append(" ")
-    if wl_p_ib >= _AR_READINESS_FULL:
-        t.append("✓full-AR", style="bold green")
-    elif wl_p_ib >= _AR_READINESS_PAR:
-        t.append("✓PAR-ready", style="bold yellow")
-    else:
-        t.append("diagnose", style="bold red")
+    _append_pib_segment(t, label="WL", p_ib=wl_p_ib, n=wl_p_ib_n)
+    t.append("  •  ")
+    _append_pib_segment(
+        t, label="NL", p_ib=nl_p_ib, n=nl_p_ib_n,
+        too_few=nl_screened_too_few,
+    )
     return t

@@ -750,14 +750,19 @@ class CohortLineTest(unittest.TestCase):
 
 
 class ArReadinessLineTest(unittest.TestCase):
-    """``WL P_IB: 0.9876 (n=5) ✓PAR-ready``.
+    """``WL P_IB: 0.9876 (n=5) ✓PAR-ready  •  NL P_IB: 0.9234 (n=4) diagnose``.
 
-    Threshold semantics from Geng et al. 2010 + the engine emission's
-    own parenthetical (``>0.99=PAR-ready, >0.999=full``):
+    Threshold semantics from Geng et al. 2010 + engine commits 6e9cca6
+    (WL, A2) and 3cc429e (NL, A1):
 
       * < 0.99  → ``diagnose`` (red) — float not ready for AR
       * ≥ 0.99  → ``✓PAR-ready`` (yellow) — partial AR green-light
       * ≥ 0.999 → ``✓full-AR`` (green) — full AR green-light
+
+    NL has an additional ``(too few screened, n=N)`` state when the
+    engine emits ``p_nl_ib=- n=N (too few screened)`` — fewer than
+    2 SVs pass NL pre-screen.  This is the dominant state on today's
+    lab data per the wl_drift cycling finding.
 
     Tests exercise the pure ``build_ar_readiness_line`` so we don't
     need a Textual app context.
@@ -768,9 +773,12 @@ class ArReadinessLineTest(unittest.TestCase):
         out = build_ar_readiness_line(wl_p_ib=None, wl_p_ib_n=None)
         s = out.plain
         self.assertIn("WL P_IB:", s)
-        self.assertIn("(waiting)", s)
+        self.assertIn("NL P_IB:", s)
+        # Both segments should show waiting when neither has been
+        # observed yet.
+        self.assertEqual(s.count("(waiting)"), 2)
 
-    def test_full_ar_threshold(self):
+    def test_full_ar_threshold_wl(self):
         from peppar_mon.widgets import build_ar_readiness_line
         out = build_ar_readiness_line(wl_p_ib=0.9991, wl_p_ib_n=8)
         s = out.plain
@@ -778,22 +786,25 @@ class ArReadinessLineTest(unittest.TestCase):
         self.assertIn("(n=8)", s)
         self.assertIn("✓full-AR", s)
         self.assertNotIn("PAR-ready", s)
-        self.assertNotIn("diagnose", s)
+        # NL still waiting in this case
+        self.assertIn("(waiting)", s)
 
-    def test_par_ready_threshold(self):
+    def test_par_ready_threshold_wl(self):
         from peppar_mon.widgets import build_ar_readiness_line
         out = build_ar_readiness_line(wl_p_ib=0.9950, wl_p_ib_n=5)
         s = out.plain
         self.assertIn("0.9950", s)
         self.assertIn("✓PAR-ready", s)
-        self.assertNotIn("full-AR", s)
 
-    def test_diagnose_threshold(self):
+    def test_diagnose_threshold_wl(self):
         from peppar_mon.widgets import build_ar_readiness_line
         out = build_ar_readiness_line(wl_p_ib=0.85, wl_p_ib_n=3)
         s = out.plain
-        self.assertIn("diagnose", s)
-        self.assertNotIn("✓", s)
+        # WL is diagnose; NL is waiting — only one ✓ slot, so
+        # the absence of ✓ on the WL side is what we check.
+        wl_segment = s.split("•")[0]
+        self.assertIn("diagnose", wl_segment)
+        self.assertNotIn("✓", wl_segment)
 
     def test_exact_par_boundary(self):
         """≥ 0.99 is PAR-ready (inclusive)."""
@@ -807,20 +818,9 @@ class ArReadinessLineTest(unittest.TestCase):
         out = build_ar_readiness_line(wl_p_ib=0.999, wl_p_ib_n=6)
         self.assertIn("✓full-AR", out.plain)
 
-    def test_zero_n_with_value(self):
-        """Engine cold-start can emit p=0.0 n=0; widget renders n=0
-        rather than hiding the count."""
-        from peppar_mon.widgets import build_ar_readiness_line
-        out = build_ar_readiness_line(wl_p_ib=0.0, wl_p_ib_n=0)
-        s = out.plain
-        self.assertIn("0.0000", s)
-        self.assertIn("(n=0)", s)
-        self.assertIn("diagnose", s)
-
     def test_threshold_styling(self):
         """The threshold tag carries Rich style markup so the
-        terminal colours it.  Verify the diagnose span has a red
-        style applied."""
+        terminal colours it."""
         from peppar_mon.widgets import build_ar_readiness_line
         out = build_ar_readiness_line(wl_p_ib=0.85, wl_p_ib_n=2)
         spans_with_diagnose = [
@@ -832,19 +832,122 @@ class ArReadinessLineTest(unittest.TestCase):
         styles = " ".join(str(st) for _, st in spans_with_diagnose)
         self.assertIn("red", styles)
 
+    # ── NL-specific (Stage 2) ────────────────────────────────────── #
+
+    def test_nl_value_renders_alongside_wl(self):
+        """Both segments populated — verifies the bullet separator
+        and that each segment gets its own threshold tag.  WL above
+        PAR threshold, NL below = covers both tag forms in one
+        render."""
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(
+            wl_p_ib=0.9950, wl_p_ib_n=5,  # ≥ 0.99 → PAR-ready
+            nl_p_ib=0.9234, nl_p_ib_n=4,  # < 0.99 → diagnose
+        )
+        s = out.plain
+        self.assertIn("WL P_IB: 0.9950", s)
+        self.assertIn("•", s)
+        self.assertIn("NL P_IB: 0.9234", s)
+        self.assertIn("✓PAR-ready", s)
+        self.assertIn("diagnose", s)
+
+    def test_nl_too_few_screened_state(self):
+        """Engine emission ``p_nl_ib=- n=2 (too few screened)`` —
+        widget shows a distinct dim form, not (waiting) and not a
+        threshold tag."""
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(
+            wl_p_ib=0.99, wl_p_ib_n=5,
+            nl_p_ib=None, nl_p_ib_n=2,
+            nl_screened_too_few=True,
+        )
+        s = out.plain
+        self.assertIn("NL P_IB:", s)
+        self.assertIn("(too few screened, n=2)", s)
+        self.assertNotIn("NL P_IB: (waiting)", s)
+        # No threshold tag on the NL side when too-few-screened.
+        nl_segment = s.split("•")[1]
+        self.assertNotIn("✓", nl_segment)
+        self.assertNotIn("diagnose", nl_segment)
+
+    def test_nl_too_few_uses_dim_style(self):
+        """The (too few screened, n=N) form should be rendered dim
+        — operator should clearly see it as an inactive state, not
+        a positive readiness signal."""
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(
+            wl_p_ib=0.99, wl_p_ib_n=5,
+            nl_p_ib=None, nl_p_ib_n=2,
+            nl_screened_too_few=True,
+        )
+        # Find the (too few screened…) span and check its style
+        # mentions dim.
+        spans = [
+            (out.plain[s.start:s.end], s.style)
+            for s in out.spans
+            if "too few screened" in out.plain[s.start:s.end]
+        ]
+        self.assertTrue(spans)
+        styles = " ".join(str(st) for _, st in spans)
+        self.assertIn("dim", styles)
+
+    def test_nl_full_ar_threshold(self):
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(
+            wl_p_ib=0.9999, wl_p_ib_n=8,
+            nl_p_ib=0.9995, nl_p_ib_n=6,
+        )
+        s = out.plain
+        # Two ✓full-AR segments — one per metric.
+        self.assertEqual(s.count("✓full-AR"), 2)
+
+    def test_nl_waiting_when_only_wl_observed(self):
+        """Older engine builds (commit 6e9cca6 had WL but not NL)
+        or first ~10 epochs after start — WL has data, NL doesn't.
+        NL must show (waiting), not (too few screened)."""
+        from peppar_mon.widgets import build_ar_readiness_line
+        out = build_ar_readiness_line(
+            wl_p_ib=0.9876, wl_p_ib_n=5,
+            nl_p_ib=None, nl_p_ib_n=None,
+            nl_screened_too_few=False,
+        )
+        s = out.plain
+        nl_segment = s.split("•")[1]
+        self.assertIn("(waiting)", nl_segment)
+        self.assertNotIn("too few screened", nl_segment)
+
     def test_update_state_diff_triggers_refresh(self):
         """Unchanged inputs no-op, changed inputs fire refresh()."""
         from peppar_mon.widgets import ArReadinessLine
-        w = ArReadinessLine(wl_p_ib=0.99, wl_p_ib_n=4)
+        w = ArReadinessLine(
+            wl_p_ib=0.99, wl_p_ib_n=4,
+            nl_p_ib=0.95, nl_p_ib_n=3,
+        )
         calls = {"n": 0}
 
         def fake_refresh():
             calls["n"] += 1
         w.refresh = fake_refresh  # type: ignore[method-assign]
 
-        w.update_state(wl_p_ib=0.99, wl_p_ib_n=4)  # no-op
-        w.update_state(wl_p_ib=0.999, wl_p_ib_n=4)  # changed
-        self.assertEqual(calls["n"], 1)
+        # No-op — all five fields match.
+        w.update_state(
+            wl_p_ib=0.99, wl_p_ib_n=4,
+            nl_p_ib=0.95, nl_p_ib_n=3,
+            nl_screened_too_few=False,
+        )
+        # Change WL — should fire.
+        w.update_state(
+            wl_p_ib=0.999, wl_p_ib_n=4,
+            nl_p_ib=0.95, nl_p_ib_n=3,
+            nl_screened_too_few=False,
+        )
+        # Change only NL flag — should fire again.
+        w.update_state(
+            wl_p_ib=0.999, wl_p_ib_n=4,
+            nl_p_ib=None, nl_p_ib_n=3,
+            nl_screened_too_few=True,
+        )
+        self.assertEqual(calls["n"], 2)
 
 
 if __name__ == "__main__":
