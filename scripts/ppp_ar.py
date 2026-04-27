@@ -262,6 +262,63 @@ class MelbourneWubbenaTracker:
         n_total = len(self._state)
         return f"WL: {self.n_fixed}/{n_total} fixed"
 
+    def wl_bootstrap_success_rate(self, min_epochs=None,
+                                  sigma_floor_cyc=None):
+        """WL Integer Bootstrap success rate (Teunissen 1998/1999).
+
+        Same machinery as ``lambda_ar.bootstrap_success_rate(D)`` but on
+        the wide-lane sub-block of Q_â — which is diagonal by
+        construction (per-SV WL ambiguities are uncorrelated in the MW
+        combination).  No LAMBDA decorrelation needed: the WL Q_â
+        diagonal IS the per-SV resid std (cycles).
+
+        For each SV with enough warmup:
+            P_i = 2·Φ(0.5 / σ_WL_i) − 1
+        Product across SVs gives P_WL_IB.
+
+        Returns (p_wl_ib, n_contributing).  Skips SVs without a populated
+        ``resid_std_cyc`` (warmup epochs < 8 — see update()'s deque
+        threshold) or with σ at the floor (no useful info from a quiet
+        window).
+
+        Charlie's literature memo
+        (project_to_main_bravo_charlie_ar_readiness_diagnostic_20260426)
+        identifies WL P_IB as the right gate for whether the float is
+        ready for WL AR.  Rule of thumb from Geng et al. 2010:
+        > 0.99 = green for partial WL AR; > 0.999 = green for full.
+        """
+        from scipy.stats import norm
+        if min_epochs is None:
+            min_epochs = self._MIN_EPOCHS_FOR_JUMP
+        if sigma_floor_cyc is None:
+            # Numerical floor only — don't use the slip-jump σ floor
+            # (_SIGMA_FLOOR_CYC=0.5) which is set to prevent slip-detection
+            # false positives in quiet windows.  For P_IB we want honest
+            # σ; clamping at 0.5 makes P_IB unrealistically pessimistic
+            # (best-case 5 SVs → P=0.149).  A clean F9T WL track has σ ~
+            # 0.05-0.20 cyc; 0.01 is a numerical-stability floor below
+            # which the MW math precision is lost.
+            sigma_floor_cyc = 0.01
+        p = 1.0
+        n = 0
+        for sv, s in self._state.items():
+            if s.get('n_epochs', 0) < min_epochs:
+                continue
+            sigma_wl = s.get('resid_std_cyc')
+            if sigma_wl is None:
+                continue
+            # Floor σ at sigma_floor_cyc — a quiet window can otherwise
+            # report unrealistically tight σ that inflates P_IB.
+            sigma_wl = max(float(sigma_wl), float(sigma_floor_cyc))
+            p_i = 2.0 * norm.cdf(0.5 / sigma_wl) - 1.0
+            if p_i <= 0:
+                return 0.0, n + 1
+            p *= p_i
+            n += 1
+            if p < 1e-10:
+                return 0.0, n
+        return p, n
+
     def integrality_snapshot(self):
         """Per-SV integrality snapshot for diagnostic logging.
 

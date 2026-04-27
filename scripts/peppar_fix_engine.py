@@ -2684,6 +2684,20 @@ class AntPosEstThread(threading.Thread):
                     mw.summary(), nl.summary(), nav2_tag, ztd_tag,
                     strength_tag, readmit_tag, tide_tag, pcv_tag, worst_tag,
                 )
+                # WL Integer Bootstrap success rate (Teunissen 1998/1999).
+                # Per Charlie's AR-readiness literature memo: WL P_IB is
+                # the right gate for "is the float ready for WL AR?" —
+                # σ_pos is downstream.  Geng et al. 2010 thresholds:
+                # > 0.999 = full AR, > 0.99 = partial AR.  Logged every
+                # epoch as a diagnostic; current --wl-only mode doesn't
+                # gate AR on this yet (planned).
+                if self._n_epochs % 10 == 0:  # 1/10 epochs to bound log volume
+                    p_wl_ib, n_wl = mw.wl_bootstrap_success_rate()
+                    log.info(
+                        "  [WL_AR_READINESS] p_wl_ib=%.4f n=%d "
+                        "(>0.99=PAR-ready, >0.999=full)",
+                        p_wl_ib, n_wl,
+                    )
                 # WL integrality snapshot every 60 epochs (~1/min).  Shows
                 # what WL integers the MW tracker would commit — even in
                 # wl-only mode where those commits aren't applied to the
