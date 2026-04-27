@@ -230,6 +230,57 @@ def adev_pos_overlapping(values: list[float], m: int) -> float | None:
     return math.sqrt(var)
 
 
+def mdev_pos_overlapping(values: list[float], m: int) -> float | None:
+    """Modified Allan deviation of position averages at window m samples.
+
+    Canonical MDEV form (Allan & Barnes 1981) applied to position-as-
+    value (no τ² normalization, since position is the quantity of
+    interest, not phase):
+
+        σ²_pos_mdev(m·τ₀) = 1 / (2 m² (N − 3m + 1)) ·
+                            Σ_j ( Σ_{i=j}^{j+m-1}
+                                  [x_{i+2m} − 2 x_{i+m} + x_i] )²
+
+    Equivalently: form the m-sample running-mean series y_k, then
+    take the second difference y_{k+2m} − 2 y_{k+m} + y_k.  MDEV is
+    the RMS of those second differences across all valid starting
+    positions k, divided by sqrt(2).
+
+    Why use it: per the lit synthesis in
+    project_to_main_bravo_charlie_position_stability_lit_20260426,
+    MDEV separates white-PM from flicker-PM that ADEV conflates —
+    more diagnostic for the white-noise-plus-walks regime that lab
+    position estimates exhibit.  At short τ:
+        white-position:    ADEV slope −0.5,  MDEV slope −1.5
+        flicker-position:  ADEV slope ~0,    MDEV slope −0.5
+
+    Returns None if N < 3m (not enough data).
+    """
+    n = len(values)
+    if n < 3 * m:
+        return None
+    csum = [0.0] * (n + 1)
+    for i, v in enumerate(values):
+        csum[i + 1] = csum[i] + v
+    # Running m-sample sums (we'll divide by m at variance time).
+    # window_sum[k] = csum[k+m] - csum[k] = Σ_{i=k}^{k+m-1} x_i
+    n_dd = n - 3 * m + 1
+    if n_dd < 1:
+        return None
+    total = 0.0
+    for k in range(n_dd):
+        # Second difference of the m-sample windowed sums.
+        # Each sum is m × the running mean; squaring picks up m² which
+        # cancels with the m² in the denominator below.
+        a = csum[k + m] - csum[k]
+        b = csum[k + 2 * m] - csum[k + m]
+        c = csum[k + 3 * m] - csum[k + 2 * m]
+        dd = c - 2 * b + a
+        total += dd * dd
+    var = total / (2.0 * m * m * n_dd)
+    return math.sqrt(var)
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────── #
 
 DEFAULT_TAUS = (2, 4, 8, 16, 32, 60, 120, 240, 480, 1000, 1800, 3600)
@@ -265,6 +316,11 @@ def main() -> int:
         "--format", choices=("text", "json"), default="text",
         help="output format (default: text)",
     )
+    p.add_argument(
+        "--metric", choices=("adev", "mdev", "both"), default="both",
+        help="stability metric (default: both — ADEV is intuitive, MDEV "
+             "separates white-PM from flicker-PM)",
+    )
     args = p.parse_args()
 
     mode = args.mode
@@ -294,24 +350,41 @@ def main() -> int:
     ns = [r[2] for r in grid]
     us = [r[3] for r in grid]
 
+    want_adev = args.metric in ("adev", "both")
+    want_mdev = args.metric in ("mdev", "both")
+
     rows = []
     skipped = []
     for tau in args.taus:
         m_samples = max(1, int(tau / args.regrid_dt))
-        sig_e = adev_pos_overlapping(es, m_samples)
-        sig_n = adev_pos_overlapping(ns, m_samples)
-        sig_u = adev_pos_overlapping(us, m_samples)
-        if sig_e is None or sig_n is None or sig_u is None:
+        row: dict = {"tau_s": tau}
+        ok = True
+        if want_adev:
+            ae = adev_pos_overlapping(es, m_samples)
+            an = adev_pos_overlapping(ns, m_samples)
+            au = adev_pos_overlapping(us, m_samples)
+            if ae is None or an is None or au is None:
+                ok = False
+            else:
+                row["adev_e_m"] = ae
+                row["adev_n_m"] = an
+                row["adev_u_m"] = au
+                row["adev_h_m"] = math.sqrt(ae * ae + an * an)
+        if want_mdev and ok:
+            me = mdev_pos_overlapping(es, m_samples)
+            mn = mdev_pos_overlapping(ns, m_samples)
+            mu = mdev_pos_overlapping(us, m_samples)
+            if me is None or mn is None or mu is None:
+                ok = False
+            else:
+                row["mdev_e_m"] = me
+                row["mdev_n_m"] = mn
+                row["mdev_u_m"] = mu
+                row["mdev_h_m"] = math.sqrt(me * me + mn * mn)
+        if not ok:
             skipped.append(tau)
             continue
-        sig_h = math.sqrt(sig_e * sig_e + sig_n * sig_n)
-        rows.append({
-            "tau_s": tau,
-            "sigma_e_m": sig_e,
-            "sigma_n_m": sig_n,
-            "sigma_u_m": sig_u,
-            "sigma_h_m": sig_h,
-        })
+        rows.append(row)
 
     if args.format == "json":
         out = {
@@ -320,6 +393,7 @@ def main() -> int:
             "samples": len(grid),
             "duration_s": duration,
             "regrid_dt_s": args.regrid_dt,
+            "metric": args.metric,
             "rows": rows,
             "skipped_taus": skipped,
         }
@@ -327,17 +401,34 @@ def main() -> int:
         sys.stdout.write("\n")
     else:
         print(f"# {label}: {len(grid)} samples on {args.regrid_dt:g}-s grid, "
-              f"{duration / 60:.1f} min ({mode})")
-        print(f"# tau (s)   σ_E (m)   σ_N (m)   σ_U (m)   σ_H (m)")
-        for r in rows:
-            print(
-                f"  {r['tau_s']:>7d}   {r['sigma_e_m']:>7.3f}   "
-                f"{r['sigma_n_m']:>7.3f}   {r['sigma_u_m']:>7.3f}   "
-                f"{r['sigma_h_m']:>7.3f}"
-            )
+              f"{duration / 60:.1f} min ({mode}, metric={args.metric})")
+        if args.metric == "adev":
+            print(f"# tau (s)   σ_E (m)   σ_N (m)   σ_U (m)   σ_H (m)")
+            for r in rows:
+                print(f"  {r['tau_s']:>7d}   {r['adev_e_m']:>7.3f}   "
+                      f"{r['adev_n_m']:>7.3f}   {r['adev_u_m']:>7.3f}   "
+                      f"{r['adev_h_m']:>7.3f}")
+        elif args.metric == "mdev":
+            print(f"# tau (s)   σ_E (m)   σ_N (m)   σ_U (m)   σ_H (m)")
+            for r in rows:
+                print(f"  {r['tau_s']:>7d}   {r['mdev_e_m']:>7.3f}   "
+                      f"{r['mdev_n_m']:>7.3f}   {r['mdev_u_m']:>7.3f}   "
+                      f"{r['mdev_h_m']:>7.3f}")
+        else:  # both
+            print(f"# {'':>7s}   {'ADEV (m)':^33s}   {'MDEV (m)':^33s}")
+            print(f"# tau (s)    σ_E      σ_N      σ_U      σ_H        σ_E      σ_N      σ_U      σ_H")
+            for r in rows:
+                print(
+                    f"  {r['tau_s']:>7d}   "
+                    f"{r['adev_e_m']:>7.3f}  {r['adev_n_m']:>7.3f}  "
+                    f"{r['adev_u_m']:>7.3f}  {r['adev_h_m']:>7.3f}    "
+                    f"{r['mdev_e_m']:>7.3f}  {r['mdev_n_m']:>7.3f}  "
+                    f"{r['mdev_u_m']:>7.3f}  {r['mdev_h_m']:>7.3f}"
+                )
         if skipped:
+            need_str = "≥3τ window for MDEV" if want_mdev else "≥2τ window for ADEV"
             print(
-                f"# skipped τ (insufficient data, need ≥2τ window): "
+                f"# skipped τ (insufficient data, need {need_str}): "
                 f"{', '.join(str(t) for t in skipped)}",
                 file=sys.stderr,
             )
