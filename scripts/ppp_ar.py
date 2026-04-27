@@ -218,7 +218,16 @@ class MelbourneWubbenaTracker:
         isn't yet enough history to compare against.  The caller — the
         CycleSlipMonitor — uses this as one of four independent
         detectors; it does not mutate tracker state.
+
+        When ``obs['phase_bias_stepped']`` is True (set by the SSR
+        layer when the AC published a new bias-segment for this SV),
+        skip the jump check this epoch.  The MW combination on bias-
+        corrected phase steps by integer cycles across an AC segment
+        boundary even though the receiver tracking loop hasn't slipped.
+        Path A shortcut — see docs/ssr-phase-bias-step-handling.md.
         """
+        if obs.get('phase_bias_stepped'):
+            return None
         sv = obs['sv']
         s = self._state.get(sv)
         if s is None or s['n_epochs'] < self._MIN_EPOCHS_FOR_JUMP:

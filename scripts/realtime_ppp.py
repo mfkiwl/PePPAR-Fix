@@ -874,6 +874,7 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                     # integer-fix candidacy (they still contribute PR for
                     # geometry).  Defaults False when ssr is absent.
                     ar_phase_bias_ok = False
+                    phase_bias_stepped = False
                     if ssr is not None and rinex_f1 and rinex_f2:
                         # Phase biases are indexed by code signal identifier
                         # in SSR (e.g., 'C1C' not 'L1C') — try both
@@ -881,12 +882,42 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                                  ssr.get_phase_bias(sv, rinex_f1[0]))
                         pb_f2 = (ssr.get_phase_bias(sv, rinex_f2[1]) or
                                  ssr.get_phase_bias(sv, rinex_f2[0]))
+                        # Path A bias-step detection (see
+                        # docs/ssr-phase-bias-step-handling.md).  Compare
+                        # current bias (meters) to the previously-applied
+                        # value for the same (SV, sig); convert delta to
+                        # cycles via wavelength; flag when |Δ| > 0.5 cyc.
+                        # Flag rides on the obs dict to suppress a single
+                        # MW-jump check at the slip detector — preserves
+                        # MW WL-fix state across the AC's segment boundary
+                        # while preventing the false-positive slip storm
+                        # that destabilized day0426 smoke runs (E11/E12/
+                        # E36 mw=5-7c with lock=64.5s, gf<1cm).
+                        if not hasattr(ssr, '_pb_prev_value'):
+                            ssr._pb_prev_value = {}
+                        if pb_f1 is not None:
+                            prev = ssr._pb_prev_value.get((sv, 'f1'))
+                            if prev is not None and wl_f1:
+                                if abs((pb_f1 - prev) / wl_f1) > 0.5:
+                                    phase_bias_stepped = True
+                            ssr._pb_prev_value[(sv, 'f1')] = pb_f1
+                        if pb_f2 is not None:
+                            prev = ssr._pb_prev_value.get((sv, 'f2'))
+                            if prev is not None and wl_f2:
+                                if abs((pb_f2 - prev) / wl_f2) > 0.5:
+                                    phase_bias_stepped = True
+                            ssr._pb_prev_value[(sv, 'f2')] = pb_f2
                         if pb_f1 is not None:
                             cp_f1 -= pb_f1 / wl_f1  # meters → cycles
                         if pb_f2 is not None:
                             cp_f2 -= pb_f2 / wl_f2
                         ar_phase_bias_ok = (pb_f1 is not None
                                             and pb_f2 is not None)
+                        if phase_bias_stepped:
+                            log.info(
+                                "[PB_STEP] %s phase-bias segment boundary "
+                                "(suppressing MW jump check this epoch)",
+                                sv)
                         # Phase-bias diagnostic: log VALUES on every
                         # change, not just first occurrence.  Lets the
                         # cross-AC compare pick up CNES vs WHU value
@@ -998,6 +1029,13 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         'f1_sig_name': f1['sig_name'],
                         'f2_sig_name': f2['sig_name'],
                         'ar_phase_bias_ok': ar_phase_bias_ok,
+                        # Set when an SSR phase-bias for this SV stepped
+                        # by >0.5 cycles since the previous epoch — the
+                        # AC published a new bias-segment.  MW jump
+                        # detector skips this epoch to avoid spoofed
+                        # multi-cycle slips (Path A; see
+                        # docs/ssr-phase-bias-step-handling.md).
+                        'phase_bias_stepped': phase_bias_stepped,
                     })
 
                 # Diagnostic dump (first 3 epochs, then every 60)

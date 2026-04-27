@@ -245,6 +245,34 @@ class TestMwJump(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertIn('mw_jump', events[0].reasons)
 
+    def test_phase_bias_step_suppresses_mw_jump(self):
+        """SSR phase-bias segment boundary spoofs a multi-cycle MW jump
+        on bias-corrected phase even when receiver tracking is solid.
+        Path A (docs/ssr-phase-bias-step-handling.md): the SSR layer
+        sets ``obs['phase_bias_stepped'] = True`` for the affected
+        epoch; MW detector returns None to suppress the false slip."""
+        mw = MelbourneWubbenaTracker()
+        self._warm_mw(mw)
+        # Same multi-cycle MW-triggering jump as above, but flagged as
+        # a bias-segment boundary.  Should be suppressed.
+        dL1 = 20.0
+        dL2 = dL1 * (_WL_L1 / _WL_L5)
+        obs = make_obs(phi1_cyc=self.PHI1 + dL1,
+                       phi2_cyc=self.PHI2 + dL2,
+                       pr1_m=self.PR1, pr2_m=self.PR2)
+        obs['phase_bias_stepped'] = True
+        info = mw.detect_jump(obs, n_sigma=MW_JUMP_N_SIGMA)
+        self.assertIsNone(info, "MW jump check must skip when bias stepped")
+
+        # Same obs without the flag — confirms the suppression is
+        # gated correctly (jump fires absent the flag).
+        obs2 = make_obs(phi1_cyc=self.PHI1 + dL1,
+                        phi2_cyc=self.PHI2 + dL2,
+                        pr1_m=self.PR1, pr2_m=self.PR2)
+        info2 = mw.detect_jump(obs2, n_sigma=MW_JUMP_N_SIGMA)
+        self.assertIsNotNone(info2)
+        self.assertTrue(info2['is_slip'])
+
 
 class TestMultiDetectorConfidence(unittest.TestCase):
 
