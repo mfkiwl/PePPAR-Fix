@@ -60,6 +60,9 @@ from peppar_fix.false_fix_monitor import FalseFixMonitor
 from peppar_fix.setting_sv_drop_monitor import SettingSvDropMonitor
 from peppar_fix.fix_set_integrity_monitor import FixSetIntegrityMonitor
 from peppar_fix.wl_drift_monitor import WlDriftMonitor
+from peppar_fix.gf_phase_monitor import (
+    GfPhaseRollingMeanMonitor, gf_phase_m,
+)
 from peppar_fix.wl_readmission_gate import WlReAdmissionGate
 from peppar_fix.anchoring_sv_promoter import AnchoringSvPromoter
 from peppar_fix.nl_diag import NlDiagLogger
@@ -1566,10 +1569,21 @@ class AntPosEstThread(threading.Thread):
         # docs/wl-only-foundation.md for the motivating overnight
         # 2026-04-22/23 analysis.
         self._wl_drift = WlDriftMonitor()
+        # GF (geometry-free phase) post-fix rolling-mean monitor —
+        # phase-only sibling to WlDriftMonitor.  Observe-only mode
+        # for I-163535-charlie / 2026-04-28: emits [GF_DRIFT] log
+        # events but does not demote.  Validated against BNC over
+        # one or two overnights; switched to demoter if its chance-
+        # corrected agreement with BNC exceeds the 10 % bar that
+        # cycle-slip-flush already meets.  See
+        # ``docs/wl-drift-redesign-proposal.md`` and
+        # ``project_wl_drift_smooth_float_signal_20260428``.
+        self._gf_drift = GfPhaseRollingMeanMonitor()
         # SVs currently tracked as WL-fixed by the drift monitor.
         # Diffed against mw._state each epoch to drive note_fix /
         # note_unfix — keeps monitor decoupled from the MW tracker's
-        # internals.
+        # internals.  Shared between WL and GF monitors since both
+        # follow the same WL-fix lifecycle.
         self._wl_drift_prev_fixed: set[str] = set()
         # Fix-life logging — track per-SV monotonic time at entry so
         # we can emit duration_s on exit (per dayplan I-153334).
@@ -2307,6 +2321,10 @@ class AntPosEstThread(threading.Thread):
             mw._current_epoch = self._n_epochs
             nl._epoch = self._n_epochs  # resolver also uses _epoch for logs
             readmit_blocked: list[str] = []
+            # Per-SV GF observation for this epoch.  Populated alongside
+            # the MW update; consumed by the GfPhaseRollingMeanMonitor
+            # below.  Pure phase, geometry-free.
+            gf_now: dict[str, float] = {}
             for obs in observations:
                 sv = obs['sv']
                 phi1 = obs.get('phi1_cyc')
@@ -2326,6 +2344,7 @@ class AntPosEstThread(threading.Thread):
                     f1_hz = C / wl1
                     f2_hz = C / wl2
                     mw.update(sv, phi1, phi2, pr1, pr2, f1_hz, f2_hz)
+                    gf_now[sv] = gf_phase_m(phi1, phi2, wl1, wl2)
 
             # WL drift monitor: detect wrong WL integer commits via
             # sustained post-fix MW residual drift.  Runs after MW
@@ -2336,6 +2355,13 @@ class AntPosEstThread(threading.Thread):
             for sv in fixed_now - self._wl_drift_prev_fixed:
                 fix_n_wl = mw._state[sv].get('n_wl')
                 self._wl_drift.note_fix(sv, n_wl=fix_n_wl)
+                # Mirror lifecycle on the GF observe-only monitor.
+                # Skip when the GF observation is missing this epoch
+                # (would happen if the SV's MW updated from a prior-
+                # epoch latch with the current obs missing fields).
+                _gf_ref = gf_now.get(sv)
+                if _gf_ref is not None:
+                    self._gf_drift.note_fix(sv, gf_ref_m=_gf_ref)
                 # Newly-fixed SV passed the re-admission gate (or was
                 # never held).  Clear any prior hold so a subsequent
                 # drift-flush-readmit cycle starts fresh.
@@ -2357,6 +2383,7 @@ class AntPosEstThread(threading.Thread):
                 self._wl_fix_life_n_wl[sv] = fix_n_wl
             for sv in self._wl_drift_prev_fixed - fixed_now:
                 self._wl_drift.note_unfix(sv)
+                self._gf_drift.note_unfix(sv)
                 # Fix-life logging — exit (caller didn't trigger via
                 # wl_drift; could be slip, dropout, or other).
                 _t0 = self._wl_fix_life_t0.pop(sv, None)
@@ -2389,6 +2416,27 @@ class AntPosEstThread(threading.Thread):
                     "[WL_RESID] sv=%s resid=%+.4fcyc n_wl=%d ssf=%d",
                     sv, resid_cyc, n_wl, samples_since_fix,
                 )
+                # Phase-only sibling: GF post-fix rolling-mean monitor,
+                # observe-only.  Logs [GF_DRIFT] when it would have
+                # fired but does not demote.  Validates against BNC
+                # over one or two overnights (I-163535-charlie); if
+                # its chance-corrected agreement with BNC slip events
+                # exceeds the +12 % bar that cycle-slip-flush already
+                # meets, it'll be promoted to a demoter and the
+                # MW-residual monitor (this WL_DRIFT block) retired.
+                _gf_cur = gf_now.get(sv)
+                if _gf_cur is not None:
+                    gf_ev = self._gf_drift.ingest(sv, _gf_cur)
+                    if gf_ev is not None:
+                        log.info(
+                            "[GF_DRIFT] %s drift=%+.4fm > ±%.3fm "
+                            "(n=%d, window=%dep, gf_ref=%+.3fm) "
+                            "[observe-only, no demotion]",
+                            gf_ev['sv'], gf_ev['drift_m'],
+                            gf_ev['threshold_m'], gf_ev['n_samples'],
+                            gf_ev['window_epochs'], gf_ev['gf_ref_m'],
+                        )
+
                 ev = self._wl_drift.ingest(sv, resid_cyc)
                 if ev is not None:
                     flush_elev = elevations.get(sv)
@@ -2415,6 +2463,7 @@ class AntPosEstThread(threading.Thread):
                     )
                     mw.reset(sv)
                     self._wl_drift.note_unfix(sv)
+                    self._gf_drift.note_unfix(sv)
                     # Layer 3: take a re-admission hold at the current
                     # elevation.  MW updates for this SV are skipped
                     # until elevation moves ≥ 2°.
