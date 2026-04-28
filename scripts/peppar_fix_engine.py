@@ -2573,6 +2573,38 @@ class AntPosEstThread(threading.Thread):
             self._false_fix.ingest(self._n_epochs, resid, labels)
             self._setting_drop.ingest(self._n_epochs, resid, labels)
             self._fix_set_integrity.ingest(self._n_epochs, resid, labels)
+            # NL-layer residual logger — per-epoch per-NL-fixed-SV PR
+            # and IF (phi) residuals.  Mirrors WL_RESID at the NL
+            # layer.  Feeds the empirical case for IF-residual eviction
+            # (I-221332-main) — the IF residual is what Charlie's
+            # detector should be acting on, not PR.  Volume:
+            # ~5-10 NL-fixed SVs * 2 residuals * 1 Hz = ~20 lines/sec
+            # max; one combined line per SV per epoch.
+            _sv_resid: dict[str, dict[str, float]] = {}
+            for _i, _lbl in enumerate(labels):
+                if _i >= len(resid):
+                    break
+                _sv, _kind, *_ = _lbl
+                _sv_resid.setdefault(_sv, {})[_kind] = float(resid[_i])
+            try:
+                _nl_fixed_set = {
+                    s for s in _sv_resid
+                    if self._sv_state.state(s) in (
+                        SvAmbState.ANCHORING, SvAmbState.ANCHORED,
+                    )
+                }
+            except Exception:
+                _nl_fixed_set = set()
+            for _sv in sorted(_nl_fixed_set):
+                _rs = _sv_resid[_sv]
+                _pr = _rs.get('pr')
+                _phi = _rs.get('phi')
+                log.info(
+                    "[NL_RESID] sv=%s pr_resid=%s if_resid=%s",
+                    _sv,
+                    f"{_pr:+.3f}m" if _pr is not None else "?",
+                    f"{_phi:+.4f}m" if _phi is not None else "?",
+                )
             # ZTD state for the integrity monitor's ztd_impossible
             # trigger.  PPPFilter carries a ZTD residual state; if
             # the filter has absorbed position error into ZTD past
