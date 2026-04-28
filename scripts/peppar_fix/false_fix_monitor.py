@@ -120,6 +120,7 @@ class FalseFixMonitor:
         reliable_elev_deg: float = 45.0,
         low_elev_squelch_epochs: int = 60,
         unexpected_squelch_progression: tuple[int, ...] = (120, 300, 86400),
+        observe_only: bool = False,
     ) -> None:
         self._tracker = tracker
         self._base = float(base_threshold_m)
@@ -131,6 +132,14 @@ class FalseFixMonitor:
         self._low_elev_squelch = int(low_elev_squelch_epochs)
         self._unexpected_progression = tuple(
             int(x) for x in unexpected_squelch_progression)
+        # Observe-only mode (default False).  Per dayplan I-221332-main /
+        # 2026-04-28 evening, this monitor is being retired as a demoter
+        # in favour of IfStepMonitor (post-fit phase residual + cohort-
+        # median, mirroring the WL-layer GfStepMonitor redesign).  In
+        # observe-only mode evaluate() emits events but doesn't transition
+        # the tracker — caller can still log them for analytical
+        # comparison without paying the eviction cost.
+        self._observe_only = bool(observe_only)
         self._per_sv: dict[str, _SvResidWindow] = {}
 
     # ── Data intake ─────────────────────────────────────────────── #
@@ -243,7 +252,16 @@ class FalseFixMonitor:
                     # I-221332-main).  Snapshot list, not the deque
                     # itself (caller may persist after we mutate).
                     'resid_history_m': list(w.resids),
+                    'observe_only': self._observe_only,
                 })
+                if self._observe_only:
+                    # Don't move the tracker, don't drop the window —
+                    # we want the same SV to keep tripping as long as
+                    # the PR-residual condition holds, so analytical
+                    # comparison sees the full firing rate.  Caller
+                    # should NOT call _apply_false_fix when observe_only
+                    # — it'll still inflate ambiguities and unfix NL.
+                    continue
                 reason = (
                     f"{tag} |PR resid|={mean:.2f}m > {thr:.2f}m"
                     f" (base {self._base:.1f}m, n={n})"
