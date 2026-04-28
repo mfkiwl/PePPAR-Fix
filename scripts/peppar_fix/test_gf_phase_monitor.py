@@ -31,14 +31,22 @@ class GfPhaseRollingMeanMonitorTest(unittest.TestCase):
             self.assertIsNone(m.ingest("E07", 1000.30))
 
     def test_fires_when_rolling_mean_exceeds_threshold(self):
+        """First trip emits an 'enter' event; subsequent over-
+        threshold ingests are deduped (return None) until the
+        ongoing-period heartbeat or recovery."""
         m = GfPhaseRollingMeanMonitor(window_epochs=10, threshold_m=0.05,
-                                      min_samples=5, warmup_epochs=0)
+                                      min_samples=5, warmup_epochs=0,
+                                      ongoing_period_epochs=0)
         m.note_fix("E07", gf_ref_m=1000.0)
-        ev = None
+        events = []
         for _ in range(5):
             ev = m.ingest("E07", 1000.20)  # +20 cm residual
-        self.assertIsNotNone(ev)
+            if ev:
+                events.append(ev)
+        self.assertEqual(len(events), 1)  # enter only, deduped
+        ev = events[0]
         self.assertEqual(ev['sv'], "E07")
+        self.assertEqual(ev['kind'], 'enter')
         self.assertAlmostEqual(ev['drift_m'], 0.20, places=3)
         self.assertEqual(ev['n_samples'], 5)
         self.assertEqual(ev['gf_ref_m'], 1000.0)
@@ -73,7 +81,8 @@ class GfPhaseRollingMeanMonitorTest(unittest.TestCase):
         to ensure the rolling mean exceeds threshold even with a
         partially-filled window from earlier zero-residual samples."""
         m = GfPhaseRollingMeanMonitor(window_epochs=10, threshold_m=0.05,
-                                      min_samples=5, warmup_epochs=0)
+                                      min_samples=5, warmup_epochs=0,
+                                      ongoing_period_epochs=0)
         m.note_fix("E07", gf_ref_m=1000.0)
         events = []
         # 5 zero-residual samples first.
@@ -86,16 +95,17 @@ class GfPhaseRollingMeanMonitorTest(unittest.TestCase):
             ev = m.ingest("E07", 1000.25)
             if ev:
                 events.append(ev)
-        # After 5 +25 cm samples in the 10-window, mean = +12.5 cm
-        # which exceeds the 5 cm threshold.
-        self.assertGreaterEqual(len(events), 1)
-        last = events[-1]
-        self.assertGreater(abs(last['drift_m']), 0.05)
+        # Exactly one 'enter' event — subsequent over-threshold
+        # ingests are deduped.
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['kind'], 'enter')
+        self.assertGreater(abs(events[0]['drift_m']), 0.05)
 
     def test_warmup_skips_initial_samples(self):
         """The first ``warmup_epochs`` ingest calls are ignored."""
         m = GfPhaseRollingMeanMonitor(window_epochs=10, threshold_m=0.05,
-                                      min_samples=3, warmup_epochs=5)
+                                      min_samples=3, warmup_epochs=5,
+                                      ongoing_period_epochs=0)
         m.note_fix("E07", gf_ref_m=1000.0)
         events = []
         # First 5 ingests are warmup — even at 0.5 m residual, no event.
@@ -110,15 +120,21 @@ class GfPhaseRollingMeanMonitorTest(unittest.TestCase):
             if ev:
                 events.append(ev)
         self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['kind'], 'enter')
 
     def test_unfix_clears_state(self):
         """note_unfix wipes the SV's reference and history."""
         m = GfPhaseRollingMeanMonitor(window_epochs=5, threshold_m=0.05,
-                                      min_samples=3, warmup_epochs=0)
+                                      min_samples=3, warmup_epochs=0,
+                                      ongoing_period_epochs=0)
         m.note_fix("E07", gf_ref_m=1000.0)
         for _ in range(3):
             m.ingest("E07", 1000.20)
-        m.note_unfix("E07")
+        # SV was in-drift by the third ingest; unfix returns an exit event.
+        exit_ev = m.note_unfix("E07")
+        self.assertIsNotNone(exit_ev)
+        self.assertEqual(exit_ev['kind'], 'exit')
+        self.assertEqual(exit_ev['reason'], 'unfix')
         # ingest after unfix is silent.
         self.assertIsNone(m.ingest("E07", 1000.30))
         # Re-fix at a new reference starts fresh.
@@ -127,6 +143,7 @@ class GfPhaseRollingMeanMonitorTest(unittest.TestCase):
             self.assertIsNone(m.ingest("E07", 2000.20))  # below min_samples
         ev = m.ingest("E07", 2000.20)
         self.assertIsNotNone(ev)
+        self.assertEqual(ev['kind'], 'enter')
         self.assertEqual(ev['gf_ref_m'], 2000.0)
 
     def test_re_note_fix_clears_history(self):
@@ -165,6 +182,97 @@ class GfPhaseRollingMeanMonitorTest(unittest.TestCase):
         self.assertIsNone(m.rolling_mean("E07"))
         m.ingest("E07", 1000.05)  # now at min_samples=3
         self.assertAlmostEqual(m.rolling_mean("E07"), 0.05, places=4)
+
+    def test_dedup_enter_then_silent_then_exit(self):
+        """Per main's I-185745 ask: enter on first trip, silent during
+        sustained drift, exit when rolling mean recovers below
+        threshold."""
+        m = GfPhaseRollingMeanMonitor(window_epochs=4, threshold_m=0.05,
+                                      min_samples=3, warmup_epochs=0,
+                                      ongoing_period_epochs=0)
+        m.note_fix("E07", gf_ref_m=1000.0)
+        # Bring rolling mean above threshold via 3 +20cm samples.
+        evs = []
+        for _ in range(3):
+            ev = m.ingest("E07", 1000.20)
+            if ev:
+                evs.append(ev)
+        self.assertEqual([e['kind'] for e in evs], ['enter'])
+        # Stay above threshold for 5 more epochs — no events emitted.
+        for _ in range(5):
+            ev = m.ingest("E07", 1000.20)
+            if ev:
+                evs.append(ev)
+        self.assertEqual([e['kind'] for e in evs], ['enter'])
+        # Recover below threshold via 4 zero-residual samples (window
+        # mean = 0 once they fill the deque).
+        for _ in range(4):
+            ev = m.ingest("E07", 1000.00)
+            if ev:
+                evs.append(ev)
+        self.assertEqual([e['kind'] for e in evs], ['enter', 'exit'])
+
+    def test_dedup_enter_exit_re_enter(self):
+        """A drift episode that recovers and then trips again gets a
+        second enter event."""
+        m = GfPhaseRollingMeanMonitor(window_epochs=4, threshold_m=0.05,
+                                      min_samples=3, warmup_epochs=0,
+                                      ongoing_period_epochs=0)
+        m.note_fix("E07", gf_ref_m=1000.0)
+        evs = []
+        for _ in range(3):
+            ev = m.ingest("E07", 1000.20)
+            if ev:
+                evs.append(ev)
+        # Recover.
+        for _ in range(4):
+            ev = m.ingest("E07", 1000.00)
+            if ev:
+                evs.append(ev)
+        # Trip again.
+        for _ in range(4):
+            ev = m.ingest("E07", 1000.20)
+            if ev:
+                evs.append(ev)
+        self.assertEqual([e['kind'] for e in evs],
+                         ['enter', 'exit', 'enter'])
+
+    def test_ongoing_heartbeat(self):
+        """Sustained drifts emit a periodic ongoing event when
+        ongoing_period_epochs > 0."""
+        m = GfPhaseRollingMeanMonitor(window_epochs=10, threshold_m=0.05,
+                                      min_samples=3, warmup_epochs=0,
+                                      ongoing_period_epochs=10)
+        m.note_fix("E07", gf_ref_m=1000.0)
+        evs = []
+        for _ in range(25):
+            ev = m.ingest("E07", 1000.20)
+            if ev:
+                evs.append(ev)
+        # Expect: enter at first trip + ongoing every 10 ingests after.
+        kinds = [e['kind'] for e in evs]
+        self.assertEqual(kinds[0], 'enter')
+        self.assertIn('ongoing', kinds)
+        # Should not be one ongoing per epoch — at most a handful.
+        self.assertLess(len(evs), 5)
+
+    def test_unfix_returns_exit_only_if_in_drift(self):
+        """note_unfix returns an exit event only when the SV is
+        currently above threshold; returns None otherwise."""
+        m = GfPhaseRollingMeanMonitor(window_epochs=5, threshold_m=0.05,
+                                      min_samples=3, warmup_epochs=0,
+                                      ongoing_period_epochs=0)
+        m.note_fix("E07", gf_ref_m=1000.0)
+        for _ in range(3):
+            m.ingest("E07", 1000.0)  # not in drift
+        self.assertIsNone(m.note_unfix("E07"))
+        # And re-fix + bring above threshold + unfix → exit returned.
+        m.note_fix("E12", gf_ref_m=2000.0)
+        for _ in range(3):
+            m.ingest("E12", 2000.20)
+        ev = m.note_unfix("E12")
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev['kind'], 'exit')
 
     def test_summary_text(self):
         m = GfPhaseRollingMeanMonitor(window_epochs=30, threshold_m=0.05)

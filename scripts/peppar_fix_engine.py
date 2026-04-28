@@ -2383,7 +2383,15 @@ class AntPosEstThread(threading.Thread):
                 self._wl_fix_life_n_wl[sv] = fix_n_wl
             for sv in self._wl_drift_prev_fixed - fixed_now:
                 self._wl_drift.note_unfix(sv)
-                self._gf_drift.note_unfix(sv)
+                _gf_exit = self._gf_drift.note_unfix(sv)
+                if _gf_exit is not None:
+                    log.info(
+                        "[GF_DRIFT] %s kind=exit reason=unfix "
+                        "drift=%+.4fm window=%dep gf_ref=%+.3fm "
+                        "[observe-only]",
+                        _gf_exit['sv'], _gf_exit['drift_m'],
+                        _gf_exit['window_epochs'], _gf_exit['gf_ref_m'],
+                    )
                 # Fix-life logging — exit (caller didn't trigger via
                 # wl_drift; could be slip, dropout, or other).
                 _t0 = self._wl_fix_life_t0.pop(sv, None)
@@ -2429,12 +2437,13 @@ class AntPosEstThread(threading.Thread):
                     gf_ev = self._gf_drift.ingest(sv, _gf_cur)
                     if gf_ev is not None:
                         log.info(
-                            "[GF_DRIFT] %s drift=%+.4fm > ±%.3fm "
-                            "(n=%d, window=%dep, gf_ref=%+.3fm) "
-                            "[observe-only, no demotion]",
-                            gf_ev['sv'], gf_ev['drift_m'],
-                            gf_ev['threshold_m'], gf_ev['n_samples'],
-                            gf_ev['window_epochs'], gf_ev['gf_ref_m'],
+                            "[GF_DRIFT] %s kind=%s drift=%+.4fm "
+                            "thr=±%.3fm n=%d window=%dep "
+                            "gf_ref=%+.3fm [observe-only]",
+                            gf_ev['sv'], gf_ev['kind'],
+                            gf_ev['drift_m'], gf_ev['threshold_m'],
+                            gf_ev['n_samples'], gf_ev['window_epochs'],
+                            gf_ev['gf_ref_m'],
                         )
 
                 ev = self._wl_drift.ingest(sv, resid_cyc)
@@ -2463,7 +2472,16 @@ class AntPosEstThread(threading.Thread):
                     )
                     mw.reset(sv)
                     self._wl_drift.note_unfix(sv)
-                    self._gf_drift.note_unfix(sv)
+                    _gf_exit = self._gf_drift.note_unfix(sv)
+                    if _gf_exit is not None:
+                        log.info(
+                            "[GF_DRIFT] %s kind=exit reason=wl_drift_flush "
+                            "drift=%+.4fm window=%dep gf_ref=%+.3fm "
+                            "[observe-only]",
+                            _gf_exit['sv'], _gf_exit['drift_m'],
+                            _gf_exit['window_epochs'],
+                            _gf_exit['gf_ref_m'],
+                        )
                     # Layer 3: take a re-admission hold at the current
                     # elevation.  MW updates for this SV are skipped
                     # until elevation moves ≥ 2°.

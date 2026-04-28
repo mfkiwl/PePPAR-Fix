@@ -94,6 +94,7 @@ class GfPhaseRollingMeanMonitor:
         threshold_m: float = 0.05,
         min_samples: int = 15,
         warmup_epochs: int = 30,
+        ongoing_period_epochs: int = 60,
     ) -> None:
         self._window = int(window_epochs)
         self._threshold = float(threshold_m)
@@ -106,6 +107,13 @@ class GfPhaseRollingMeanMonitor:
         # 30-epoch EMA, but consistency with WlDriftMonitor makes
         # the side-by-side comparison cleaner).
         self._warmup = int(warmup_epochs)
+        # Heartbeat cadence for sustained drifts.  After ``enter``,
+        # an SV that stays above threshold gets an ``ongoing`` event
+        # every ``ongoing_period_epochs`` ingest calls — keeps
+        # post-hoc analysis aware of the drift's persistence without
+        # the per-epoch volume that prompted main's I-185745 dedup
+        # ask.  Set to 0 to disable.
+        self._ongoing_period = int(ongoing_period_epochs)
         # sv → reference GF (m) captured at note_fix.  None until
         # note_fix is called with a reference value.
         self._gf_ref: dict[str, float] = {}
@@ -113,6 +121,14 @@ class GfPhaseRollingMeanMonitor:
         self._hist: dict[str, deque[float]] = {}
         # sv → ingest call count since note_fix.  Used for warmup.
         self._ingest_count: dict[str, int] = {}
+        # sv → True iff the SV is currently in a drift episode
+        # (rolling mean above threshold, ``enter`` already emitted,
+        # ``exit`` not yet).  Used to dedup per-epoch trips into
+        # one ``enter`` + zero-or-more ``ongoing`` + one ``exit``.
+        self._in_drift: dict[str, bool] = {}
+        # sv → ingest count at time of ``enter``.  Drives ``ongoing``
+        # heartbeat cadence.
+        self._enter_count: dict[str, int] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────── #
 
@@ -128,29 +144,65 @@ class GfPhaseRollingMeanMonitor:
         self._gf_ref[sv] = float(gf_ref_m)
         self._hist[sv] = deque(maxlen=self._window)
         self._ingest_count[sv] = 0
+        # Re-fixing wipes any prior in-drift state without emitting
+        # an exit — re-fix is itself the lifecycle boundary.
+        self._in_drift.pop(sv, None)
+        self._enter_count.pop(sv, None)
 
-    def note_unfix(self, sv: str) -> None:
+    def note_unfix(self, sv: str) -> dict | None:
         """Stop tracking ``sv`` — call when its MW state is reset,
         the SV is dropped, or this monitor flagged it and the
-        caller acted."""
+        caller acted.
+
+        Returns a final ``exit`` event if the SV was currently in
+        a drift episode at unfix time, else None.  Lets the caller
+        close out the [GF_DRIFT] log record even when the trip
+        chain ends with the SV dropping rather than recovering.
+        """
+        was_in_drift = self._in_drift.get(sv, False)
+        last_mean = self.rolling_mean(sv) if was_in_drift else None
+        ref = self._gf_ref.get(sv)
+        n_samples = len(self._hist.get(sv, ()))
         self._gf_ref.pop(sv, None)
         self._hist.pop(sv, None)
         self._ingest_count.pop(sv, None)
+        self._in_drift.pop(sv, None)
+        self._enter_count.pop(sv, None)
+        if was_in_drift and last_mean is not None and ref is not None:
+            return {
+                'sv': sv,
+                'kind': 'exit',
+                'reason': 'unfix',
+                'drift_m': last_mean,
+                'threshold_m': self._threshold,
+                'n_samples': n_samples,
+                'window_epochs': self._window,
+                'gf_ref_m': ref,
+            }
+        return None
 
     # ── Observation intake ────────────────────────────────────── #
 
     def ingest(self, sv: str, gf_current_m: float) -> dict | None:
         """Add one post-fix GF observation for ``sv``.
 
-        Returns a drift event dict when the rolling-mean magnitude
-        of (gf_current − gf_ref) exceeds ``threshold_m`` over ≥
-        ``min_samples`` samples, else ``None``.
+        Returns a drift event dict on transitions only — no per-
+        epoch retrigger.  Event ``kind`` is one of:
 
-        Untracked SVs (no ``note_fix``) return ``None`` silently.
+          - ``enter``: rolling mean first crossed threshold
+          - ``ongoing``: still above threshold, every
+            ``ongoing_period_epochs`` ingest calls after enter
+          - ``exit``: rolling mean fell back below threshold
 
-        The event carries:
+        Returns None on untracked SVs, during warmup, before the
+        window has ``min_samples``, or on epochs that don't change
+        the in-drift state (i.e., normally most calls).
+
+        Each event carries:
+
           - ``sv``: the offending SV id
-          - ``drift_m``: signed rolling mean (sign tells direction)
+          - ``kind``: one of enter / ongoing / exit (above)
+          - ``drift_m``: signed rolling mean at this epoch
           - ``threshold_m``: configured trip threshold
           - ``n_samples``: rolling-window sample count
           - ``window_epochs``: configured window size
@@ -170,16 +222,39 @@ class GfPhaseRollingMeanMonitor:
         if len(h) < self._min_samples:
             return None
         mean = sum(h) / len(h)
-        if abs(mean) <= self._threshold:
-            return None
-        return {
-            'sv': sv,
-            'drift_m': mean,
-            'threshold_m': self._threshold,
-            'n_samples': len(h),
-            'window_epochs': self._window,
-            'gf_ref_m': ref,
-        }
+        in_drift = self._in_drift.get(sv, False)
+        over = abs(mean) > self._threshold
+
+        def _payload(kind: str) -> dict:
+            return {
+                'sv': sv,
+                'kind': kind,
+                'drift_m': mean,
+                'threshold_m': self._threshold,
+                'n_samples': len(h),
+                'window_epochs': self._window,
+                'gf_ref_m': ref,
+            }
+
+        if not in_drift and over:
+            # First trip: enter.
+            self._in_drift[sv] = True
+            self._enter_count[sv] = self._ingest_count[sv]
+            return _payload('enter')
+        if in_drift and not over:
+            # Recovered: exit.
+            self._in_drift[sv] = False
+            self._enter_count.pop(sv, None)
+            return _payload('exit')
+        if (in_drift and over and self._ongoing_period > 0
+                and self._ingest_count[sv] >=
+                self._enter_count.get(sv, 0) + self._ongoing_period):
+            # Sustained-drift heartbeat — emits at fixed period
+            # after enter so post-hoc analysis sees the persistence
+            # without per-epoch noise.
+            self._enter_count[sv] = self._ingest_count[sv]
+            return _payload('ongoing')
+        return None
 
     # ── Diagnostics ───────────────────────────────────────────── #
 
