@@ -340,8 +340,9 @@ Interpretation:
 
 GNSS arrives through a standard USB serial device:
 
-- path: `/dev/gnss-top`
-- backing device: `/dev/ttyACM0`
+- path: `/dev/serial/by-path/platform-xhci-hcd.1-usb-0:1:1.0`
+  (currently backed by `/dev/ttyACM0` — see lab-operations.md §12 for
+  the F9T by-path convention)
 
 Important properties:
 

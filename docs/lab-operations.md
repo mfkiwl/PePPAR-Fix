@@ -300,16 +300,38 @@ reach gt since the dev workstation also lacked gt access.
 
 **Add to first-time setup procedure**: generate key, authorize on gt.
 
-### 12. F9T EVK has no udev symlink — ttyACM assignment is fragile
+### 12. F9T USB-attached path: use `/dev/serial/by-path/` (lab convention)
 
-The F9T EVK has no USB serial number (per CLAUDE.md), so
-99-timelab.rules cannot create a stable symlink.  Config must use
-raw `/dev/ttyACM1`.  If the TICC and F9T are unplugged and replugged
-in different order, ttyACM0/1 assignments swap silently.
+F9T EVKs share VID:PID `1546:01a9` with no USB serial number.  udev
+can't manufacture a stable symlink from the device descriptor (every
+F9T looks identical), so the lab convention is:
 
-**Workaround**: use `/dev/serial/by-id/usb-u-blox_AG_...-if00` path
-as the ocxo-i226.toml config does.  This survives enumeration order
-changes.  (Not done on pi4ptpmon yet — using raw ttyACM1 for now.)
+- **Devices with a unique ID readable by udev** (TICC Arduino serials,
+  i226/E810 PHC MAC) get a stable symlink via `99-timelab.rules`.
+- **Devices that look identical to udev** (F9T EVKs) get **no** udev
+  rule.  Configs reference the kernel-generated path directly.
+
+For F9Ts, the only kernel-generated path that survives the addition
+or removal of other USB devices is **`/dev/serial/by-path/`**, which
+binds to the physical USB port (bus + port chain).  `/dev/ttyACMx`
+shifts whenever a sibling device enumerates differently;
+`/dev/serial/by-id/` collapses to one name across all F9Ts.
+
+**Convention**: single-F9T hosts set `serial = "/dev/serial/by-path/<port>"`
+in `config/<host>.toml`.  Find the value with:
+
+```sh
+ls -la /dev/serial/by-path/   # F9T entry without -port0 suffix
+```
+
+The by-path string only breaks if you move the F9T's USB cable to a
+different port on the host.  Lab-edit-and-test workflow handles that
+case: `git status` after a cable move flags it.
+
+**Multi-F9T hosts** (e.g., PiPuss) can't be solved by by-path alone if
+both ports are equivalent — use a host-specific udev rule that
+matches `ID_PATH` and produces a friendly symlink (`gnss-top`,
+`gnss-bot`).  This is the documented exception, not the default.
 
 ### 13. Wrapper freerun + retry loop surprises
 

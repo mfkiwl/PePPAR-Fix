@@ -1,5 +1,10 @@
 [peppar]
-serial = "/dev/ttyACM1"
+# F9T EVKs share one USB descriptor (no unique serial), so udev can't
+# make a stable name and /dev/ttyACMx is fragile (enumeration shifts
+# when any USB device is added/removed).  Bind to the physical USB
+# port via /dev/serial/by-path — only breaks if the F9T's USB cable
+# is moved to a different port.  See docs/lab-operations.md §12.
+serial = "/dev/serial/by-path/platform-fe9c0000.xhci-usb-0:1.2:1.0"
 baud = 115200
 ubx_port = "USB"
 receiver = "f9t-l5"

@@ -1,8 +1,10 @@
 [peppar]
-# F9T has no USB serial number — port can change on re-enumeration.
-# Use the stable /dev/serial/by-id/ symlink which matches by USB
-# device descriptor (vendor + product), not by enumeration order.
-serial = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"
+# F9T EVKs share one USB descriptor (no unique serial), so udev can't
+# make a stable name and /dev/ttyACMx is fragile (enumeration shifts
+# when any USB device is added/removed).  Bind to the physical USB
+# port via /dev/serial/by-path — only breaks if the F9T's USB cable
+# is moved to a different port.  See docs/lab-operations.md §12.
+serial = "/dev/serial/by-path/platform-xhci-hcd.1-usb-0:1:1.0"
 baud = 115200
 ubx_port = "USB"
 receiver = "f9t-l5"
