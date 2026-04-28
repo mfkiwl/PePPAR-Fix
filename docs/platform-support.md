@@ -336,6 +336,41 @@ Interpretation:
 - explicit `UART2` testing did not change the result, so this is not just a
   forgotten second UART case
 
+#### Multi-consumer routing: char devices split bytes, they do not fan out
+
+A trap when standing up a second consumer of `/dev/gnss0` (NTRIP caster,
+RTCM archive, BNC PPP, ad-hoc `cat` for debugging — anything): opening
+the device a second time does **not** duplicate the byte stream.  Each
+open is a separate handle into the same kernel ring; reads race, and
+the bytes are split between consumers — not fanned out.
+
+This bit us on `ptpmon` (2026-04-27): `f9t-tcp-bridge-ptpmon.service`
+was running `socat TCP-LISTEN:2101,fork OPEN:/dev/gnss0`, and `,fork`
+opens a fresh `/dev/gnss0` fd per accepted client.  With one client
+the consumer saw the full ~617 B/s.  With two (caster + local archive),
+each saw ~338 B/s and bytes were lost in races.  An overnight A/B
+captured by the archive ran at 55% of raw rate before the issue was
+caught.
+
+The fix is a **single-reader broadcaster**: one process holds the only
+`/dev/gnss0` fd, listens on TCP, and copies each chunk to every
+connected client.  Stdlib-only Python is sufficient (~80 lines).
+Deployed on `ptpmon` as `f9t-tcp-bridge-ptpmon.service` /
+`f9t_broadcaster.py` (peppar-bnc-glue commit `d9ce385`); verified
+two-client fan-out at 619 B/s each.
+
+This is the same theme as the earlier RTKLIB findings on kernel char
+devices — standard tools assume regular-file or tty semantics, and
+the kernel char device breaks that assumption in subtle, throughput-
+visible ways.  Operationally:
+
+- never run more than one direct reader of `/dev/gnss0` (or any
+  kernel char device) in production; always go through a broadcaster
+- a stray `cat /dev/gnss0` left running while the broadcaster is up
+  will silently halve every consumer's byte rate
+- spot-check byte rate (~617 B/s on this host) before committing a
+  long capture; halved rate is the signature
+
 ### `timehat`
 
 GNSS arrives through a standard USB serial device:
