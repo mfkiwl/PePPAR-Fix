@@ -129,6 +129,48 @@ would make the unit mismatch visible at every callsite.
 **Proposed**: `@dataclass class LLA: lat_deg: float;
 lon_deg: float; alt_m: float`, used by `antenna_position`.
 
+## 2026-04-28
+
+### `WlDriftMonitor` / `wl_drift` / `[WL_DRIFT]` — Dangerous
+
+**Where**: `scripts/peppar_fix/wl_drift_monitor.py:1` (class
+docstring + log tag); engine call sites in
+`scripts/peppar_fix_engine.py:2348-2386`.
+**Claim**: Detects "wrong WL integer commits" — implies a phase-
+side ambiguity-error detector, in line with the sunrise TEC slip
+storm motivation.
+**Actual**: Tracks the rolling mean of the **Melbourne-Wübbena
+combination residual** post-fix.  MW = phase − pseudorange; the
+residual responds to either-side disturbances.  Empirically (3-host
+day0427night; Z = −0.17, p = 0.86 against BNC's independent IF-based
+slip detector) the firing pattern is **statistically
+indistinguishable from random** with respect to phase events.
+Direct probe on three anti-correlated SVs (E29, E21, E19) showed
+BNC's filter state smoothly drifting through engine wl_drift trips
+— the disturbance was PR-side.
+**Why it matters**: a future reader sees `wl_drift` events
+demoting SVs and assumes phase-domain instability is the root
+cause.  Investigation directions follow that framing (cycle-slip
+diagnosis, ambiguity-resolution tuning) when the signal is
+actually PR multipath / code-bias drift.  Burned hours of
+investigation on day0427night until the BNC validator was built.
+**Proposed**: not a simple rename — the underlying signal is
+wrong for the documented use case.  Two paths in increasing
+scope:
+
+  1. Internal scope only: rename class to
+     `MwResidualRollingMeanMonitor` and the log tag to `[MW_DRIFT]`
+     to honestly describe the signal; keep adaptive thresholding
+     by integer-history class (I-153334-main) on top.
+  2. Replace the signal with a phase-only counterpart (GF or IF
+     residual rolling mean, following BNC's lead).  Then the
+     "wl_drift / wrong WL integer" framing becomes legitimate.
+     Larger redesign — see proposal in dayplan.
+
+**Notes**: see `project_wl_drift_smooth_float_signal_20260428` and
+`project_wl_drift_vs_bnc_finding_20260428` for the full
+investigation chain.
+
 ## Code-quality issues found alongside (not misnomers)
 
 ### `gmf._coeff_sum` — dead code
