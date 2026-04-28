@@ -1,36 +1,58 @@
-"""Wide-lane post-fix residual drift monitor.
+"""Wide-lane post-fix MW residual rolling-mean monitor.
 
-Detects wrong WL integer commits by observing that, after an SV's WL
-has been fixed, its post-fix Melbourne-Wübbena residual (MW
-observation minus committed integer) should hover near zero.  A
-wrong integer causes systematic drift as new observations accumulate
-inconsistent with the commitment.
+⚠ **Misnomer warning** (logged 2026-04-28 in
+``docs/misnomers.md``).  This class was originally designed and
+documented as a "wrong WL integer detector," motivated by the
+2026-04-22/23 sunrise TEC slip storm.  Empirically (BNC validation
+on day0427night, see ``project_wl_drift_smooth_float_signal_20260428``)
+the MW-residual rolling mean it watches is **statistically
+indistinguishable from random** when correlated against an
+independent IF-based PPP engine's slip events (Z = −0.17, p = 0.86).
+It does NOT measure what its old name suggested.
 
-This is the per-SV analog of `FalseFixMonitor`'s PR-residual check at
-the NL layer: direct evidence that an integer commitment is wrong,
-acting **minutes before** the aggregate filter state (ZTD, altitude)
-has absorbed enough bias to breach physical envelopes that the host-
-level monitors (``ztd_impossible`` / ``ztd_cycling``) watch.
+What it actually does: tracks the per-SV rolling mean of the
+**Melbourne-Wübbena combination residual** post-fix.  MW combines
+phase **and pseudorange** (MW = phase − pseudorange in WL cycles,
+roughly).  A disturbance in the MW residual can therefore originate
+on either side: real phase events (slips, ambiguity errors) **or**
+pseudorange-domain noise (PR multipath, code-bias drift, receiver
+front-end PR shifts).  A direct probe of three SVs during 2026-04-28
+overnight wl_drift events showed BNC's IF (phase-only) filter saw
+**no event** while this monitor fired — i.e., on those events the
+disturbance was PR-side, not phase-side.
 
-Motivated by the overnight 2026-04-22/23 WL-only run.  All four hosts
-reached a high-quality converged state pre-sunrise (L5 fleet agreed
-to 0.50 m altitude, σ ≈ 18 mm, ZTD within ±310 mm), then a sunrise
-TEC slip storm corrupted two hosts (clkPoC3, MadHat) via wrong WL
-re-acquisitions while the other two (TimeHat, ptpmon) rode through.
-Post-hoc: the "pull phase" between a bad integer landing and ZTD
-breaching threshold was 30–45 minutes on the compromised hosts.  A
-per-SV drift monitor firing at 3-minute rolling window would have
-caught it in the pull phase.  See
+For carrier-phase tracking, only phase-side events are worth
+demoting an SV for.  See I-153334-main on dayplan/2026-04-28 for
+the planned adaptive-threshold mitigation, and the open proposal
+to redesign this monitor around a phase-only signal (GF or IF
+residual) following BNC / RTKLIB's lead.  The original use case
+(rare wrong-integer commit catching) is still legitimate, but the
+current MW-rolling-mean approach surfaces it buried in PR-domain
+noise.
+
+Historical context (kept for the design rationale): originally
+motivated by the overnight 2026-04-22/23 WL-only run.  All four
+hosts reached a high-quality converged state pre-sunrise (L5 fleet
+agreed to 0.50 m altitude, σ ≈ 18 mm, ZTD within ±310 mm), then a
+sunrise TEC slip storm corrupted two hosts (clkPoC3, MadHat) via
+wrong WL re-acquisitions while the other two (TimeHat, ptpmon)
+rode through.  Post-hoc: the "pull phase" between a bad integer
+landing and ZTD breaching threshold was 30–45 minutes on the
+compromised hosts.  A per-SV drift monitor firing at 3-minute
+rolling window would have caught it in the pull phase.  See
 ``docs/wl-only-foundation.md`` and the corresponding analysis memo.
+The redesigned phase-only version of this monitor will still
+catch that population-of-1 event signature; the current version
+catches it buried in noise (≥ 200 events/host/night dominated by
+PR disturbances).
 
-The detector is the per-SV form of a one-sample z-test on the
-rolling mean: under the null hypothesis (correct integer, MW noise
-is zero-mean), the rolling mean is bounded by σ_MW / √N.  A
-persistent non-zero rolling mean exceeding threshold falsifies the
-null — either the integer is wrong or the bias model is wrong.  An
-ensemble chi-squared across the set of fixed-WL SVs is a natural
-sibling test (catches systemic issues the per-SV test misses, but
-doesn't identify which SV); deferred for a follow-on monitor.
+Statistical framing (correct for what's measured, agnostic to
+whether MW residual is the right signal): under the null hypothesis
+of correct integer + zero-mean MW noise, the rolling mean is bounded
+by σ_MW / √N.  A persistent non-zero rolling mean exceeding
+threshold falsifies the null — but the null can be falsified by
+*either* a wrong integer or a non-zero-mean MW noise process (e.g.,
+slow PR multipath).  This monitor cannot distinguish the two.
 
 Usage pattern:
 

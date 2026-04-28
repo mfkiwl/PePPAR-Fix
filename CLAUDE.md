@@ -554,6 +554,28 @@ Operational positions are **not** hardcoded in PePPAR-Fix — they're
 loaded from `state/receivers/<uid>.json` at runtime (written by
 Phase 1 bootstrap) and verified against `timelab/antPos.json`.
 
+## Code style — naming honesty
+
+> One of my pet peeves in code is misnomers.  Maybe the name of a
+> class made sense when it was first created, but as it ages, the
+> code changes, and the name doesn't, to the point where the name
+> is just plain wrong.  In the days of emacs and vi, this was more
+> forgivable, but I've had little patience for this ever since IDEs
+> were invented.  What, two decades ago now? — Bob
+
+When you find an identifier whose name implies one thing but whose
+implementation does another, log it in
+[`docs/misnomers.md`](docs/misnomers.md).  Don't batch-rename — pollutes
+git blame for no test signal — but fix opportunistically when the
+surrounding code is being touched.  Severity scale and entry format
+are documented in that file.
+
+Names that are wrong about *what kind of signal* a thing measures are
+the most dangerous.  See the 2026-04-28 `wl_drift_monitor` rework for a
+case where the docstring framed it as a "wrong WL integer detector"
+while empirically it was reacting to pseudorange-domain noise — that
+mis-framing burned hours of investigation.
+
 ## Acceptance Criteria for Beads
 
 Your bead is NOT done until:
