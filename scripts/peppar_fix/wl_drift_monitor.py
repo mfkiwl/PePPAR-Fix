@@ -62,6 +62,19 @@ from collections import deque
 log = logging.getLogger(__name__)
 
 
+# WL integer consistency levels — measure how reproducibly an SV's WL
+# integer commitment lands at the same value across re-fix cycles.
+# Bob's thought experiment: if a HIGH-consistency SV is forced out, on
+# re-fix it consistently picks the same integer; LOW does not.
+#
+# Used as a key into per-level threshold + readmit-quarantine policy.
+# String constants (not Enum) to keep the log line format stable.
+CONS_HIGH = "HIGH"      # n_wl history range = 0 across last K_short cycles
+CONS_MEDIUM = "MEDIUM"  # range = 1 (legitimate adjacent-integer boundary)
+CONS_LOW = "LOW"        # range >= 2 (wandering — wrong integer each cycle)
+CONS_UNKNOWN = "UNKNOWN"  # < K_short cycles observed; default to LOW behavior
+
+
 class WlDriftMonitor:
     """Per-SV rolling-mean drift detector on post-fix MW residual.
 
@@ -84,9 +97,28 @@ class WlDriftMonitor:
         threshold_cyc: float = 0.25,
         min_samples: int = 15,
         warmup_epochs: int = 30,
+        k_short: int = 4,
+        threshold_high_cyc: float = 0.60,
+        threshold_medium_cyc: float = 0.35,
     ) -> None:
         self._window = int(window_epochs)
+        # Backward-compat single threshold; used as LOW/UNKNOWN level.
         self._threshold = float(threshold_cyc)
+        # Per-consistency-level thresholds.  HIGH is roughly 4× a clean
+        # noise-floor std (~0.15 cyc) — well outside any plausible
+        # bias-model error.  MEDIUM is ~5σ.  LOW stays at the historical
+        # 0.25 cyc since these SVs need cycling.
+        self._thresholds: dict[str, float] = {
+            CONS_HIGH: float(threshold_high_cyc),
+            CONS_MEDIUM: float(threshold_medium_cyc),
+            CONS_LOW: float(threshold_cyc),
+            CONS_UNKNOWN: float(threshold_cyc),
+        }
+        # Number of fix cycles to remember per SV for consistency
+        # classification.  Too small → unstable label flapping; too
+        # large → slow to recognise an SV that recovered after a real
+        # slip.  4 picked as compromise.
+        self._k_short = int(k_short)
         self._min_samples = int(min_samples)
         # Post-fix warmup: don't feed the rolling window for this
         # many ingest calls after ``note_fix``.  The MW tracker's EMA
@@ -109,23 +141,53 @@ class WlDriftMonitor:
         # to skip the warmup window.  Reset on note_fix, cleared on
         # note_unfix.
         self._ingest_count: dict[str, int] = {}
+        # sv → deque of last K_short n_wl values committed for this SV.
+        # Persists across note_fix/note_unfix cycles so consistency
+        # classification has memory.  Cleared only by explicit
+        # forget_history() (e.g. after a confirmed real cycle slip).
+        self._int_history: dict[str, deque[int]] = {}
 
     # ── Lifecycle ───────────────────────────────────────────────── #
 
-    def note_fix(self, sv: str) -> None:
+    def note_fix(self, sv: str, n_wl: int | None = None) -> None:
         """Start tracking ``sv`` — call when its WL integer is
         committed.  Idempotent: re-notifying an already-tracked SV
-        clears its history and restarts the warmup count (fresh
-        window after re-fix)."""
+        clears its post-fix residual history and restarts the warmup
+        count (fresh window after re-fix), but the per-SV integer
+        history is preserved across cycles for consistency
+        classification.
+
+        Pass ``n_wl`` (the integer committed at this fix) to enable
+        consistency classification.  Without it, the SV stays at
+        UNKNOWN consistency and uses the default conservative
+        threshold."""
         self._hist[sv] = deque(maxlen=self._window)
         self._ingest_count[sv] = 0
+        if n_wl is not None:
+            hist = self._int_history.setdefault(
+                sv, deque(maxlen=self._k_short)
+            )
+            hist.append(int(n_wl))
 
     def note_unfix(self, sv: str) -> None:
-        """Stop tracking ``sv`` — call when its MW state is reset,
-        the SV is dropped, or the drift monitor itself flagged it
-        and the caller acted."""
+        """Stop tracking ``sv``'s post-fix residual window — call
+        when its MW state is reset, the SV is dropped, or the drift
+        monitor itself flagged it and the caller acted.
+
+        The per-SV integer history is **preserved** so re-fix sees the
+        previous integer commitments and can classify consistency.
+        Use ``forget_history(sv)`` after a confirmed real cycle slip
+        to wipe the history (so the SV starts fresh)."""
         self._hist.pop(sv, None)
         self._ingest_count.pop(sv, None)
+
+    def forget_history(self, sv: str) -> None:
+        """Wipe the per-SV integer history.  Call only after a
+        confirmed real cycle slip (LLI / GF jump / arc gap) so the
+        next fix is classified from scratch.  Routine wl_drift
+        demotions should NOT call this — the whole point is that
+        consistency tracking persists across re-fixes."""
+        self._int_history.pop(sv, None)
 
     # ── Observation intake ──────────────────────────────────────── #
 
@@ -157,15 +219,63 @@ class WlDriftMonitor:
         if len(h) < self._min_samples:
             return None
         mean = sum(h) / len(h)
-        if abs(mean) <= self._threshold:
+        # Adaptive threshold: HIGH-consistency SVs get a wide threshold
+        # (their residual bias is real signal-side, not a wrong-integer
+        # signature); LOW-consistency SVs stay at the strict threshold
+        # since they need cycling.
+        cons = self.consistency_level(sv)
+        threshold = self._thresholds[cons]
+        if abs(mean) <= threshold:
             return None
         return {
             'sv': sv,
             'drift_cyc': mean,
-            'threshold_cyc': self._threshold,
+            'threshold_cyc': threshold,
+            'consistency': cons,
             'n_samples': len(h),
             'window_epochs': self._window,
         }
+
+    # ── Consistency classification ─────────────────────────────── #
+
+    def consistency_level(self, sv: str) -> str:
+        """Per-SV WL integer consistency over the last K_short fix
+        cycles.  Returns one of ``CONS_HIGH | CONS_MEDIUM | CONS_LOW |
+        CONS_UNKNOWN``.
+
+        Bob's thought experiment: if a HIGH-consistency SV is forced
+        out of the fix set, it would on re-fix consistently choose the
+        same integer it had on eviction.  A LOW-consistency SV would
+        come back with a wildly different integer.
+
+        Classification rule on the per-SV integer history deque:
+          range = 0  → HIGH    (always the same integer)
+          range = 1  → MEDIUM  (adjacent-integer boundary case)
+          range >= 2 → LOW     (wandering — wrong integer each cycle)
+          < 2 cycles → UNKNOWN (defaults to LOW behavior — conservative)
+        """
+        hist = self._int_history.get(sv)
+        if hist is None or len(hist) < 2:
+            return CONS_UNKNOWN
+        rng = max(hist) - min(hist)
+        if rng == 0:
+            return CONS_HIGH
+        if rng == 1:
+            return CONS_MEDIUM
+        return CONS_LOW
+
+    def threshold_for(self, sv: str) -> float:
+        """The wl_drift trip threshold currently applicable to ``sv``,
+        per its consistency level.  Returns LOW/UNKNOWN default for
+        SVs with no integer history."""
+        return self._thresholds[self.consistency_level(sv)]
+
+    def integer_history(self, sv: str) -> list[int]:
+        """Read-only snapshot of the last K_short n_wl values
+        committed for ``sv``, oldest first.  Empty list if no
+        history."""
+        hist = self._int_history.get(sv)
+        return list(hist) if hist else []
 
     # ── Diagnostics ─────────────────────────────────────────────── #
 
@@ -184,5 +294,9 @@ class WlDriftMonitor:
     def summary(self) -> str:
         return (
             f"wl_drift: tracking {len(self._hist)} SVs "
-            f"(window={self._window}ep, threshold=±{self._threshold:.2f}cyc)"
+            f"(window={self._window}ep, "
+            f"thresholds=H{self._thresholds[CONS_HIGH]:.2f}/"
+            f"M{self._thresholds[CONS_MEDIUM]:.2f}/"
+            f"L{self._thresholds[CONS_LOW]:.2f}cyc, "
+            f"k_short={self._k_short})"
         )

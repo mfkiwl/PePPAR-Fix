@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import unittest
 
-from peppar_fix.wl_drift_monitor import WlDriftMonitor
+from peppar_fix.wl_drift_monitor import (
+    CONS_HIGH,
+    CONS_LOW,
+    CONS_MEDIUM,
+    CONS_UNKNOWN,
+    WlDriftMonitor,
+)
 
 
 class WlDriftMonitorTest(unittest.TestCase):
@@ -235,6 +241,151 @@ class WarmupBehaviorTest(unittest.TestCase):
             m.ingest("G01", 0.0)
         m.note_unfix("G01")
         self.assertNotIn("G01", m._ingest_count)
+
+
+class WlIntConsistencyTest(unittest.TestCase):
+    """Per-SV WL integer consistency classification + adaptive
+    threshold lookup."""
+
+    def test_unknown_until_two_cycles(self):
+        """A fresh SV with < 2 fix cycles in history is UNKNOWN."""
+        m = WlDriftMonitor(k_short=4)
+        self.assertEqual(m.consistency_level("G01"), CONS_UNKNOWN)
+        m.note_fix("G01", n_wl=10)
+        self.assertEqual(m.consistency_level("G01"), CONS_UNKNOWN)
+
+    def test_high_when_integer_repeats(self):
+        """Two cycles at the same integer → HIGH consistency."""
+        m = WlDriftMonitor(k_short=4)
+        m.note_fix("G01", n_wl=10)
+        m.note_unfix("G01")
+        m.note_fix("G01", n_wl=10)
+        self.assertEqual(m.consistency_level("G01"), CONS_HIGH)
+
+    def test_medium_when_integer_adjacent(self):
+        """Two cycles at adjacent integers (range = 1) → MEDIUM."""
+        m = WlDriftMonitor(k_short=4)
+        m.note_fix("G01", n_wl=10)
+        m.note_unfix("G01")
+        m.note_fix("G01", n_wl=11)
+        self.assertEqual(m.consistency_level("G01"), CONS_MEDIUM)
+
+    def test_low_when_integer_wanders(self):
+        """Cycles spanning >1 integer (range >= 2) → LOW."""
+        m = WlDriftMonitor(k_short=4)
+        m.note_fix("G01", n_wl=10)
+        m.note_unfix("G01")
+        m.note_fix("G01", n_wl=15)
+        self.assertEqual(m.consistency_level("G01"), CONS_LOW)
+
+    def test_low_with_three_wandering_integers(self):
+        """G20-style: -41, -4, 18 → range 59 → LOW."""
+        m = WlDriftMonitor(k_short=4)
+        for n in [-41, -4, 18]:
+            m.note_fix("G20", n_wl=n)
+            m.note_unfix("G20")
+        self.assertEqual(m.consistency_level("G20"), CONS_LOW)
+
+    def test_history_persists_across_unfix(self):
+        """Integer history is preserved across note_unfix → next
+        note_fix sees the previous integer."""
+        m = WlDriftMonitor(k_short=4)
+        m.note_fix("G01", n_wl=10)
+        m.note_unfix("G01")
+        # New fix at same integer must be classifiable as HIGH.
+        m.note_fix("G01", n_wl=10)
+        self.assertEqual(m.consistency_level("G01"), CONS_HIGH)
+        self.assertEqual(m.integer_history("G01"), [10, 10])
+
+    def test_history_window_is_k_short(self):
+        """Only the last K_short integers are remembered."""
+        m = WlDriftMonitor(k_short=3)
+        for n in [5, 5, 5, 99]:  # last 3 → [5, 5, 99] → range 94 → LOW
+            m.note_fix("G01", n_wl=n)
+            m.note_unfix("G01")
+        self.assertEqual(m.integer_history("G01"), [5, 5, 99])
+        self.assertEqual(m.consistency_level("G01"), CONS_LOW)
+
+    def test_forget_history_clears(self):
+        """forget_history wipes integer memory (use after real slip)."""
+        m = WlDriftMonitor(k_short=4)
+        m.note_fix("G01", n_wl=10)
+        m.note_fix("G01", n_wl=10)
+        self.assertEqual(m.consistency_level("G01"), CONS_HIGH)
+        m.forget_history("G01")
+        self.assertEqual(m.consistency_level("G01"), CONS_UNKNOWN)
+
+    def test_threshold_lookup_by_consistency(self):
+        """threshold_for() returns the level-appropriate threshold."""
+        m = WlDriftMonitor(
+            threshold_cyc=0.25,
+            threshold_high_cyc=0.60,
+            threshold_medium_cyc=0.35,
+        )
+        # UNKNOWN → defaults to LOW threshold.
+        self.assertEqual(m.threshold_for("G01"), 0.25)
+        # HIGH path
+        m.note_fix("G01", n_wl=5)
+        m.note_unfix("G01")
+        m.note_fix("G01", n_wl=5)
+        self.assertEqual(m.threshold_for("G01"), 0.60)
+        # MEDIUM path
+        m.note_fix("E01", n_wl=10)
+        m.note_unfix("E01")
+        m.note_fix("E01", n_wl=11)
+        self.assertEqual(m.threshold_for("E01"), 0.35)
+        # LOW path
+        m.note_fix("E02", n_wl=0)
+        m.note_unfix("E02")
+        m.note_fix("E02", n_wl=99)
+        self.assertEqual(m.threshold_for("E02"), 0.25)
+
+    def test_high_consistency_uses_wide_threshold(self):
+        """HIGH-consistency SV with rolling mean +0.40 cyc — under
+        the 0.60 HIGH threshold — should NOT fire wl_drift."""
+        m = WlDriftMonitor(
+            window_epochs=15, threshold_cyc=0.25,
+            threshold_high_cyc=0.60, min_samples=10, warmup_epochs=0,
+        )
+        # Establish HIGH consistency (two fixes at same integer).
+        m.note_fix("G01", n_wl=5)
+        m.note_unfix("G01")
+        m.note_fix("G01", n_wl=5)
+        # Steady +0.40 cyc residual — over LOW threshold, under HIGH.
+        for _ in range(15):
+            ev = m.ingest("G01", 0.40)
+        self.assertIsNone(ev)
+
+    def test_low_consistency_keeps_strict_threshold(self):
+        """LOW-consistency SV (wandering integer) keeps the 0.25
+        threshold — should still fire on +0.40 cyc."""
+        m = WlDriftMonitor(
+            window_epochs=15, threshold_cyc=0.25,
+            min_samples=10, warmup_epochs=0,
+        )
+        m.note_fix("G20", n_wl=-41)
+        m.note_unfix("G20")
+        m.note_fix("G20", n_wl=18)
+        # LOW consistency now.
+        ev = None
+        for _ in range(15):
+            ev = m.ingest("G20", 0.40)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["consistency"], CONS_LOW)
+        self.assertAlmostEqual(ev["threshold_cyc"], 0.25)
+
+    def test_event_carries_consistency(self):
+        """Drift event dict includes the consistency level used."""
+        m = WlDriftMonitor(
+            window_epochs=10, threshold_cyc=0.20,
+            min_samples=5, warmup_epochs=0,
+        )
+        m.note_fix("G01", n_wl=5)
+        ev = None
+        for _ in range(10):
+            ev = m.ingest("G01", 0.50)
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev["consistency"], CONS_UNKNOWN)
 
 
 if __name__ == "__main__":

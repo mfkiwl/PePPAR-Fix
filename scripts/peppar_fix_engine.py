@@ -1571,6 +1571,11 @@ class AntPosEstThread(threading.Thread):
         # note_unfix — keeps monitor decoupled from the MW tracker's
         # internals.
         self._wl_drift_prev_fixed: set[str] = set()
+        # Fix-life logging — track per-SV monotonic time at entry so
+        # we can emit duration_s on exit (per dayplan I-153334).
+        # Pruned on exit; size-bounded by the fix-set size.
+        self._wl_fix_life_t0: dict[str, float] = {}
+        self._wl_fix_life_n_wl: dict[str, int | None] = {}
         # Layer 3 of the per-SV trust architecture
         # (docs/sv-trust-layers.md): after the drift monitor flushes
         # an SV, this gate blocks MW updates for that SV until its
@@ -2329,13 +2334,43 @@ class AntPosEstThread(threading.Thread):
             # from seeing a suspect WL this epoch.
             fixed_now = {sv for sv, st in mw._state.items() if st.get('fixed')}
             for sv in fixed_now - self._wl_drift_prev_fixed:
-                self._wl_drift.note_fix(sv)
+                fix_n_wl = mw._state[sv].get('n_wl')
+                self._wl_drift.note_fix(sv, n_wl=fix_n_wl)
                 # Newly-fixed SV passed the re-admission gate (or was
                 # never held).  Clear any prior hold so a subsequent
                 # drift-flush-readmit cycle starts fresh.
                 self._wl_readmit.note_admitted(sv)
+                # Fix-life logging — entry.  Records integer + elev +
+                # consistency level for post-hoc analysis of K_short /
+                # threshold tuning (per dayplan I-153334).
+                _life_elev = elevations.get(sv)
+                _life_cons = self._wl_drift.consistency_level(sv)
+                _life_hist = self._wl_drift.integer_history(sv)
+                log.info(
+                    "[WL_FIX_LIFE] event=enter sv=%s n_wl=%s elev=%s "
+                    "consistency=%s int_history=%s",
+                    sv, fix_n_wl,
+                    f"{_life_elev:.1f}" if _life_elev is not None else "?",
+                    _life_cons, _life_hist,
+                )
+                self._wl_fix_life_t0[sv] = time.monotonic()
+                self._wl_fix_life_n_wl[sv] = fix_n_wl
             for sv in self._wl_drift_prev_fixed - fixed_now:
                 self._wl_drift.note_unfix(sv)
+                # Fix-life logging — exit (caller didn't trigger via
+                # wl_drift; could be slip, dropout, or other).
+                _t0 = self._wl_fix_life_t0.pop(sv, None)
+                _n_wl = self._wl_fix_life_n_wl.pop(sv, None)
+                _life_elev = elevations.get(sv)
+                _dur = time.monotonic() - _t0 if _t0 is not None else None
+                log.info(
+                    "[WL_FIX_LIFE] event=exit sv=%s n_wl=%s elev=%s "
+                    "duration_s=%s reason=other consistency=%s",
+                    sv, _n_wl,
+                    f"{_life_elev:.1f}" if _life_elev is not None else "?",
+                    f"{_dur:.1f}" if _dur is not None else "?",
+                    self._wl_drift.consistency_level(sv),
+                )
             drift_actions: list[str] = []
             for sv in list(fixed_now):
                 st = mw._state[sv]
@@ -2358,11 +2393,25 @@ class AntPosEstThread(threading.Thread):
                 if ev is not None:
                     flush_elev = elevations.get(sv)
                     log.warning(
-                        "[WL_DRIFT] %s drift=%+.3fcyc > ±%.2f (n=%d, window=%dep): "
-                        "flushing MW, demoting to FLOATING, gate@elev=%s",
+                        "[WL_DRIFT] %s drift=%+.3fcyc > ±%.2f (n=%d, window=%dep, "
+                        "consistency=%s): flushing MW, demoting to FLOATING, "
+                        "gate@elev=%s",
                         ev['sv'], ev['drift_cyc'], ev['threshold_cyc'],
                         ev['n_samples'], ev['window_epochs'],
+                        ev.get('consistency', '?'),
                         f"{flush_elev:.1f}°" if flush_elev is not None else "?",
+                    )
+                    # Fix-life exit before MW reset clears state.
+                    _t0 = self._wl_fix_life_t0.pop(sv, None)
+                    _n_wl_at_entry = self._wl_fix_life_n_wl.pop(sv, None)
+                    _dur = time.monotonic() - _t0 if _t0 is not None else None
+                    log.info(
+                        "[WL_FIX_LIFE] event=exit sv=%s n_wl=%s elev=%s "
+                        "duration_s=%s reason=wl_drift consistency=%s",
+                        sv, _n_wl_at_entry,
+                        f"{flush_elev:.1f}" if flush_elev is not None else "?",
+                        f"{_dur:.1f}" if _dur is not None else "?",
+                        ev.get('consistency', '?'),
                     )
                     mw.reset(sv)
                     self._wl_drift.note_unfix(sv)
