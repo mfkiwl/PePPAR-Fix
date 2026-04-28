@@ -235,18 +235,49 @@ def label_engine_events(
     engine_events: list[dict],
     bnc_slips: list[dict],
     bnc_systems: set[str],
+    bnc_tracked_svs: set[str],
+    bnc_slip_counts: dict[str, int],
     window_s: float,
 ) -> list[dict]:
-    """Annotate each engine event with TP / FP / OOS based on BNC slips."""
+    """Annotate each engine event with a refined label.
+
+    Labels (in order of precedence):
+      OOS_SYS  — engine SV's GNSS system not tracked by BNC at all
+      OOS_SV   — system tracked, but this specific SV never observed
+                 by BNC (different elev mask, PRN exclusion, etc.)
+      NO_OPP   — BNC observed the SV but had zero integer-jump events
+                 over the run.  Stable BNC arc; engine demoted anyway.
+                 Strong-evidence FP.
+      TP / FP  — SV tracked, BNC had slip events; classify by match.
+
+    The split disentangles "BNC didn't have an opinion" (OOS_*, NO_OPP
+    when BNC saw nothing) from "BNC had an opinion and disagreed"
+    (FP among had-opp SVs).
+    """
     bnc_by_sv = _index_by_sv(bnc_slips)
     out = []
     for e in engine_events:
         sv_sys = e['sv'][0]
         labelled = dict(e)
         if sv_sys not in bnc_systems:
+            labelled['label'] = 'OOS_SYS'
             labelled['bnc_match'] = False
             labelled['bnc_match_dt_s'] = None
-            labelled['label'] = 'OOS'
+            out.append(labelled)
+            continue
+        if e['sv'] not in bnc_tracked_svs:
+            labelled['label'] = 'OOS_SV'
+            labelled['bnc_match'] = False
+            labelled['bnc_match_dt_s'] = None
+            out.append(labelled)
+            continue
+        if bnc_slip_counts.get(e['sv'], 0) == 0:
+            # BNC observed this SV but never declared a slip.  Engine
+            # event has no chance of matching; treat as a strong FP
+            # (stable BNC arc → engine over-detection on this SV).
+            labelled['label'] = 'NO_OPP'
+            labelled['bnc_match'] = False
+            labelled['bnc_match_dt_s'] = None
             out.append(labelled)
             continue
         dt = _nearest_within(bnc_by_sv.get(e['sv'], []), e['ts'], window_s)
@@ -293,19 +324,68 @@ def aggregate_per_sv(labelled: list[dict]) -> dict[str, dict]:
     by_sv: dict[str, dict] = {}
     for e in labelled:
         sv = e['sv']
-        rec = by_sv.setdefault(sv, {'n': 0, 'tp': 0, 'fp': 0, 'oos': 0})
+        rec = by_sv.setdefault(sv, {'n': 0, 'tp': 0, 'fp': 0,
+                                     'no_opp': 0,
+                                     'oos_sys': 0, 'oos_sv': 0})
         rec['n'] += 1
-        if e['label'] == 'TP':
+        lbl = e['label']
+        if lbl == 'TP':
             rec['tp'] += 1
-        elif e['label'] == 'FP':
+        elif lbl == 'FP':
             rec['fp'] += 1
-        else:
-            rec['oos'] += 1
+        elif lbl == 'NO_OPP':
+            rec['no_opp'] += 1
+        elif lbl == 'OOS_SYS':
+            rec['oos_sys'] += 1
+        elif lbl == 'OOS_SV':
+            rec['oos_sv'] += 1
     for rec in by_sv.values():
         in_scope = rec['tp'] + rec['fp']
         rec['fp_rate'] = rec['fp'] / in_scope if in_scope else None
         rec['tp_rate'] = rec['tp'] / in_scope if in_scope else None
     return by_sv
+
+
+def expected_chance_tps(
+    engine_events: list[dict],
+    bnc_slip_counts: dict[str, int],
+    window_s: float,
+    t_total: float,
+) -> float:
+    """Expected number of chance matches under independence.
+
+    For each engine event on SV X at time t, treating BNC slips on
+    SV X as a uniform Poisson point process with rate
+    λ_X = N_BNC_X / T, the probability that a random window of
+    length 2W around t catches at least one BNC event is
+    approximately min(1, 2 W λ_X) for thin events.  Sum over engine
+    events gives the expected count under independence.
+
+    Only events labelled TP or FP contribute (in-scope subset).
+    """
+    if t_total <= 0:
+        return 0.0
+    expected = 0.0
+    for e in engine_events:
+        if e['label'] not in ('TP', 'FP'):
+            continue
+        n_bnc = bnc_slip_counts.get(e['sv'], 0)
+        if n_bnc == 0:
+            continue
+        lam = n_bnc / t_total
+        p = min(1.0, 2.0 * window_s * lam)
+        expected += p
+    return expected
+
+
+def excess_tps(observed_tp: int, expected_chance: float) -> dict:
+    """Above-chance TPs: observed minus expected, plus a normalised
+    excess rate on the in-scope denominator the caller manages."""
+    return {
+        'observed_tp': observed_tp,
+        'expected_chance': expected_chance,
+        'excess_tp': observed_tp - expected_chance,
+    }
 
 
 # ── Reporting ────────────────────────────────────────────────────────────── #
@@ -321,32 +401,38 @@ def render_text(report: dict) -> str:
     out.append(f"# BNC RESET events (subset, advisory): {report['n_bnc_resets']}")
     out.append("")
 
-    out.append("## Per-host: WL_DRIFT vs BNC ground truth")
-    out.append("  (FP% over in-scope only; OOS = SV outside BNC's tracked systems)")
-    out.append(f"  {'host':>10}  {'events':>7}  {'in-sc':>6}  "
-               f"{'TP':>5}  {'FP':>5}  {'TP%':>6}  {'OOS':>5}")
-    for host, h in report['hosts'].items():
-        d = h['wl_drift']
-        tp_pct = (f"{(d['tp']/(d['tp']+d['fp'])*100):>5.1f}%"
-                  if (d['tp']+d['fp']) else "  n/a")
-        out.append(
-            f"  {host:>10}  {d['n']:>7d}  {d['tp']+d['fp']:>6d}  "
-            f"{d['tp']:>5d}  {d['fp']:>5d}  {tp_pct:>6}  "
-            f"{d['oos']:>5d}")
-    out.append("")
+    def _block(kind: str, title: str) -> list[str]:
+        lines = []
+        lines.append(f"## Per-host: {title} vs BNC ground truth")
+        lines.append("  Event partition: TP/FP (in-scope: SV had BNC slips); "
+                     "NO_OPP (BNC observed SV but zero slips, stable arc — "
+                     "strong-evidence FP); OOS_SV (system tracked, this SV "
+                     "not observed by BNC); OOS_SYS (system not tracked).")
+        lines.append("  Excess_TP = observed_TP − expected_chance_TP "
+                     f"(Poisson under independence at ±{report['window_s']:.0f}s).")
+        lines.append(
+            f"  {'host':>10}  {'all':>5}  {'in-sc':>6}  "
+            f"{'TP':>4}  {'FP':>4}  {'TP%':>5}  "
+            f"{'chance':>6}  {'excess':>6}  "
+            f"{'NO_OPP':>6}  {'OOS_SV':>6}  {'OOS_SYS':>7}")
+        for host, h in report['hosts'].items():
+            d = h[kind]
+            in_scope = d['tp'] + d['fp']
+            tp_pct = (f"{(d['tp']/in_scope*100):>4.1f}%"
+                      if in_scope else "  n/a")
+            chance = d['expected_chance_tp']
+            excess = d['tp'] - chance
+            lines.append(
+                f"  {host:>10}  {d['n']:>5d}  {in_scope:>6d}  "
+                f"{d['tp']:>4d}  {d['fp']:>4d}  {tp_pct:>5}  "
+                f"{chance:>6.1f}  {excess:>+6.1f}  "
+                f"{d['no_opp']:>6d}  {d['oos_sv']:>6d}  "
+                f"{d['oos_sys']:>7d}")
+        lines.append("")
+        return lines
 
-    out.append("## Per-host: cycle-slip flush vs BNC ground truth")
-    out.append(f"  {'host':>10}  {'events':>7}  {'in-sc':>6}  "
-               f"{'TP':>5}  {'FP':>5}  {'TP%':>6}  {'OOS':>5}")
-    for host, h in report['hosts'].items():
-        d = h['cyc_slip']
-        tp_pct = (f"{(d['tp']/(d['tp']+d['fp'])*100):>5.1f}%"
-                  if (d['tp']+d['fp']) else "  n/a")
-        out.append(
-            f"  {host:>10}  {d['n']:>7d}  {d['tp']+d['fp']:>6d}  "
-            f"{d['tp']:>5d}  {d['fp']:>5d}  {tp_pct:>6}  "
-            f"{d['oos']:>5d}")
-    out.append("")
+    out.extend(_block('wl_drift', 'WL_DRIFT'))
+    out.extend(_block('cyc_slip', 'cycle-slip-flush'))
 
     out.append("## BNC misses (BNC saw a slip; no engine signal fired)")
     out.append(f"  pooled across all hosts + both engine signals: "
@@ -387,34 +473,61 @@ def render_text(report: dict) -> str:
             f"{tp_pct:>6}  {hosts}")
     out.append("")
 
-    # Quick verdict heuristic for the open question.
+    # Headline using chance-adjusted excess.
     wl_combined = report['wl_drift_combined']
     cs_combined = report['cyc_slip_combined']
-    out.append("## Headline interpretation")
-    if wl_combined['in_scope'] > 0:
-        wl_tp_pct = wl_combined['tp'] / wl_combined['in_scope'] * 100
-    else:
-        wl_tp_pct = float('nan')
-    if cs_combined['in_scope'] > 0:
-        cs_tp_pct = cs_combined['tp'] / cs_combined['in_scope'] * 100
-    else:
-        cs_tp_pct = float('nan')
-    out.append(f"  WL_DRIFT:        TP={wl_tp_pct:.1f}% "
-               f"(n={wl_combined['in_scope']} in-scope)")
-    out.append(f"  cycle-slip-flush: TP={cs_tp_pct:.1f}% "
-               f"(n={cs_combined['in_scope']} in-scope)")
+    out.append("## Headline (chance-adjusted)")
+    out.append("  Excess_TP = observed_TP − expected_chance_TP.  Above-chance")
+    out.append("  fraction = excess_TP / in_scope — the fraction of in-scope")
+    out.append("  events that are correlated above what random independent")
+    out.append("  events would produce at this window size.")
     out.append("")
-    if cs_tp_pct > 50 and wl_tp_pct < 30:
-        out.append("  → cycle-slip-flush is doing the real work; "
-                   "WL_DRIFT is over-reacting to noise.  Tune down "
-                   "or repurpose WL_DRIFT.")
-    elif wl_tp_pct > 50:
-        out.append("  → WL_DRIFT catches real wrong-integer cases the "
-                   "slip detector misses.  Current threshold roughly "
-                   "right; investigate why BNC undercounts via RESET.")
-    elif wl_tp_pct < 30 and cs_tp_pct < 30:
-        out.append("  → both engine signals are loose vs BNC.  "
-                   "Investigate engine detection thresholds.")
+
+    def _hl(label: str, c: dict) -> str:
+        n = c['in_scope']
+        if n == 0:
+            return f"  {label:18s}: no in-scope events"
+        raw = c['tp'] / n * 100
+        excess_pct = c['excess_tp'] / n * 100
+        return (f"  {label:18s}: raw_TP={raw:>4.1f}% "
+                f"chance={c['expected_chance_tp']:>5.1f} "
+                f"excess={c['excess_tp']:>+5.1f} "
+                f"({excess_pct:>+5.1f}% above chance, "
+                f"n_in_scope={n})")
+
+    out.append(_hl("WL_DRIFT", wl_combined))
+    out.append(_hl("cycle-slip-flush", cs_combined))
+    out.append("")
+
+    n_no_opp_wl = wl_combined['no_opp']
+    n_oos_sv_wl = wl_combined['oos_sv']
+    n_oos_sys_wl = wl_combined['oos_sys']
+    out.append(f"  WL_DRIFT non-validatable / strong-FP partition:")
+    out.append(f"    OOS_SYS  (GPS, BNC didn't track):     {n_oos_sys_wl}")
+    out.append(f"    OOS_SV   (sys tracked, this SV not):  {n_oos_sv_wl}")
+    out.append(f"    NO_OPP   (BNC saw SV, never slipped): {n_no_opp_wl}")
+    out.append("")
+
+    # Interpretation guidance.
+    if wl_combined['in_scope'] > 0:
+        wl_excess_frac = wl_combined['excess_tp'] / wl_combined['in_scope']
+    else:
+        wl_excess_frac = 0.0
+    if cs_combined['in_scope'] > 0:
+        cs_excess_frac = cs_combined['excess_tp'] / cs_combined['in_scope']
+    else:
+        cs_excess_frac = 0.0
+    out.append("## Interpretation")
+    if cs_excess_frac > 0.20 and wl_excess_frac < 0.05:
+        out.append("  → cycle-slip-flush has real correlation with BNC "
+                   "(>20% above chance); WL_DRIFT does not (<5% above "
+                   "chance).  WL_DRIFT is not a slip detector.")
+    elif wl_excess_frac > 0.20:
+        out.append("  → WL_DRIFT has real correlation with BNC.  "
+                   "Catches wrong-integer cases the slip detector misses.")
+    elif cs_excess_frac < 0.10:
+        out.append("  → both engine signals near chance vs BNC.  "
+                   "Different signal classes; redesign needed.")
     else:
         out.append("  → mixed signal; see per-SV breakdown.")
 
@@ -451,8 +564,19 @@ def main() -> int:
     bnc_resets = parse_bnc_reset(args.bnc)
     bnc_slips = detect_amb_slips(bnc_amb, min_cycles=args.min_jump_cycles)
     bnc_systems = {sv[0] for sv in {o['sv'] for o in bnc_amb}}
+    bnc_tracked_svs = {o['sv'] for o in bnc_amb}
+    bnc_slip_counts: dict[str, int] = {}
+    for s in bnc_slips:
+        bnc_slip_counts[s['sv']] = bnc_slip_counts.get(s['sv'], 0) + 1
+    if bnc_amb:
+        bnc_t_min = min(o['ts'] for o in bnc_amb)
+        bnc_t_max = max(o['ts'] for o in bnc_amb)
+        bnc_t_total = bnc_t_max - bnc_t_min
+    else:
+        bnc_t_total = 0.0
     print(f"  {len(bnc_amb)} AMB observations; {len(bnc_slips)} integer jumps; "
-          f"{len(bnc_resets)} RESETs; systems={sorted(bnc_systems)}",
+          f"{len(bnc_resets)} RESETs; systems={sorted(bnc_systems)}; "
+          f"SVs tracked={len(bnc_tracked_svs)}; span={bnc_t_total/3600:.2f}h",
           file=sys.stderr)
 
     hosts: dict[str, dict] = {}
@@ -461,41 +585,64 @@ def main() -> int:
         print(f"parsing engine log {lbl}...", file=sys.stderr)
         wl = parse_engine_drift(str(p), args.engine_tz_offset_hours)
         cs = parse_engine_cycslip(str(p), args.engine_tz_offset_hours)
-        wl_lbl = label_engine_events(wl, bnc_slips, bnc_systems, args.window)
-        cs_lbl = label_engine_events(cs, bnc_slips, bnc_systems, args.window)
+        wl_lbl = label_engine_events(
+            wl, bnc_slips, bnc_systems, bnc_tracked_svs,
+            bnc_slip_counts, args.window)
+        cs_lbl = label_engine_events(
+            cs, bnc_slips, bnc_systems, bnc_tracked_svs,
+            bnc_slip_counts, args.window)
         pooled_engine['wl_drift'].extend(wl_lbl)
         pooled_engine['cyc_slip'].extend(cs_lbl)
+
+        def _bin(events: list[dict]) -> dict:
+            return {
+                'n': len(events),
+                'tp': sum(1 for e in events if e['label'] == 'TP'),
+                'fp': sum(1 for e in events if e['label'] == 'FP'),
+                'no_opp': sum(1 for e in events if e['label'] == 'NO_OPP'),
+                'oos_sys': sum(1 for e in events if e['label'] == 'OOS_SYS'),
+                'oos_sv': sum(1 for e in events if e['label'] == 'OOS_SV'),
+                'events': events,
+            }
+        wl_bin = _bin(wl_lbl)
+        cs_bin = _bin(cs_lbl)
+        wl_bin['expected_chance_tp'] = expected_chance_tps(
+            wl_lbl, bnc_slip_counts, args.window, bnc_t_total)
+        cs_bin['expected_chance_tp'] = expected_chance_tps(
+            cs_lbl, bnc_slip_counts, args.window, bnc_t_total)
         hosts[lbl] = {
-            'wl_drift': {
-                'n': len(wl_lbl),
-                'tp': sum(1 for e in wl_lbl if e['label'] == 'TP'),
-                'fp': sum(1 for e in wl_lbl if e['label'] == 'FP'),
-                'oos': sum(1 for e in wl_lbl if e['label'] == 'OOS'),
-                'events': wl_lbl,
-            },
-            'cyc_slip': {
-                'n': len(cs_lbl),
-                'tp': sum(1 for e in cs_lbl if e['label'] == 'TP'),
-                'fp': sum(1 for e in cs_lbl if e['label'] == 'FP'),
-                'oos': sum(1 for e in cs_lbl if e['label'] == 'OOS'),
-                'events': cs_lbl,
-            },
+            'wl_drift': wl_bin,
+            'cyc_slip': cs_bin,
             'wl_drift_per_sv': aggregate_per_sv(wl_lbl),
             'cyc_slip_per_sv': aggregate_per_sv(cs_lbl),
         }
 
     bnc_misses = find_bnc_misses(bnc_slips, pooled_engine, args.window)
 
+    def _sum(kind: str, field: str) -> int | float:
+        return sum(h[kind][field] for h in hosts.values())
     wl_combined = {
-        'tp': sum(h['wl_drift']['tp'] for h in hosts.values()),
-        'fp': sum(h['wl_drift']['fp'] for h in hosts.values()),
+        'tp': _sum('wl_drift', 'tp'),
+        'fp': _sum('wl_drift', 'fp'),
+        'no_opp': _sum('wl_drift', 'no_opp'),
+        'oos_sys': _sum('wl_drift', 'oos_sys'),
+        'oos_sv': _sum('wl_drift', 'oos_sv'),
+        'expected_chance_tp': _sum('wl_drift', 'expected_chance_tp'),
     }
     wl_combined['in_scope'] = wl_combined['tp'] + wl_combined['fp']
+    wl_combined['excess_tp'] = (
+        wl_combined['tp'] - wl_combined['expected_chance_tp'])
     cs_combined = {
-        'tp': sum(h['cyc_slip']['tp'] for h in hosts.values()),
-        'fp': sum(h['cyc_slip']['fp'] for h in hosts.values()),
+        'tp': _sum('cyc_slip', 'tp'),
+        'fp': _sum('cyc_slip', 'fp'),
+        'no_opp': _sum('cyc_slip', 'no_opp'),
+        'oos_sys': _sum('cyc_slip', 'oos_sys'),
+        'oos_sv': _sum('cyc_slip', 'oos_sv'),
+        'expected_chance_tp': _sum('cyc_slip', 'expected_chance_tp'),
     }
     cs_combined['in_scope'] = cs_combined['tp'] + cs_combined['fp']
+    cs_combined['excess_tp'] = (
+        cs_combined['tp'] - cs_combined['expected_chance_tp'])
 
     report = {
         'window_s': args.window,
