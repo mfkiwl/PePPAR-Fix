@@ -962,6 +962,8 @@ _PEER_BUS_ACTIVE_RE = re.compile(r"peer-bus active:")
 # Sit loose on whitespace between the three fields — engine joins
 # them with single spaces, but the whole [COHORT] line uses double
 # spaces between the two segments so ``\s+`` handles both.
+# Engine source: scripts/peppar_fix_engine.py per-epoch [COHORT]
+# log emitted by AntPosEstThread when peer_subscriber is active.
 _COHORT_POS_RE = re.compile(
     r"pos_cohort_n=(?P<n>\d+)\s+"
     r"Δh=(?P<dh>-?\d+)mm\s+"
@@ -971,6 +973,9 @@ _COHORT_POS_RE = re.compile(
 # Matches the ``ztd_cohort_n=4 Δztd=+12.3mm`` segment.  Δztd is
 # signed with one decimal per the engine's ``:+.1f`` format
 # specifier.
+# Engine source: scripts/peppar_fix_engine.py — same [COHORT]
+# emission as _COHORT_POS_RE; ZTD segment is independently
+# present per peer-subscriber's site_ref configuration.
 _COHORT_ZTD_RE = re.compile(
     r"ztd_cohort_n=(?P<n>\d+)\s+"
     r"Δztd=(?P<d>[-+]?\d+\.\d+)mm"
@@ -992,11 +997,17 @@ _COHORT_ZTD_RE = re.compile(
 #   * "Too few screened": ``p_nl_ib=- n=N (too few screened)``
 # Separate regexes keep parsing simple and the state-update logic
 # obvious — order of attempts in _parse_ar_readiness_line.
+# Engine source: scripts/peppar_fix_engine.py AntPosEstThread —
+# emitted every 10 epochs alongside [WL_AR_READINESS]; engine
+# commit 3cc429e (Charlie A1).
 _AR_READINESS_NUMERIC_RE = re.compile(
     r"(?<![A-Z_])\[AR_READINESS\]\s+"
     r"p_nl_ib=(?P<p>[\d.]+)\s+"
     r"n=(?P<n>\d+)"
 )
+# Engine source: scripts/peppar_fix_engine.py AntPosEstThread —
+# emitted by the same [AR_READINESS] code path as the numeric
+# form, taken when fewer than 2 SVs pass NL pre-screen.
 _AR_READINESS_TOO_FEW_RE = re.compile(
     r"(?<![A-Z_])\[AR_READINESS\]\s+"
     r"p_nl_ib=-\s+"
@@ -1012,6 +1023,8 @@ _AR_READINESS_TOO_FEW_RE = re.compile(
 # text and not parsed.  ``p_wl_ib`` is a probability in [0,1] so
 # the regex accepts ``0.NNNN`` or ``1.0000``; ``n`` is a small
 # integer (typical 3-12 SVs).
+# Engine source: scripts/peppar_fix_engine.py AntPosEstThread —
+# emitted every 10 epochs; engine commit 6e9cca6 (Charlie A2).
 _WL_AR_READINESS_RE = re.compile(
     r"\[WL_AR_READINESS\]\s+"
     r"p_wl_ib=(?P<p>[\d.]+)\s+"
@@ -1024,6 +1037,8 @@ _WL_AR_READINESS_RE = re.compile(
 # ``scripts/peppar_fix_engine.py::_apply_integrity_trip`` but we
 # don't parse it here; we just capture the whole thing for
 # display.  Non-greedy capture so ``at pos=`` anchors the end.
+# Engine source: scripts/peppar_fix_engine.py::_apply_integrity_trip
+# (search the file for ``[FIX_SET_INTEGRITY] TRIPPED``).
 _FIX_SET_INTEGRITY_TRIP_RE = re.compile(
     r"\[FIX_SET_INTEGRITY\] TRIPPED reason=(?P<reason>\w+)\s+"
     r"(?P<params>.+?)\s+at pos="
