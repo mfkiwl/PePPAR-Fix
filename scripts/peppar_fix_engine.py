@@ -57,6 +57,7 @@ from ppp_ar import MelbourneWubbenaTracker, NarrowLaneResolver
 from peppar_fix.cycle_slip import CycleSlipMonitor, SlipEvent, flush_sv_phase
 from peppar_fix.sv_state import SvAmbState, SvStateTracker
 from peppar_fix.false_fix_monitor import FalseFixMonitor
+from peppar_fix.if_step_monitor import IfStepMonitor
 from peppar_fix.setting_sv_drop_monitor import SettingSvDropMonitor
 from peppar_fix.fix_set_integrity_monitor import FixSetIntegrityMonitor
 from peppar_fix.wl_drift_monitor import WlDriftMonitor
@@ -1546,7 +1547,25 @@ class AntPosEstThread(threading.Thread):
         for sv in self._nl._fixed:
             rec = self._sv_state.get(sv)
             rec.state = SvAmbState.ANCHORING
-        self._false_fix = FalseFixMonitor(self._sv_state)
+        # FalseFixMonitor is being retired as a demoter (per dayplan
+        # I-221332-main / 2026-04-28 evening — same architectural
+        # failure mode as wl_drift: PR-domain signal driving the
+        # eviction).  observe_only=True keeps it logging the trip
+        # candidates for analytical comparison via the v2 BNC validator
+        # but skips the tracker transition.  IfStepMonitor below is
+        # the canonical NL-layer demoter going forward.
+        self._false_fix = FalseFixMonitor(self._sv_state, observe_only=True)
+        # IF-residual NL-layer demoter — phase-only post-fix residual
+        # with cohort-median subtraction.  Mirrors GfStepMonitor's
+        # WL-layer architecture.  See docs/wl-drift-redesign-proposal.md
+        # for the WL motivation; the NL story is the same misnomer
+        # rerun (PR-domain signal masquerading as ambiguity-error
+        # detection).
+        self._if_step = IfStepMonitor()
+        # SVs currently NL-fixed (ANCHORING ∪ ANCHORED) per the SV
+        # state tracker.  Diffed against the snapshot each epoch to
+        # drive note_fix / note_unfix on IfStepMonitor.
+        self._if_step_prev_nl_fixed: set[str] = set()
         self._setting_drop = SettingSvDropMonitor(self._sv_state)
         # pos_consensus / ztd_consensus thresholds raised from their
         # design-doc defaults (0.20 m / 0.10 m) because lab obs-model
@@ -2640,8 +2659,78 @@ class AntPosEstThread(threading.Thread):
                     filt, corrections, observations, gps_time)
                 for sv, az in azimuths.items():
                     self._promoter.ingest_az(sv, az)
+            # FalseFixMonitor in observe-only mode: log trip candidates
+            # but don't evict.  IfStepMonitor (below) is the canonical
+            # NL-layer demoter.
             for ev in self._false_fix.evaluate(self._n_epochs):
-                self._apply_false_fix(filt, mw, nl, ev)
+                if ev.get('observe_only', False):
+                    log.info(
+                        "[FALSE_FIX] %s |PR|=%.2fm > %.2fm (n=%d, "
+                        "elev=%s, %s) [observe-only — IF step is "
+                        "canonical demoter]",
+                        ev['sv'], ev['mean_resid_m'], ev['threshold_m'],
+                        ev['n'],
+                        f"{ev['elev_deg']:.0f}°"
+                        if ev['elev_deg'] is not None else "?",
+                        ev.get('tag', '?'),
+                    )
+                else:
+                    self._apply_false_fix(filt, mw, nl, ev)
+
+            # IfStepMonitor — NL-layer demoter via cohort-median
+            # post-fit phase residual.  Mirrors GfStepMonitor (WL
+            # layer) per dayplan I-221332-main.
+            nl_fixed_now = set(self._sv_state.svs_in(
+                SvAmbState.ANCHORING, SvAmbState.ANCHORED))
+            for sv in nl_fixed_now - self._if_step_prev_nl_fixed:
+                self._if_step.note_fix(sv)
+            for sv in self._if_step_prev_nl_fixed - nl_fixed_now:
+                self._if_step.note_unfix(sv)
+
+            # Extract per-SV post-fit phase (IF) residuals from the
+            # filter's last residual labels.  Filter to NL-fixed SVs
+            # — IfStepMonitor's update() also filters by tracked set,
+            # but doing it here keeps the cohort-median input clean.
+            phi_resid_by_sv: dict[str, float] = {}
+            for lab, r in zip(labels or (), resid if resid is not None else ()):
+                if len(lab) >= 2 and lab[1] == 'phi' and lab[0] in nl_fixed_now:
+                    phi_resid_by_sv[lab[0]] = float(r)
+            if_step_events = self._if_step.update(phi_resid_by_sv)
+            for ev in if_step_events:
+                sv = ev['sv']
+                elev = self._sv_state.get(sv).last_elev_deg
+                log.warning(
+                    "[IF_STEP] %s residual=%+.4fm cohort_residual=%+.4fm "
+                    "cohort_median=%+.4fm (n_cohort=%d, %d-epoch "
+                    "sustained, thr=±%.3fm): NL unfix + ambiguity "
+                    "inflate, demoting to WAITING, elev=%s",
+                    sv, ev['residual_m'], ev['cohort_residual_m'],
+                    ev['cohort_median_m'], ev['cohort_size'],
+                    ev['consecutive_epochs'], ev['threshold_m'],
+                    f"{elev:.1f}°" if elev is not None else "?",
+                )
+                # Standard NL eviction action — same as
+                # _apply_false_fix used to do, minus the PR-domain
+                # logging path.
+                cooldown = 120  # ~2 min default; tune later if needed
+                try:
+                    self._sv_state.transition(
+                        sv, SvAmbState.WAITING,
+                        epoch=self._n_epochs,
+                        reason=f"if_step:{ev['cohort_residual_m']:+.3f}m",
+                        elev_deg=elev,
+                        cooldown_epochs=cooldown,
+                    )
+                except Exception:
+                    pass
+                nl.unfix(sv)
+                nl.blacklist(sv, epochs=cooldown)
+                filt.inflate_ambiguity(sv)
+                mw.reset(sv)
+                self._if_step.note_unfix(sv)
+                self._promoter.note_false_fix_rejection(sv, self._n_epochs)
+            self._if_step_prev_nl_fixed = nl_fixed_now
+
             for ev in self._setting_drop.evaluate(self._n_epochs):
                 self._apply_setting_sv_drop(filt, mw, nl, ev)
             host_ev = self._fix_set_integrity.evaluate(
