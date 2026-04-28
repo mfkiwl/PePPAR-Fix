@@ -2349,6 +2349,11 @@ class AntPosEstThread(threading.Thread):
                 # subsequent observations; drifts away from zero when
                 # the commitment is wrong.
                 resid_cyc = st['mw_avg'] / lambda_wl - n_wl
+                samples_since_fix = self._wl_drift._ingest_count.get(sv, 0)
+                log.info(
+                    "[WL_RESID] sv=%s resid=%+.4fcyc n_wl=%d ssf=%d",
+                    sv, resid_cyc, n_wl, samples_since_fix,
+                )
                 ev = self._wl_drift.ingest(sv, resid_cyc)
                 if ev is not None:
                     flush_elev = elevations.get(sv)
