@@ -1808,6 +1808,16 @@ class AntPosEstThread(threading.Thread):
             f"{ev['elev_deg']:.0f}°" if ev['elev_deg'] is not None else "?",
             tag, squelch, prov_str,
         )
+        # PR residual history at trip — last ~30 samples — so
+        # tomorrow's analysis can see the time series leading up to
+        # the false-fix decision (per dayplan I-221332-main).
+        _hist = ev.get('resid_history_m', [])
+        if _hist:
+            _hist_str = " ".join(f"{r:+.2f}" for r in _hist)
+            log.info(
+                "[FALSE_FIX_RESID_HIST] sv=%s history_m=[%s]",
+                sv, _hist_str,
+            )
         # Tracker already moved the SV to WAITING with cooldown=squelch.
         # NL-side: unfix the integer and blacklist it for the same duration
         # so the resolver's eligibility check stays in sync with the

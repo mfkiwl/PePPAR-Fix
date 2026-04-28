@@ -237,6 +237,12 @@ class FalseFixMonitor:
                     'n': n,
                     'squelch_epochs': cooldown,
                     'tag': tag,
+                    # Tail of the rolling deque at trip time —
+                    # post-hoc analysis of the residual time series
+                    # leading up to the trip (per dayplan
+                    # I-221332-main).  Snapshot list, not the deque
+                    # itself (caller may persist after we mutate).
+                    'resid_history_m': list(w.resids),
                 })
                 reason = (
                     f"{tag} |PR resid|={mean:.2f}m > {thr:.2f}m"
