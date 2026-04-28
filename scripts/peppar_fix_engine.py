@@ -63,6 +63,7 @@ from peppar_fix.wl_drift_monitor import WlDriftMonitor
 from peppar_fix.gf_phase_monitor import (
     GfPhaseRollingMeanMonitor, gf_phase_m,
 )
+from peppar_fix.gf_step_monitor import GfStepMonitor
 from peppar_fix.wl_readmission_gate import WlReAdmissionGate
 from peppar_fix.anchoring_sv_promoter import AnchoringSvPromoter
 from peppar_fix.nl_diag import NlDiagLogger
@@ -1579,6 +1580,14 @@ class AntPosEstThread(threading.Thread):
         # ``docs/wl-drift-redesign-proposal.md`` and
         # ``project_wl_drift_smooth_float_signal_20260428``.
         self._gf_drift = GfPhaseRollingMeanMonitor()
+        # GF step demoter — replaces wl_drift's flush action per
+        # I-194752-main (2026-04-28 evening).  Uses per-epoch
+        # cohort-median Δgf to cancel common-mode iono; trips on
+        # per-SV residual exceeding threshold for ≥ 2 consecutive
+        # epochs.  This is the canonical post-fix integrity gate;
+        # WlDriftMonitor stays as a logging-only diagnostic.  See
+        # ``docs/wl-drift-redesign-proposal.md`` for the rationale.
+        self._gf_step = GfStepMonitor()
         # SVs currently tracked as WL-fixed by the drift monitor.
         # Diffed against mw._state each epoch to drive note_fix /
         # note_unfix — keeps monitor decoupled from the MW tracker's
@@ -2355,13 +2364,14 @@ class AntPosEstThread(threading.Thread):
             for sv in fixed_now - self._wl_drift_prev_fixed:
                 fix_n_wl = mw._state[sv].get('n_wl')
                 self._wl_drift.note_fix(sv, n_wl=fix_n_wl)
-                # Mirror lifecycle on the GF observe-only monitor.
-                # Skip when the GF observation is missing this epoch
-                # (would happen if the SV's MW updated from a prior-
-                # epoch latch with the current obs missing fields).
+                # Mirror lifecycle on both GF monitors.  Skip when
+                # the GF observation is missing this epoch (would
+                # happen if the SV's MW updated from a prior-epoch
+                # latch with the current obs missing fields).
                 _gf_ref = gf_now.get(sv)
                 if _gf_ref is not None:
                     self._gf_drift.note_fix(sv, gf_ref_m=_gf_ref)
+                    self._gf_step.note_fix(sv, gf_initial_m=_gf_ref)
                 # Newly-fixed SV passed the re-admission gate (or was
                 # never held).  Clear any prior hold so a subsequent
                 # drift-flush-readmit cycle starts fresh.
@@ -2383,6 +2393,7 @@ class AntPosEstThread(threading.Thread):
                 self._wl_fix_life_n_wl[sv] = fix_n_wl
             for sv in self._wl_drift_prev_fixed - fixed_now:
                 self._wl_drift.note_unfix(sv)
+                self._gf_step.note_unfix(sv)
                 _gf_exit = self._gf_drift.note_unfix(sv)
                 if _gf_exit is not None:
                     log.info(
@@ -2446,64 +2457,97 @@ class AntPosEstThread(threading.Thread):
                             gf_ev['gf_ref_m'],
                         )
 
+                # WlDriftMonitor is now LOG-ONLY (per I-194752-main /
+                # 2026-04-28 evening).  GF step demoter replaces the
+                # MW-residual flush action below.  WlDriftMonitor
+                # remains in the loop because (1) its consistency
+                # classifier output goes into [WL_FIX_LIFE]; (2) the
+                # [WL_DRIFT] log line is still useful for analytical
+                # comparison against the GF stream.
                 ev = self._wl_drift.ingest(sv, resid_cyc)
                 if ev is not None:
                     flush_elev = elevations.get(sv)
-                    log.warning(
-                        "[WL_DRIFT] %s drift=%+.3fcyc > ±%.2f (n=%d, window=%dep, "
-                        "consistency=%s): flushing MW, demoting to FLOATING, "
-                        "gate@elev=%s",
+                    log.info(
+                        "[WL_DRIFT] %s drift=%+.3fcyc > ±%.2f "
+                        "(n=%d, window=%dep, consistency=%s) "
+                        "[log-only — GF step is canonical demoter] "
+                        "elev=%s",
                         ev['sv'], ev['drift_cyc'], ev['threshold_cyc'],
                         ev['n_samples'], ev['window_epochs'],
                         ev.get('consistency', '?'),
                         f"{flush_elev:.1f}°" if flush_elev is not None else "?",
                     )
-                    # Fix-life exit before MW reset clears state.
-                    _t0 = self._wl_fix_life_t0.pop(sv, None)
-                    _n_wl_at_entry = self._wl_fix_life_n_wl.pop(sv, None)
-                    _dur = time.monotonic() - _t0 if _t0 is not None else None
+
+            # GF step demoter — phase-only, cohort-median Δgf
+            # detection.  Per I-194752-main, this replaces the
+            # MW-residual rolling-mean approach that the BNC
+            # validation showed is uncorrelated with real slips
+            # (Z = -0.17, p = 0.86).  Cohort-median across the
+            # currently-fixed-SV cohort cancels common-mode
+            # ionospheric drift (the dominant noise source on
+            # long-fixed SVs) without an explicit Klobuchar / SSR
+            # iono model.  Trips on per-SV residual exceeding
+            # threshold (4 cm) for ≥ 2 consecutive epochs.
+            gf_step_events = self._gf_step.update(gf_now)
+            for ev in gf_step_events:
+                sv = ev['sv']
+                flush_elev = elevations.get(sv)
+                log.warning(
+                    "[GF_STEP] %s residual=%+.4fm cohort_median=%+.4fm "
+                    "delta_gf=%+.4fm (n_cohort=%d, %d-epoch sustained, "
+                    "thr=±%.3fm): flushing MW, demoting to FLOATING, "
+                    "gate@elev=%s",
+                    sv, ev['residual_m'], ev['cohort_median_m'],
+                    ev['delta_gf_m'], ev['cohort_size'],
+                    ev['consecutive_epochs'], ev['threshold_m'],
+                    f"{flush_elev:.1f}°" if flush_elev is not None else "?",
+                )
+                # Fix-life exit before MW reset clears state.
+                _t0 = self._wl_fix_life_t0.pop(sv, None)
+                _n_wl_at_entry = self._wl_fix_life_n_wl.pop(sv, None)
+                _dur = time.monotonic() - _t0 if _t0 is not None else None
+                log.info(
+                    "[WL_FIX_LIFE] event=exit sv=%s n_wl=%s elev=%s "
+                    "duration_s=%s reason=gf_step consistency=%s",
+                    sv, _n_wl_at_entry,
+                    f"{flush_elev:.1f}" if flush_elev is not None else "?",
+                    f"{_dur:.1f}" if _dur is not None else "?",
+                    self._wl_drift.consistency_level(sv),
+                )
+                mw.reset(sv)
+                self._wl_drift.note_unfix(sv)
+                self._gf_step.note_unfix(sv)
+                _gf_exit = self._gf_drift.note_unfix(sv)
+                if _gf_exit is not None:
                     log.info(
-                        "[WL_FIX_LIFE] event=exit sv=%s n_wl=%s elev=%s "
-                        "duration_s=%s reason=wl_drift consistency=%s",
-                        sv, _n_wl_at_entry,
-                        f"{flush_elev:.1f}" if flush_elev is not None else "?",
-                        f"{_dur:.1f}" if _dur is not None else "?",
-                        ev.get('consistency', '?'),
+                        "[GF_DRIFT] %s kind=exit reason=gf_step_flush "
+                        "drift=%+.4fm window=%dep gf_ref=%+.3fm "
+                        "[observe-only]",
+                        _gf_exit['sv'], _gf_exit['drift_m'],
+                        _gf_exit['window_epochs'], _gf_exit['gf_ref_m'],
                     )
-                    mw.reset(sv)
-                    self._wl_drift.note_unfix(sv)
-                    _gf_exit = self._gf_drift.note_unfix(sv)
-                    if _gf_exit is not None:
-                        log.info(
-                            "[GF_DRIFT] %s kind=exit reason=wl_drift_flush "
-                            "drift=%+.4fm window=%dep gf_ref=%+.3fm "
-                            "[observe-only]",
-                            _gf_exit['sv'], _gf_exit['drift_m'],
-                            _gf_exit['window_epochs'],
-                            _gf_exit['gf_ref_m'],
+                # Layer 3: take a re-admission hold at the current
+                # elevation.  MW updates for this SV are skipped
+                # until elevation moves ≥ 2°.
+                self._wl_readmit.note_flush(sv, flush_elev)
+                fixed_now.discard(sv)
+                # Demote the per-SV state.  CONVERGING → FLOATING is
+                # a legal edge in the lifecycle; ANCHORING/ANCHORED
+                # shouldn't be reachable in wl-only mode but the
+                # path is defensive.
+                try:
+                    cur = self._sv_state.state(sv)
+                    if cur in (SvAmbState.CONVERGING,
+                               SvAmbState.ANCHORING,
+                               SvAmbState.ANCHORED):
+                        self._sv_state.transition(
+                            sv, SvAmbState.FLOATING,
+                            epoch=self._n_epochs,
+                            reason=f"gf_step:{ev['residual_m']:+.3f}m",
                         )
-                    # Layer 3: take a re-admission hold at the current
-                    # elevation.  MW updates for this SV are skipped
-                    # until elevation moves ≥ 2°.
-                    self._wl_readmit.note_flush(sv, flush_elev)
-                    fixed_now.discard(sv)
-                    # Demote the per-SV state.  CONVERGING → FLOATING is
-                    # a legal edge in the lifecycle; ANCHORING/ANCHORED
-                    # shouldn't be reachable in wl-only mode but the
-                    # path is defensive.
-                    try:
-                        cur = self._sv_state.state(sv)
-                        if cur in (SvAmbState.CONVERGING,
-                                   SvAmbState.ANCHORING,
-                                   SvAmbState.ANCHORED):
-                            self._sv_state.transition(
-                                sv, SvAmbState.FLOATING,
-                                epoch=self._n_epochs,
-                                reason=f"wl_drift:{ev['drift_cyc']:+.2f}cyc",
-                            )
-                    except Exception:
-                        pass
-                    drift_actions.append(sv)
+                except Exception:
+                    pass
+                drift_actions.append(sv)
             self._wl_drift_prev_fixed = fixed_now
 
             # NL resolution attempt (after warmup).  Reuse elevations
