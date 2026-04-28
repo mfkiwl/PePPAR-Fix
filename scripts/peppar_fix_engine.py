@@ -1909,6 +1909,28 @@ class AntPosEstThread(threading.Thread):
             "[FIX_SET_INTEGRITY] TRIPPED reason=%s %s at pos=%s",
             reason, params, pos_ecef.tolist(),
         )
+        # Pre-revert SV-state snapshot — captures who was ANCHORING /
+        # ANCHORED at trip time so we can post-hoc evaluate whether
+        # the trip was justified (per dayplan I-221332-main).  Names
+        # only; counts come from SvStateTracker's existing summary.
+        try:
+            _states_at_trip = {
+                _st.name: sorted(self._sv_state.svs_in(_st))
+                for _st in (
+                    SvAmbState.ANCHORED,
+                    SvAmbState.ANCHORING,
+                    SvAmbState.CONVERGING,
+                )
+            }
+            log.warning(
+                "[FIX_SET_INTEGRITY] pre-revert states: anchored=%s "
+                "anchoring=%s converging=%s",
+                _states_at_trip['ANCHORED'],
+                _states_at_trip['ANCHORING'],
+                _states_at_trip['CONVERGING'],
+            )
+        except Exception:
+            log.exception("pre-revert state snapshot failed (non-fatal)")
 
         if reason == 'ztd_cycling':
             # Full WL flush — wipe MW tracker for every SV and
