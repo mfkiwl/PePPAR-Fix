@@ -14,7 +14,7 @@ ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
 # CNES SSR for PPP-AR (credentials in ntrip-cnes.conf)
 ssr_ntrip_conf = "ntrip-cnes.conf"
-systems = "gps,gal"
+systems = "gps,gal,bds"
 
 # TICC #2: chA = PEROUT (i226 PPS OUT), chB = GNSS PPS.
 ticc_port = "/dev/ticc2"

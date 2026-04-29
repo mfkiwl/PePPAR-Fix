@@ -19,6 +19,7 @@ the existing float ambiguity states.
 
 import logging
 import math
+import time
 from collections import deque
 
 import numpy as np
@@ -412,6 +413,15 @@ class NarrowLaneResolver:
         # rejected under margin).
         self.corner_margin_sum = corner_margin_sum
         self._fixed = {}  # sv -> {'n1': int, 'a_if_fixed': float}
+        # Per-SV NL admission integer history — last K_short=4 n1 values
+        # committed across re-admit cycles.  Mirrors WlDriftMonitor's
+        # _int_history; consumed by [NL_ADMIT] log + downstream
+        # classifiers (Bravo I-115539 workstream C).  Persists across
+        # unfix/refix so admission-cycling pattern is visible.  Reset
+        # only on confirmed real cycle slip.
+        self._nl_int_history: dict[str, "deque[int]"] = {}
+        self._nl_int_history_k = 4
+        self._nl_admit_t0: dict[str, float] = {}  # sv -> time.monotonic()
         self.last_ratio = 0.0   # LAMBDA ratio test value (0 = not attempted)
         self.last_method = ""   # "lambda" or "rounding"
         self.last_success_rate = 0.0  # bootstrap success rate (0 = not computed)
@@ -761,6 +771,16 @@ class NarrowLaneResolver:
                          "sigma_N1=%.3f, A_IF: %.4f → %.4f m)",
                          sv, n1_int, n1_frac, sigma_n1,
                          a_if_float, a_if_fixed)
+                # NL admission integer-history tracker (rounding path).
+                _nl_hist = self._nl_int_history.setdefault(
+                    sv, deque(maxlen=self._nl_int_history_k))
+                _nl_hist.append(int(n1_int))
+                self._nl_admit_t0[sv] = time.monotonic()
+                log.info(
+                    "[NL_ADMIT] sv=%s n_nl=%d frac=%.3f sigma=%.3f "
+                    "method=rounding int_history=%s",
+                    sv, n1_int, n1_frac, sigma_n1, list(_nl_hist),
+                )
                 self._note_nl_fix(sv, az_deg=None, elev_deg=None,
                                   reason=f"rounding (frac={n1_frac:.3f}, σ={sigma_n1:.3f})")
                 if diag is not None:
@@ -1005,6 +1025,16 @@ class NarrowLaneResolver:
                      sv, n1_int, ratio, self.last_success_rate,
                      displacement_m, n_fixed, n_amb,
                      filt.x[si], a_if_fixed)
+            # NL admission integer-history tracker (I-115539 / Bravo).
+            _nl_hist = self._nl_int_history.setdefault(
+                sv, deque(maxlen=self._nl_int_history_k))
+            _nl_hist.append(int(n1_int))
+            self._nl_admit_t0[sv] = time.monotonic()
+            log.info(
+                "[NL_ADMIT] sv=%s n_nl=%d ratio=%.2f P=%.4f "
+                "method=lambda int_history=%s",
+                sv, n1_int, ratio, self.last_success_rate, list(_nl_hist),
+            )
             self._note_nl_fix(
                 sv, az_deg=None, elev_deg=None,
                 reason=f"LAMBDA ratio={ratio:.1f} P={self.last_success_rate:.3f}",
@@ -1304,6 +1334,20 @@ class NarrowLaneResolver:
         the tracker directly, so it should call unfix() after; the
         no-op-on-self-edge rule keeps the log line count correct.
         """
+        # NL_EVICT log + duration (I-115539 / Bravo).  Emit BEFORE
+        # popping so we can include the n1 that's leaving.  Skipped if
+        # the SV wasn't in self._fixed (idempotent unfix).
+        if sv in self._fixed:
+            _info = self._fixed[sv]
+            _t0 = self._nl_admit_t0.pop(sv, None)
+            _dur = (time.monotonic() - _t0) if _t0 is not None else None
+            _hist = list(self._nl_int_history.get(sv, []))
+            log.info(
+                "[NL_EVICT] sv=%s n_nl=%s duration_s=%s int_history=%s",
+                sv, _info.get('n1'),
+                f"{_dur:.1f}" if _dur is not None else "?",
+                _hist,
+            )
         self._fixed.pop(sv, None)
         if self._sv_state is not None:
             cur = self._sv_state.state(sv)
