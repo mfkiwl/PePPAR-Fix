@@ -2564,6 +2564,11 @@ class AntPosEstThread(threading.Thread):
                 mw.reset(sv)
                 self._wl_drift.note_unfix(sv)
                 self._gf_step.note_unfix(sv)
+                # GF step is a real phase discontinuity (L1 or L5
+                # slipped) — wipe the SV's NL trust history so a
+                # post-slip re-admission is gated as NEW rather than
+                # held to its pre-slip integer.  I-172719.
+                nl.note_slip(sv)
                 # Layer 3: take a re-admission hold at the current
                 # elevation.  MW updates for this SV are skipped
                 # until elevation moves ≥ 2°.
@@ -2783,6 +2788,10 @@ class AntPosEstThread(threading.Thread):
                 except Exception:
                     pass
                 nl.unfix(sv)
+                # IF step is a real post-fix phase residual jump —
+                # wipe the SV's NL trust so a post-slip re-admission
+                # is gated as NEW.  I-172719.
+                nl.note_slip(sv)
                 nl.blacklist(sv, epochs=cooldown)
                 filt.inflate_ambiguity(sv)
                 mw.reset(sv)
