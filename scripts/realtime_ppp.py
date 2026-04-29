@@ -790,6 +790,11 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
 
                 # Form IF observations
                 observations = []
+                # Counters for the [OBS_COUNTS] emit downstream
+                # (peppar_fix_engine.py reads them off the
+                # ObservationEvent).  Per dayplan I-143806-main.
+                n_off_const = 0
+                n_single = 0
                 PREFIX_TO_SYS = {'G': 'gps', 'E': 'gal', 'C': 'bds'}
                 for sv, roles in raw_obs.items():
                     prefix = sv[0]
@@ -797,9 +802,16 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
 
                     # System filter
                     if systems and sys_name not in systems:
+                        n_off_const += 1
                         continue
 
                     if 'f1' not in roles or 'f2' not in roles:
+                        # Single-frequency only — PR-only contributor;
+                        # invisible to MW/IF math but counted as
+                        # 'Tracking' in the peppar-mon column.  We
+                        # only count this for in-constellation SVs;
+                        # off-constellation SVs are already accounted.
+                        n_single += 1
                         continue
                     f1 = roles['f1']
                     f2 = roles['f2']
@@ -1192,6 +1204,9 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         parse_age_s=parse_age_s,
                         correlation_confidence=confidence,
                         estimator_residual_s=estimator_sample["residual_s"],
+                        n_raw=len(raw_obs),
+                        n_off_const=n_off_const,
+                        n_single=n_single,
                     ))
                     n_epochs += 1
 

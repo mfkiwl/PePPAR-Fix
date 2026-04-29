@@ -69,6 +69,16 @@ class ObservationEvent:
     parse_age_s: Optional[float] = None
     correlation_confidence: Optional[float] = None
     estimator_residual_s: Optional[float] = None
+    # Pre-engine counters for the [OBS_COUNTS] emit per dayplan
+    # I-143806-main.  Populated by realtime_ppp.py at obs-construction
+    # time.  None when not provided (older producers / tests).
+    #   n_raw          — count of receiver-visible SVs this epoch
+    #   n_off_const    — rejected by the constellation filter
+    #   n_single       — single-frequency (PR-only) SVs invisible to
+    #                    MW/IF math; Bob's 'Tracking' column
+    n_raw: Optional[int] = None
+    n_off_const: Optional[int] = None
+    n_single: Optional[int] = None
 
     def __iter__(self):
         yield self.gps_time

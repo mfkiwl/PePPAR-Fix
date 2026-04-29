@@ -623,6 +623,15 @@ class PPPFilter:
         labels = []
         n_used = 0
         sys_counts = defaultdict(int)
+        # Per-iteration reject counters.  Reset every call (so the
+        # final iteration's values reflect the converged state).  Read
+        # by callers (realtime_ppp.py emits OBS_COUNTS each epoch)
+        # for peppar-mon's Untracked column per dayplan I-143806-main.
+        reject_counts = {
+            'no_eph': 0,        # sat_pos missing (no ephemeris)
+            'clock_bad': 0,     # |sat_clk| > 2 ms or missing
+            'below_mask': 0,    # elev < ELEV_MASK
+        }
         if receiver_offset_ecef is not None:
             receiver_pos = x_eval[:3] + np.asarray(receiver_offset_ecef)
         else:
@@ -639,6 +648,7 @@ class PPPFilter:
             t_tx = t - timedelta(seconds=tau_approx)
             sat_pos, sat_clk_sp3 = sp3.sat_position(sv, t_tx)
             if sat_pos is None:
+                reject_counts['no_eph'] += 1
                 continue
             # Use CLK file for satellite clock if available, else SP3
             if clk_file is not None:
@@ -648,8 +658,10 @@ class PPPFilter:
             else:
                 sat_clk = sat_clk_sp3
             if sat_clk is None:
+                reject_counts['clock_bad'] += 1
                 continue
             if abs(sat_clk) > 0.002:  # 2ms; normal GNSS clocks are < 1ms
+                reject_counts['clock_bad'] += 1
                 continue
 
             dx = sat_pos - receiver_pos
@@ -666,6 +678,7 @@ class PPPFilter:
 
             elev = self.compute_elevation(receiver_pos, sat_rot)
             if elev < ELEV_MASK:
+                reject_counts['below_mask'] += 1
                 continue
 
             tropo = self.tropo_delay(elev)
@@ -748,6 +761,12 @@ class PPPFilter:
 
         if not hasattr(self, '_diag_logged'):
             self._diag_logged = True
+
+        # Expose this iteration's reject counts to the caller (per
+        # dayplan I-143806-main: feeds [OBS_COUNTS] in realtime_ppp).
+        # The LAST iteration's snapshot is what matters for the
+        # converged update — overwriting per call is fine.
+        self.last_reject_counts = dict(reject_counts)
 
         if n_used < 4:
             return None, None, None, n_used, dict(sys_counts), labels

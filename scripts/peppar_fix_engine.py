@@ -1687,14 +1687,21 @@ class AntPosEstThread(threading.Thread):
         #       return self._resolved_decimation
         #   return 1
 
-    def feed(self, gps_time, observations):
+    def feed(self, gps_time, observations, obs_counts=None):
         """Called by steady-state loop to forward an observation.
+
+        ``obs_counts`` is an optional dict carrying pre-engine
+        counters from realtime_ppp — n_raw / n_off_const / n_single.
+        Used to emit [OBS_COUNTS] per dayplan I-143806-main.
+        Backward-compatible: callers that don't pass counters get
+        the historical bare-tuple semantics.
 
         Non-blocking — drops if our queue is full (position refinement
         is best-effort, never blocks the servo).
         """
         try:
-            self.obs_queue.put_nowait((gps_time, observations))
+            self.obs_queue.put_nowait(
+                (gps_time, observations, obs_counts))
         except queue.Full:
             pass
 
@@ -2161,7 +2168,15 @@ class AntPosEstThread(threading.Thread):
 
         while not self._stop.is_set():
             try:
-                gps_time, observations = self.obs_queue.get(timeout=30)
+                _qitem = self.obs_queue.get(timeout=30)
+                # 3-tuple (with counters) or legacy 2-tuple — unpack
+                # defensively so older producers / replay tooling that
+                # haven't been updated still work.
+                if len(_qitem) == 3:
+                    gps_time, observations, obs_counts = _qitem
+                else:
+                    gps_time, observations = _qitem
+                    obs_counts = None
             except queue.Empty:
                 n_timeouts += 1
                 idle_s = time.monotonic() - last_epoch_mono
@@ -3130,6 +3145,31 @@ class AntPosEstThread(threading.Thread):
                     mw.summary(), nl.summary(), nav2_tag, ztd_tag,
                     strength_tag, readmit_tag, tide_tag, pcv_tag, worst_tag,
                 )
+                # [OBS_COUNTS] — fleet visibility breakdown for the
+                # peppar-mon Untracked + Tracking columns per dayplan
+                # I-143806-main.  Combines upstream counters from
+                # realtime_ppp (n_raw / n_off_const / n_single) with
+                # PPPFilter's per-iteration reject counters
+                # (filt.last_reject_counts: no_eph / clock_bad /
+                # below_mask).  Falls through gracefully when
+                # obs_counts isn't supplied (legacy / replay tests).
+                _filter_rej = getattr(filt, 'last_reject_counts', None)
+                if obs_counts is not None and _filter_rej is not None:
+                    _n_raw = obs_counts.get('n_raw')
+                    _n_off = obs_counts.get('n_off_const')
+                    _n_single = obs_counts.get('n_single')
+                    log.info(
+                        "  [OBS_COUNTS] raw=%s used=%d dual=%d "
+                        "single=%s off_const=%s below_mask=%d "
+                        "clock_bad=%d no_eph=%d",
+                        _n_raw if _n_raw is not None else "?",
+                        n_used, len(observations),
+                        _n_single if _n_single is not None else "?",
+                        _n_off if _n_off is not None else "?",
+                        _filter_rej.get('below_mask', 0),
+                        _filter_rej.get('clock_bad', 0),
+                        _filter_rej.get('no_eph', 0),
+                    )
                 # WL Integer Bootstrap success rate (Teunissen 1998/1999).
                 # Per Charlie's AR-readiness literature memo: WL P_IB is
                 # the right gate for "is the float ready for WL AR?" —
@@ -3525,8 +3565,25 @@ def run_steady_state(args, known_ecef, obs_queue, corrections, beph, ssr,
                 # Don't pop — the servo still needs it for correlation.
                 newest = obs_history[-1]
                 gps_time_ape, observations_ape = newest
+                # Per dayplan I-143806-main: thread the obs counters
+                # from the upstream ObservationEvent through to the
+                # ape_thread so it can emit [OBS_COUNTS] each epoch.
+                # ``newest`` may be an ObservationEvent (full counters
+                # available) or a bare tuple (legacy / tests; counters
+                # default to None and the engine's emit falls through
+                # gracefully).
+                obs_counts_ape = None
+                if hasattr(newest, 'n_raw'):
+                    obs_counts_ape = {
+                        'n_raw': newest.n_raw,
+                        'n_off_const': newest.n_off_const,
+                        'n_single': newest.n_single,
+                    }
                 if n_epochs_total % ape_thread.decimation == 0:
-                    ape_thread.feed(gps_time_ape, observations_ape)
+                    ape_thread.feed(
+                        gps_time_ape, observations_ape,
+                        obs_counts=obs_counts_ape,
+                    )
                 n_epochs_total += 1
 
             # ── Queue depth monitoring ──
