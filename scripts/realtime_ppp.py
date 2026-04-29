@@ -1074,6 +1074,34 @@ def serial_reader(port, baud, obs_queue, stop_event, beph, systems=None,
                         'phase_bias_stepped': phase_bias_stepped,
                     })
 
+                # Per-epoch admit counters for peppar-mon Untracked /
+                # Tracking / Dual columns.  Partition: raw = untracked +
+                # tracking + dual.
+                #   untracked = receiver delivered a usable signal but
+                #               systems config rejects (off-constellation)
+                #   tracking  = systems passes but only single-freq tracked
+                #               (single-band SVs like BDS B1I on TIM 2.20),
+                #               or dual-tracked but phase invalid this epoch
+                #   dual      = len(observations) — full IF candidates
+                _untracked = 0
+                _tracking = 0
+                for _sv, _roles in raw_obs.items():
+                    _sys = PREFIX_TO_SYS.get(_sv[0])
+                    if systems and _sys not in systems:
+                        _untracked += 1
+                    elif not ('f1' in _roles and 'f2' in _roles):
+                        _tracking += 1
+                    elif (_roles['f1'].get('cp') is None
+                          or _roles['f2'].get('cp') is None
+                          or not _roles['f1'].get('half_cyc')
+                          or not _roles['f2'].get('half_cyc')):
+                        _tracking += 1
+                log.info(
+                    f"[OBS_ADMIT] epoch={n_epochs} raw={len(raw_obs)} "
+                    f"untracked={_untracked} tracking={_tracking} "
+                    f"dual={len(observations)}"
+                )
+
                 # Diagnostic dump (first 3 epochs, then every 60)
                 if n_epochs < 3 or n_epochs % 60 == 0:
                     log.info(f"Serial diag epoch {n_epochs}: "
