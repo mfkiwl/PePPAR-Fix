@@ -1,81 +1,212 @@
-# Future work — phase-only WL admission criteria
+# Admission redesign — phase-only WL (done) + reputation-tiered NL (proposed)
 
-## Premise
+> Filename retained for git history.  Scope expanded 2026-04-29 from
+> WL-only to cover both layers (WL and NL admission), since the same
+> wrong-integer-admission failure mode repeats at each.
 
-Today's WL ambiguity admission uses the **Melbourne-Wübbena** combination:
+## Premise — admission-side wrong-integer cycling
+
+Both WL and NL admission can commit to wrong integers, then later get
+evicted, then re-admitted at a different (also wrong) integer.  The
+cycle prevents the filter from settling at the right answer because
+each new admission corrupts state (ZTD, altitude) that the next
+admission then commits relative to.
+
+The two layers have different math, different signals, and need
+different fixes — but the architectural pattern is the same:
+admission-side wrong-integer cycling treated by a tighter gate.
+
+## WL admission — DONE (2026-04-29 morning)
+
+Old behaviour: WL ambiguity admission via the **Melbourne-Wübbena**
+combination,
 
 ```
 MW = (φ_L1 − φ_L5) − (f_L1 ρ_L1 + f_L5 ρ_L5) / (f_L1 + f_L5)
 ```
 
-MW gives a direct integer estimate from the float `MW / λ_WL`, with the
-PR term providing the absolute scale that makes the integer resolvable.
-But it imports **all PR-domain noise** (multipath, code-tracking jitter,
-code biases) into the admission decision: bad PR can pull the float WL
-ambiguity to within 0.15 cyc of a *wrong* integer and the gate accepts it.
+PR was a load-bearing input to the integer decision; PR noise
+(multipath, code-tracking jitter, code biases) imported to admission.
 
-This is the admission counterpart to the eviction problem documented in
-`docs/wl-drift-redesign-proposal.md` (Charlie, commit `e2ab81a` on the
-`charlie` branch).  That work replaces the eviction-side MW-residual
-signal with a phase-only **GF** combination so PR noise can't trip
-demotions.
+Replacement: **`WlPhaseAdmissionGate` (`scripts/peppar_fix/wl_phase_admission_gate.py`,
+Charlie's `228affb` + `de03e51`).**  Pre-WL-fix consistency check on the
+post-fit phase residual; rejects MW-proposed admissions whose phase
+residual mean exceeds threshold.  Threshold loosened from 0.05m to
+0.15m mean / 0.05m std on `de03e51` after empirical false-positive
+data on the morning lunch run.
 
-The eviction redesign **will catch** wrong admissions and evict them, so
-PR-contaminated admissions become visible as repeated eviction-readmit
-cycles on the same SV with wandering integers.  Going further — making
-the **admission** decision itself phase-only — is a possible defense IF
-empirical data after the eviction redesign shows that wrong-admission
-cycling is a meaningful operational drag.
+Empirical proof it works (today's lunch event, 11:30-12:00 CDT
+during post-solar-noon TEC stress): WL fix counts dipped during the
+event peak (e.g. MadHat 19/20 → 14/22) but never collapsed; only 2
+GF_STEP fires across all three hosts in the entire 30-minute window,
+both catching the same legitimate cycle slip on a low-elevation BDS
+SV (C27 elev 11.4° at 11:57:49, agreed across MadHat and clkPoC3).
+WL was the layer that held while NL drifted.
 
-## Trigger condition
+## NL admission — PROPOSED (load-bearing for next sustained-anchor work)
 
-Pull this work onto the active queue **only if** one of:
+### Empirical motivation (today)
 
-1. After GF-eviction lands and runs ≥ 2 nights, the per-SV `[WL_FIX_LIFE]`
-   data shows that wrong-admission cycling (LOW-consistency SVs admitted
-   then evicted then re-admitted at different integers) accounts for a
-   meaningful fraction of the convergence-impeding workload.
-2. We see specific failure modes downstream (NL resolution sabotaged by
-   wrong-WL contamination, ZTD/altitude excursions from wrong-integer
-   absorption) traceable to admissions that should never have been made.
+The lunch run (2026-04-29 11:00-12:00 CDT, main `65c24f6`) showed all
+three hosts reach ANCHORING simultaneously and hold for ~30-60 min,
+then fall out within an 8-minute window (11:44-11:52) during a
+post-solar-noon TEC disturbance.  Diagnostic findings:
 
-If the GF-eviction monitor cleans up the cycling, this work stays parked.
+- **WL held** (counts dipped but didn't collapse; no GF_STEP storm)
+- **No SSR phase-bias step** (would have triggered GF_STEP)
+- **No cycle-slip storm** (1 legitimate slip on C27, late in window)
+- **NL admit/evict ratios collapsed to ~1:1** (MadHat 27/27, clkPoC3
+  10/5 → 11/11) — every admission ended in eviction
+- **Altitudes drifted to 206-212m** vs NAV2's stable 197-198m
+- **ZTD jumped** −2 → −862 → −1534 mm in a few epochs on TimeHat;
+  similar pattern on MadHat / clkPoC3
+- **SecondOpinionPosMonitor fired repeatedly** (clkPoC3 every 3-5 min
+  for the full window); each reset returned to NAV2 LLA but the
+  filter walked back into the wrong basin within the next 30s
 
-## Possible defenses (sketch — not committed designs)
+The mechanism: ZTD slowly absorbs sub-cm bias during atmospheric
+flux; per-SV NL float ambiguities get pulled toward integers
+consistent with the (now-biased) ZTD; LAMBDA fixes those wrong
+integers (they're internally consistent with current filter state);
+ZTD absorbs more bias, integrity trips → re-bootstrap → next
+admission lands at a *different* wrong integer.
 
-Carrier-only WL ambiguity resolution loses MW's direct PR-driven scale, so
-a different mathematical anchor is needed.  Three candidates:
+The current NL admission gate is a LAMBDA ratio test that's checked
+**conditional on the filter's current state.**  When the filter is
+biased, the test still passes for biased integers.  We need an
+**external** check — one whose information source isn't the filter
+itself.
 
-1. **Kalman filter on per-SV WL ambiguity float, LAMBDA integer search.**
-   Use carrier-phase observations only; PR can supply weak priors but
-   doesn't drive the integer decision.  LAMBDA decorrelation + ratio test
-   gates admission.  Slower convergence (carrier alone resolves WL over
-   ~minutes vs MW's seconds), but immune to PR noise.
+### Proposed NL admission redesign — reputation-tiered gating
 
-2. **GF + external ionosphere prior.**  GF = φ_L1 − φ_L5 contains iono +
-   WL ambiguity.  With a smoothed ionosphere state (estimated separately
-   or from an external IGS-like prior), GF-only resolves the WL integer
-   without PR.  Requires reliable iono modeling on the F9T-class
-   receiver with our SSR feed.
+Per-SV trust score, accumulated from NL admission integer-history.
+Already instrumented as part of today's morning work (`[NL_ADMIT]`
+log line carries `int_history=[N1, N2, ...]` per SV; populated and
+shipped on `04f366e`).  The current admission code doesn't yet
+**read** this history when deciding whether to admit; this proposal
+wires it in.
 
-3. **Integer LAMBDA with PR-as-priors-only.**  Use PR observations only
-   to provide weak Gaussian priors on the integer search space; the
-   actual integer commitment comes from carrier-phase consistency.  PR
-   noise widens the search box but doesn't fix the integer.
+#### Trust tiers
 
-Option (1) is the textbook PPP-AR approach.  Option (2) needs ionosphere
-state we don't currently estimate.  Option (3) is a middle path.
+  TRUSTED        — `int_history` has ≥ K_long admissions, all at
+                   the same integer (range = 0 over the deque).
+                   The SV has been a long-term member *or* has been
+                   evicted-then-re-admitted at the same integer
+                   repeatedly.  Both signals indicate the SV is
+                   telling us the same thing consistently.
 
-## Empirical motivation when revisited
+  PROVISIONAL    — `int_history` has 2 to K_long − 1 admissions, all
+                   at the same integer or adjacent integers
+                   (range ≤ 1).  Building track record but not yet
+                   load-bearing trust.
 
-The 2026-04-28 morning `WL_RESID` capture on MadHat showed Pop B SVs
-(G20 [-41,-4,18], E03 [-18,-10,6], G06 [-91,-90,-10]) admitting wildly
-different integers across cycles — clearly admission-side wrong-integer
-acceptance, not just eviction-side noise.  Charlie's GF-eviction redesign
-catches them after the fact.  The question this work answers is "could
-we have avoided the bad admission in the first place?"
+  NEW            — `int_history` empty or only one admission, OR
+                   admission-history range > 1 over the recent
+                   deque (the SV has been admitted at multiple
+                   different integers — an active wrong-integer
+                   cycler, no trust earned).
 
-Cross-references:
-- `docs/wl-drift-redesign-proposal.md` (eviction-side, charlie branch)
-- `docs/misnomers.md` (the wl_drift naming-honesty entry)
-- `project_wl_drift_smooth_float_signal_20260428` (BNC AMB probe finding)
+#### Tier-conditional admission threshold
+
+Different tiers admit at different LAMBDA ratio / P_bootstrap bars:
+
+```
+Tier         R bar    P bar      Notes
+─────────────────────────────────────────────────────────────────
+TRUSTED      ≥ 3.0    ≥ 0.95     SV has earned its place; loose gate
+PROVISIONAL  ≥ 5.0    ≥ 0.99     Building reputation; standard gate
+NEW          ≥ 10.0   ≥ 0.999    No reputation; strict cold-start gate
+```
+
+Numbers above are **starting points**, calibrated tomorrow against
+overnight admission cycling data.  The current uniform gate is
+~5.0/0.95 — equivalent to treating every SV as PROVISIONAL.
+
+#### Trust decay
+
+Trust must reset on real cycle slip (the integer reference itself
+changes).  Mirrors `WlDriftMonitor.forget_history(sv)` — caller
+wipes per-SV history when the upstream slip detector fires.  Without
+this reset, an SV that genuinely re-acquires after a slip would be
+falsely held to its pre-slip integer expectation.
+
+#### Why this works during the lunch-event scenario
+
+When the TEC disturbance hits and the filter starts drifting:
+
+- Existing TRUSTED SVs continue to admit at the relaxed bar (R ≥ 3),
+  but their `int_history` is at a stable integer — admission of the
+  *same* integer is what trust unlocks.  An attempt to admit a
+  *different* integer for a TRUSTED SV demotes it to NEW for that
+  cycle, requiring R ≥ 10.  Drift-induced wrong-integer admissions
+  on previously TRUSTED SVs face the strictest gate.
+- New SVs trying to enter face the strict gate.  During an active
+  disturbance, ratio ≥ 10 is unlikely — keeps the wrong integers out.
+- Integrity trip recovery: after re-bootstrap, all SVs retain their
+  `int_history`.  TRUSTED SVs can rapidly re-admit at their known
+  integer; only fresh / cycling SVs face the cold-start bar.
+
+This gives the filter a stable scaffold to recover onto, instead of
+re-admitting fresh wrong integers and re-entering the trap.
+
+## Defenses considered and rejected
+
+### Cohort-consensus admission (rejected as primary)
+
+Cross-host agreement on per-SV NL integer would be a strong external
+signal.  Rejected as **primary** defense for two reasons:
+
+1. **Doesn't generalize.**  Many real installations are single-host;
+   they need an admission gate that works without any peer cohort.
+2. **Bad cohort is a small step from bad fix set.**  When the fleet
+   is in correlated failure (today's lunch event was exactly this —
+   sky-side disturbance hit all three hosts simultaneously), the
+   cohort consensus *is* the wrong answer.  Treating it as truth
+   would amplify the failure rather than catch it.
+
+May still be useful as a *side check* (it's free information when
+peer-bus is up), but never load-bearing.
+
+### Freezing NL admission during SO_POS active streak (rejected)
+
+Refuse new NL admissions while `SecondOpinionPosMonitor` shows
+nav2Δ above its trip threshold.  Rejected: by the time SO_POS is
+firing, the drift has already happened.  Reactive, not preventive.
+The reputation-tiered gate prevents the wrong admission *before*
+SO_POS would have noticed the divergence.
+
+### ZTD-residual quality gate (kept as side check)
+
+Refuse new admissions when |ZTD residual| exceeds threshold.  Useful
+as a defensive backstop (when the filter is in a known-biased state,
+don't add to the bias), but isn't sufficient alone — admissions
+during the early bias-accumulation window (before ZTD threshold)
+are exactly what creates the bias.
+
+## Open questions
+
+- **K_long** for the TRUSTED-tier deque length.  Mirrors WL's
+  `k_short=4`; for NL, suggest 4 to start (admission rate is much
+  slower than WL, so 4 entries cover ~30+ min of stable membership).
+- **Trust gate on ANCHORED state** vs `int_history`-only.  An SV
+  that earned ANCHORED but was evicted has stronger evidence than
+  one that's only PROVISIONAL by integer count.  Could short-circuit
+  the trust tier upward on past-ANCHORED status.
+- **Hysteresis between tiers.**  When `int_history` grows past the
+  TRUSTED threshold mid-evaluation, do we promote immediately or
+  wait until the next admission cycle?  Suggest immediate — no
+  reason to delay a decision the data already supports.
+
+## Cross-references
+
+- `scripts/peppar_fix/wl_phase_admission_gate.py` — WL admission
+  gate (today's `WlPhaseAdmissionGate`)
+- `[NL_ADMIT]` engine emits `int_history` per SV — already shipped
+  in `ppp_ar.py:_apply_lambda_fix` and `_apply_rounding_fix`
+- `[NL_EVICT]` symmetric on the eviction side — already shipped
+- `WlDriftMonitor` (now WL integer-consistency tracker) for the
+  pattern of trust accumulation feeding eviction-side monitors
+- `docs/wl-drift-redesign-proposal.md` — eviction-side parallel
+- 2026-04-29 lunch event analysis (`day0429lunch.log` on each host,
+  searches: `SECOND_OPINION_POS`, `FIX_SET_INTEGRITY.*TRIPPED`,
+  `[NL_ADMIT]`, `[NL_EVICT]`)
