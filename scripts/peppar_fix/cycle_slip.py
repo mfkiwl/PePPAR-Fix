@@ -444,6 +444,12 @@ def flush_sv_phase(sv: str,
 
     if nl_resolver is not None:
         nl_resolver.unfix(sv)         # drops n1 integer + a_if_fixed
+        # Real phase discontinuity (cycle-slip-flush is the canonical
+        # source for this code path) invalidates the SV's pre-slip
+        # NL integer reference — wipe trust so the next admission is
+        # gated as NEW.  See I-172719 / NlAdmissionTier.forget_history.
+        if hasattr(nl_resolver, 'note_slip'):
+            nl_resolver.note_slip(sv)
 
     if pfr_monitor is not None:
         for attr in ('_per_sv', '_per_sv_phi', '_per_sv_last_elev'):

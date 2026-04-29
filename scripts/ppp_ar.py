@@ -33,6 +33,7 @@ from lambda_ar import lambda_resolve, lambda_decorrelate, bootstrap_success_rate
 # legacy code paths keep working without wiring one up.
 from peppar_fix.sv_state import SvAmbState, SvStateTracker
 from peppar_fix.false_fix_monitor import elev_weighted_threshold
+from peppar_fix.nl_admission_tier import NlAdmissionTier, TIER_NEW
 from peppar_fix.nl_diag import (
     NlDiagLogger,
     RESULT_CAND, RESULT_FIXED_LAMBDA, RESULT_FIXED_ROUNDING,
@@ -413,14 +414,16 @@ class NarrowLaneResolver:
         # rejected under margin).
         self.corner_margin_sum = corner_margin_sum
         self._fixed = {}  # sv -> {'n1': int, 'a_if_fixed': float}
-        # Per-SV NL admission integer history — last K_short=4 n1 values
-        # committed across re-admit cycles.  Mirrors WlDriftMonitor's
-        # _int_history; consumed by [NL_ADMIT] log + downstream
-        # classifiers (Bravo I-115539 workstream C).  Persists across
-        # unfix/refix so admission-cycling pattern is visible.  Reset
-        # only on confirmed real cycle slip.
-        self._nl_int_history: dict[str, "deque[int]"] = {}
-        self._nl_int_history_k = 4
+        # NL admission trust tier — per-SV integer-history classifier
+        # plus tier-conditional LAMBDA ratio + P_bootstrap thresholds
+        # (TRUSTED 3.0/0.95, PROVISIONAL 5.0/0.99, NEW 10.0/0.999).
+        # Owns the per-SV n_nl history that [NL_ADMIT] / [NL_EVICT]
+        # also surface; consumed by Bravo's nl_admission_classify.py
+        # via the new tier= field.  Reset on confirmed cycle slip via
+        # forget_history(sv) — engine wires GF_STEP / IF_STEP /
+        # cycle-slip-flush call sites.  See I-172719 +
+        # docs/wl-admission-phase-only-future.md.
+        self._nl_tier = NlAdmissionTier(k_long=4)
         self._nl_admit_t0: dict[str, float] = {}  # sv -> time.monotonic()
         self.last_ratio = 0.0   # LAMBDA ratio test value (0 = not attempted)
         self.last_method = ""   # "lambda" or "rounding"
@@ -755,6 +758,30 @@ class NarrowLaneResolver:
                                     f"> {join_thr:.2f}m"),
                         )
                     continue
+                # NL trust tier — TRUSTED-with-different-integer
+                # demotes to NEW, blocking the rounding admission.
+                # Other transitions (PROVISIONAL→PROVISIONAL,
+                # NEW→NEW) just admit normally — rounding's frac +
+                # sigma gate is already strict; tier-conditional
+                # ratio/P bars are LAMBDA-only.  See I-172719.
+                _tier_now = self._nl_tier.tier_for(sv)
+                _tier_gate = self._nl_tier.tier_for_proposed(sv, n1_int)
+                if _tier_now == "TRUSTED" and _tier_gate == TIER_NEW:
+                    log.info(
+                        "[NL_ADMIT_BLOCK] sv=%s n_nl=%d frac=%.3f "
+                        "sigma=%.3f method=rounding reason=trusted_mismatch "
+                        "int_history=%s",
+                        sv, n1_int, n1_frac, sigma_n1,
+                        self._nl_tier.integer_history(sv),
+                    )
+                    if diag is not None:
+                        diag.update(
+                            sv, result=RESULT_REJ_JOIN_TEST,
+                            reason=("trusted_mismatch n_nl="
+                                    f"{n1_int} hist="
+                                    f"{self._nl_tier.integer_history(sv)}"),
+                        )
+                    continue
                 self._apply_fix(filt, si, a_if_fixed)
                 # Store fix-time NL quality alongside the integer so later
                 # diagnostics can correlate PFR unfix events with how
@@ -772,14 +799,14 @@ class NarrowLaneResolver:
                          sv, n1_int, n1_frac, sigma_n1,
                          a_if_float, a_if_fixed)
                 # NL admission integer-history tracker (rounding path).
-                _nl_hist = self._nl_int_history.setdefault(
-                    sv, deque(maxlen=self._nl_int_history_k))
-                _nl_hist.append(int(n1_int))
+                self._nl_tier.note_admit(sv, int(n1_int))
                 self._nl_admit_t0[sv] = time.monotonic()
                 log.info(
                     "[NL_ADMIT] sv=%s n_nl=%d frac=%.3f sigma=%.3f "
-                    "method=rounding int_history=%s",
-                    sv, n1_int, n1_frac, sigma_n1, list(_nl_hist),
+                    "method=rounding tier=%s int_history=%s",
+                    sv, n1_int, n1_frac, sigma_n1,
+                    self._nl_tier.tier_for(sv),
+                    self._nl_tier.integer_history(sv),
                 )
                 self._note_nl_fix(sv, az_deg=None, elev_deg=None,
                                   reason=f"rounding (frac={n1_frac:.3f}, σ={sigma_n1:.3f})")
@@ -941,6 +968,7 @@ class NarrowLaneResolver:
 
         newly_fixed = {}
         join_rejected = []  # (sv, worst_sv, Δresid, threshold) for diag
+        tier_rejected = []  # (sv, n_nl, tier, ratio, p) for diag
         # Cumulative-semantics note: _join_test sees the filter state
         # with earlier members of this LAMBDA candidate fix set
         # already applied.  A candidate that would pass in isolation
@@ -960,6 +988,23 @@ class NarrowLaneResolver:
             lambda_wl, lambda_nl, alpha2, n_wl = params[i]
             a_if_fixed = lambda_nl * n1_int + alpha2 * lambda_wl * n_wl
             si = state_indices[i]
+            # Per-SV NL trust-tier gate (I-172719).  LAMBDA's joint
+            # ratio + P_bootstrap test passed the candidate set as a
+            # whole; here we apply the strictest per-SV bar that the
+            # candidate's reputation requires.  TRUSTED SVs admitting
+            # at their established integer face the loose gate; a
+            # TRUSTED SV admitting a *different* integer (drift-
+            # induced wrong attempt) is demoted to NEW for that
+            # admission.  Loose tier for the fleet's stable members,
+            # strict tier for everything else — including the cycler
+            # case the lunch event exposed.
+            ok, tier = self._nl_tier.admits_at(
+                sv, n1_int, ratio, self.last_success_rate,
+            )
+            if not ok:
+                tier_rejected.append(
+                    (sv, n1_int, tier, ratio, self.last_success_rate))
+                continue
             # Join test: would admitting this member of the LAMBDA
             # candidate fix set push an existing ANCHORED anchor
             # past threshold?  If so, drop this candidate but keep
@@ -984,6 +1029,24 @@ class NarrowLaneResolver:
                     sv,
                     result=RESULT_REJ_JOIN_TEST,
                     reason=f"{anchor_sv} Δ={abs_dr:.2f}m > {thr:.2f}m",
+                )
+        # Emit per-SV diag for tier-rejected LAMBDA candidates —
+        # I-172719 / [NL_ADMIT_BLOCK] visibility.
+        for sv, n1_int, tier, _ratio, _p in tier_rejected:
+            log.info(
+                "[NL_ADMIT_BLOCK] sv=%s n_nl=%d ratio=%.2f P=%.4f "
+                "method=lambda tier=%s reason=tier_threshold "
+                "int_history=%s",
+                sv, n1_int, _ratio, _p, tier,
+                self._nl_tier.integer_history(sv),
+            )
+            if self._nl_diag is not None:
+                self._nl_diag.update(
+                    sv,
+                    result=RESULT_REJ_LAMBDA_RATIO,
+                    reason=(f"tier={tier} ratio={_ratio:.2f} "
+                            f"P={_p:.4f} hist="
+                            f"{self._nl_tier.integer_history(sv)}"),
                 )
 
         # Check position displacement
@@ -1025,15 +1088,16 @@ class NarrowLaneResolver:
                      sv, n1_int, ratio, self.last_success_rate,
                      displacement_m, n_fixed, n_amb,
                      filt.x[si], a_if_fixed)
-            # NL admission integer-history tracker (I-115539 / Bravo).
-            _nl_hist = self._nl_int_history.setdefault(
-                sv, deque(maxlen=self._nl_int_history_k))
-            _nl_hist.append(int(n1_int))
+            # NL admission integer-history tracker (I-115539 / Bravo)
+            # owned by NlAdmissionTier for tier classification + gate.
+            self._nl_tier.note_admit(sv, int(n1_int))
             self._nl_admit_t0[sv] = time.monotonic()
             log.info(
                 "[NL_ADMIT] sv=%s n_nl=%d ratio=%.2f P=%.4f "
-                "method=lambda int_history=%s",
-                sv, n1_int, ratio, self.last_success_rate, list(_nl_hist),
+                "method=lambda tier=%s int_history=%s",
+                sv, n1_int, ratio, self.last_success_rate,
+                self._nl_tier.tier_for(sv),
+                self._nl_tier.integer_history(sv),
             )
             self._note_nl_fix(
                 sv, az_deg=None, elev_deg=None,
@@ -1325,6 +1389,18 @@ class NarrowLaneResolver:
                 az_deg=az_deg, elev_deg=elev_deg,
             )
 
+    def note_slip(self, sv):
+        """Notify the resolver that a real cycle slip / phase
+        discontinuity was detected for ``sv`` upstream.  Wipes the
+        SV's NL trust history so the next admission is gated as NEW
+        rather than held to the pre-slip integer expectation.
+
+        Sources that should call this: GF_STEP, IF_STEP,
+        cycle-slip-flush.  Routine NL evictions (false-fix monitor,
+        anchor drop, regime change) should NOT call this — trust
+        persists across re-admit cycles by design."""
+        self._nl_tier.forget_history(sv)
+
     def unfix(self, sv):
         """Remove a fix (e.g. after cycle slip detected).
 
@@ -1341,12 +1417,13 @@ class NarrowLaneResolver:
             _info = self._fixed[sv]
             _t0 = self._nl_admit_t0.pop(sv, None)
             _dur = (time.monotonic() - _t0) if _t0 is not None else None
-            _hist = list(self._nl_int_history.get(sv, []))
             log.info(
-                "[NL_EVICT] sv=%s n_nl=%s duration_s=%s int_history=%s",
+                "[NL_EVICT] sv=%s n_nl=%s duration_s=%s tier=%s "
+                "int_history=%s",
                 sv, _info.get('n1'),
                 f"{_dur:.1f}" if _dur is not None else "?",
-                _hist,
+                self._nl_tier.tier_for(sv),
+                self._nl_tier.integer_history(sv),
             )
         self._fixed.pop(sv, None)
         if self._sv_state is not None:
