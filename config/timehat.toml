@@ -15,7 +15,7 @@ eph_mount = "BCEP00BKG0"
 # CNES SSR for PPP-AR: GAL fully matched (L1C/L5Q), GPS works via
 # L5I/L5Q shared carrier.  Credentials in ntrip-cnes.conf (not in repo).
 ssr_ntrip_conf = "ntrip-cnes.conf"
-systems = "gps,gal,bds"
+systems = "gps,gal"
 phase_step_bias_ns = 2283.0
 
 # TICC #1: chA = PEROUT (i226 PPS OUT), chB = GNSS PPS.

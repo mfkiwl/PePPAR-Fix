@@ -14,7 +14,7 @@ ntrip_conf = "ntrip.conf"
 eph_mount = "BCEP00BKG0"
 # CNES SSR for PPP-AR (credentials in ntrip-cnes.conf)
 ssr_ntrip_conf = "ntrip-cnes.conf"
-systems = "gps,gal"
+systems = "gps,gal,bds"
 
 # CTI OSC5A2B02 OCXO via AD5693R DAC on I2C bus 1.
 # Characterized 2026-04-14: gain=1.062, linearity <5 ppb over ±200 ppb.
