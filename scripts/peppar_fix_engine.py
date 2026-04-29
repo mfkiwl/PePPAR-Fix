@@ -6827,10 +6827,25 @@ Two-phase operation:
                      help="Known position as lat,lon,alt (skips bootstrap)")
     pos.add_argument("--seed-pos",
                      help="Seed position for bootstrap (speeds convergence)")
-    pos.add_argument("--sigma", type=float, default=0.02,
-                     help="Bootstrap convergence threshold in meters (default: "
-                          "0.02 — tight enough to push into the regime where "
-                          "carrier-phase ambiguities force the right geometry)")
+    pos.add_argument("--sigma", type=float, default=1.0,
+                     help="Bootstrap convergence threshold in meters "
+                          "(default: 1.0).  Phase 2 inherits the live "
+                          "PPPFilter from Phase 1; what it actually needs "
+                          "is a position correct enough to refine from "
+                          "(<10 m per the engine's own trusted-source "
+                          "skip-validation gate elsewhere) and an "
+                          "internally-consistent filter (W1 residual "
+                          "consistency).  NAV2 cross-check (W2, default "
+                          "5 m horizontal) catches grossly wrong seeds.  "
+                          "1 m gives W2 a 5x margin while remaining "
+                          "reachable on antennas with realistic PR-noise "
+                          "floors (e.g., the lab UFO1 + GUS #1 reaches "
+                          "this in ~30 s; weaker patches like ANA-MB2 in "
+                          "minutes rather than hours).  The previous "
+                          "0.02 m default was reachable on UFO1+GUS#1 "
+                          "but 100-5000x tighter than any downstream "
+                          "Phase-2 dependency, and unreachable on "
+                          "noisier antennas.")
     pos.add_argument("--bootstrap-nav2-horiz-m", type=float, default=5.0,
                      help="Phase-1 convergence aborts if NAV2 horizontal "
                           "disagreement exceeds this, even when the EKF "
