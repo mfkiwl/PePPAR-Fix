@@ -65,6 +65,7 @@ from peppar_fix.gf_phase_monitor import (
     GfPhaseRollingMeanMonitor, gf_phase_m,
 )
 from peppar_fix.gf_step_monitor import GfStepMonitor
+from peppar_fix.second_opinion_pos_monitor import SecondOpinionPosMonitor
 from peppar_fix.wl_readmission_gate import WlReAdmissionGate
 from peppar_fix.anchoring_sv_promoter import AnchoringSvPromoter
 from peppar_fix.nl_diag import NlDiagLogger
@@ -1566,6 +1567,12 @@ class AntPosEstThread(threading.Thread):
         # state tracker.  Diffed against the snapshot each epoch to
         # drive note_fix / note_unfix on IfStepMonitor.
         self._if_step_prev_nl_fixed: set[str] = set()
+        # SecondOpinionPosMonitor — 3D NAV2 vs PPP-AR position witness.
+        # Catches 'stable wrong' integer locks that FixSetIntegrityAlarm's
+        # internal-consistency triggers and the horizontal-only
+        # _check_nav2 watchdog both miss.  See I-011533-main on
+        # dayplan/2026-04-28.
+        self._second_opinion = SecondOpinionPosMonitor()
         self._setting_drop = SettingSvDropMonitor(self._sv_state)
         # pos_consensus / ztd_consensus thresholds raised from their
         # design-doc defaults (0.20 m / 0.10 m) because lab obs-model
@@ -2919,6 +2926,55 @@ class AntPosEstThread(threading.Thread):
                     and self._n_epochs >= 30
                     and self._n_epochs >= self._nav2_cooldown_until):
                 self._check_nav2(filt, mw, nl, pos_ecef, sigma_3d, n_nl_fixed)
+
+            # SecondOpinionPosMonitor — 3D nav2Δ above threshold,
+            # sustained.  Catches the 'stable wrong' lock that
+            # _check_nav2 (horizontal-only) and FixSetIntegrityAlarm
+            # (internal-consistency) both miss.  See I-011533-main on
+            # dayplan/2026-04-28.  Evaluated every epoch but the
+            # NAV2 store is freshness-gated to ~30s.
+            if (self._nav2_store is not None
+                    and self._n_epochs >= 30
+                    and self._n_epochs >= self._nav2_cooldown_until):
+                _so_opinion = self._nav2_store.get_opinion(max_age_s=30.0)
+                _so_delta = None
+                if _so_opinion is not None:
+                    _so_delta = float(np.linalg.norm(
+                        pos_ecef - _so_opinion['ecef']))
+                _so_ev = self._second_opinion.evaluate(
+                    self._n_epochs, _so_delta)
+                if _so_ev is not None:
+                    log.warning(
+                        "[SECOND_OPINION_POS] tripped: nav2Δ=%.2fm > "
+                        "%.2fm sustained %d ep — full re-init at "
+                        "NAV2 LLA (%.6f,%.6f,%.1fm); unfixing %d NL.",
+                        _so_ev['nav2_delta_3d_m'],
+                        _so_ev['threshold_m'],
+                        _so_ev['sustained_epochs'],
+                        _so_opinion['lat'], _so_opinion['lon'],
+                        _so_opinion['alt_m'], len(nl._fixed),
+                    )
+                    _reset_ecef = np.array(
+                        lla_to_ecef(_so_opinion['lat'],
+                                    _so_opinion['lon'],
+                                    _so_opinion['alt_m']),
+                        dtype=float,
+                    )
+                    for _sv in list(nl._fixed.keys()):
+                        nl.unfix(_sv)
+                    filt.initialize(_reset_ecef, 0.0,
+                                    systems=self._systems)
+                    self._prev_t = None
+                    self._best_sigma = 999.0
+                    self._second_opinion.note_recovery()
+                    self._nav2_cooldown_until = self._n_epochs + 120
+                    if self._ape_sm.state in (
+                            AntPosEstState.ANCHORING,
+                            AntPosEstState.ANCHORED):
+                        self._ape_sm.transition(
+                            AntPosEstState.CONVERGING,
+                            reason="second_opinion_pos_reset",
+                        )
 
             # Position callback when improved
             if sigma_3d < self._best_sigma:
