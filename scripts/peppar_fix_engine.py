@@ -66,6 +66,7 @@ from peppar_fix.gf_phase_monitor import (
 )
 from peppar_fix.gf_step_monitor import GfStepMonitor
 from peppar_fix.second_opinion_pos_monitor import SecondOpinionPosMonitor
+from peppar_fix.wl_phase_admission_gate import WlPhaseAdmissionGate
 from peppar_fix.wl_readmission_gate import WlReAdmissionGate
 from peppar_fix.anchoring_sv_promoter import AnchoringSvPromoter
 from peppar_fix.nl_diag import NlDiagLogger
@@ -1614,6 +1615,15 @@ class AntPosEstThread(threading.Thread):
         # WlDriftMonitor stays as a logging-only diagnostic.  See
         # ``docs/wl-drift-redesign-proposal.md`` for the rationale.
         self._gf_step = GfStepMonitor()
+        # Phase-residual admission gate — pre-WL-fix consistency
+        # check that prevents PR-driven false admissions.  Per
+        # dayplan I-115539 workstream A (2026-04-29 morning).  v1
+        # gates MW's admission decision via per-SV post-fit phase
+        # residual stats; full Kalman+LAMBDA replacement is a known
+        # follow-up (constructor's pr_prior_sigma_m param is
+        # reserved for that upgrade — currently no-op).  See
+        # docs/wl-admission-phase-only-future.md.
+        self._wl_phase_admit = WlPhaseAdmissionGate()
         # SVs currently tracked as WL-fixed by the drift monitor.
         # Diffed against mw._state each epoch to drive note_fix /
         # note_unfix — keeps monitor decoupled from the MW tracker's
@@ -2382,6 +2392,20 @@ class AntPosEstThread(threading.Thread):
 
             self._n_epochs += 1
 
+            # Phase-residual admission gate ingest — feed this epoch's
+            # post-fit phase residuals into WlPhaseAdmissionGate so it
+            # has a current view when MW's admission decisions are
+            # checked below.  Per dayplan I-115539 / 2026-04-29.
+            _gate_labels = getattr(filt, 'last_residual_labels', [])
+            for _lab, _r in zip(_gate_labels, resid if resid is not None else ()):
+                if len(_lab) >= 2 and _lab[1] == 'phi':
+                    self._wl_phase_admit.ingest(_lab[0], float(_r))
+            # Drop history for SVs not observed this epoch — the gate's
+            # per-SV deque should reflect actually-current data, not
+            # stale residuals from arcs that have set.
+            _observed_now = {o['sv'] for o in observations}
+            self._wl_phase_admit.evict_unobserved(_observed_now)
+
             # MW wide-lane update.  Tell MW the current epoch so its
             # tracker-driven transitions (FLOATING → CONVERGING on fix) log
             # with a meaningful epoch field.
@@ -2419,7 +2443,37 @@ class AntPosEstThread(threading.Thread):
             # Acting here (before NL attempt) keeps the NL path
             # from seeing a suspect WL this epoch.
             fixed_now = {sv for sv, st in mw._state.items() if st.get('fixed')}
-            for sv in fixed_now - self._wl_drift_prev_fixed:
+            # Phase-residual admission gate — for each NEWLY-fixed SV
+            # this epoch, check the per-SV phase consistency before
+            # the fix is allowed to land in the lifecycle.  If the
+            # gate refuses, revert the MW state so the SV stays in
+            # FLOATING / CONVERGING and MW will try again at the
+            # next epoch.  Per dayplan I-115539 workstream A.
+            _newly_fixed = fixed_now - self._wl_drift_prev_fixed
+            for sv in list(_newly_fixed):
+                if not self._wl_phase_admit.is_phase_consistent(sv):
+                    detail = self._wl_phase_admit.evaluation_detail(sv)
+                    if detail is not None:
+                        log.warning(
+                            "[WL_PHASE_ADMIT_BLOCK] %s mean=%+.4fm "
+                            "std=%.4fm thr=±%.3fm cohort_med=%+.4fm "
+                            "(n=%d): MW proposed admission rejected; "
+                            "phase residual not yet consistent",
+                            sv, detail['mean_m'], detail['std_m'],
+                            detail['threshold_m'],
+                            detail['cohort_median_m'], detail['n_samples'],
+                        )
+                    # Revert MW state — clear the fix so the SV is not
+                    # admitted this epoch.  MW will keep accumulating
+                    # samples and may try to fix again next epoch.
+                    _st = mw._state[sv]
+                    _st['fixed'] = False
+                    _st['n_wl'] = None
+                    _st.pop('fix_frac', None)
+                    _st.pop('fix_n_epochs', None)
+                    fixed_now.discard(sv)
+                    _newly_fixed.discard(sv)
+            for sv in _newly_fixed:
                 fix_n_wl = mw._state[sv].get('n_wl')
                 self._wl_drift.note_fix(sv, n_wl=fix_n_wl)
                 # Mirror lifecycle on both GF monitors.  Skip when
