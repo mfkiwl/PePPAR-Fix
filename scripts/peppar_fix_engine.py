@@ -6961,7 +6961,7 @@ Two-phase operation:
                           "null-mode coupling into position / ZTD.  "
                           "Bravo's PRIDE/ABMF sweep (2026-04-24) "
                           "showed σ_phi=1.0-3.0 reduces 24h mean |H| "
-                          "by 50% on clean reference data.  See "
+                          "by 50%% on clean reference data.  See "
                           "project_to_main_sigma_phi_sweep_20260424.md.")
     pos.add_argument("--sigma-pr-if", type=float, default=None,
                      help="Override the IF pseudorange measurement "
