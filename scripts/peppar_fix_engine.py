@@ -2449,11 +2449,13 @@ class AntPosEstThread(threading.Thread):
                     if detail is not None:
                         log.warning(
                             "[WL_PHASE_ADMIT_BLOCK] %s mean=%+.4fm "
-                            "std=%.4fm thr=±%.3fm cohort_med=%+.4fm "
-                            "(n=%d): MW proposed admission rejected; "
-                            "phase residual not yet consistent",
+                            "std=%.4fm mean_thr=±%.3fm std_thr=±%.3fm "
+                            "cohort_med=%+.4fm (n=%d): MW proposed "
+                            "admission rejected; phase residual not "
+                            "yet consistent",
                             sv, detail['mean_m'], detail['std_m'],
                             detail['threshold_m'],
+                            detail['std_threshold_m'],
                             detail['cohort_median_m'], detail['n_samples'],
                         )
                     # Revert MW state — clear the fix so the SV is not
