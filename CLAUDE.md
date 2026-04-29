@@ -189,7 +189,7 @@ passwordless for user `bob`.
 
 | Host | Access | Role | GNSS | Notes |
 |---|---|---|---|---|
-| TimeHat | `ssh TimeHat` | Primary peppar-fix dev + PHC discipline | F9T-3RD on `/dev/gnss-top` | Has i226 PHC, TICC #1, heatsink on TCXO |
+| TimeHat | `ssh TimeHat` | Primary peppar-fix dev + PHC discipline | F9T-TOP on `/dev/gnss-top` (EVK-F9T-10-00, ZED-F9T, TIM 2.20 — older firmware, no native L5/B2a-I tracking) | Has i226 PHC, TICC #1, heatsink on TCXO |
 | PiPuss | `ssh PiPuss.local` | Dual-F9T, caster/client testing | F9T-TOP `/dev/gnss-top`, F9T-BOT `/dev/gnss-bot` | Zero-baseline (both on Patch3 via GUS #2) |
 | ~~Onocoy~~ | mothballed 2026-04-08 | F10T + PX1125T disconnected; TICC #2 moved to ocxo | – | Powered down. Never had a peppar-fix checkout. |
 | otcBob1 | `ssh otcBob1` | Timebeat OTC SBC, OCXO, Renesas ClockMatrix | F9T on `/dev/ttyAMA0` at 460800 | Stop `timebeat` before accessing I2C or GNSS |
@@ -358,7 +358,7 @@ ssh <host> "ps aux | grep -E 'peppar|servo|ticc|analyze' | grep -v grep"
 ```
 
 Beads that need hardware carry `hw:` labels (e.g. `hw:TimeHat`,
-`hw:F9T-3RD`). The Mayor checks these before assigning work. If your
+`hw:F9T-TOP`). The Mayor checks these before assigning work. If your
 bead has a hardware label, you are the exclusive user of that hardware
 for the duration of your work.
 
