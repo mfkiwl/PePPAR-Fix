@@ -99,6 +99,14 @@ wires it in.
                    at the same integer or adjacent integers
                    (range ≤ 1).  Building track record but not yet
                    load-bearing trust.
+                   **Note**: PROVISIONAL allows `range ≤ 1`, while
+                   WL's `WlDriftMonitor.CONS_HIGH` requires `range =
+                   0`.  Asymmetry is intentional — NL admission cadence
+                   is slower than WL re-fix and the LAMBDA decorrelation
+                   space is larger, so adjacent-integer wobble during
+                   trust accumulation is the expected normal.  The
+                   NL TRUSTED bar (range = 0 over K_long) is therefore
+                   stricter than WL HIGH despite the looser PROVISIONAL.
 
   NEW            — `int_history` empty or only one admission, OR
                    admission-history range > 1 over the recent
@@ -182,6 +190,44 @@ as a defensive backstop (when the filter is in a known-biased state,
 don't add to the bias), but isn't sufficient alone — admissions
 during the early bias-accumulation window (before ZTD threshold)
 are exactly what creates the bias.
+
+### Cold-start during sustained disturbance (expected behavior)
+
+A fresh restart in the middle of an active disturbance event — TEC
+storm, sustained ZTD wander, post-power cold start during weather —
+will land most candidates at NEW tier with no prior `int_history`.
+The strict NEW gate (R ≥ 10, P ≥ 0.999) plus PROVISIONAL gate
+(R ≥ 5, P ≥ 0.99) will reject most LAMBDA proposals during the
+disturbance.
+
+**This is the right behavior, not a defect.**  Better to stall the
+filter on float-only WL + pseudorange than to anchor at wrong NL
+integers and re-enter the trap.  Recovery time after the disturbance
+clears: K_long = 4 same-integer admissions per SV is achievable in
+~30 min of stable sky, so post-event the trust scaffold rebuilds
+briskly.  Today's empirical question (answerable from tonight's
+overnight if a TEC event happens): how long until first ANCHORING
+after a disturbance ends?  Worth measuring; not worth tuning around.
+
+### Trust decay sources
+
+`forget_history(sv)` must be called on every event that invalidates
+the ambiguity reference.  Three call sites:
+
+1. **GF_STEP** — phase-domain WL cycle slip detected.  WL integer
+   reference broken; all NL ambiguities downstream are also
+   suspect.
+2. **IF_STEP** — phase-domain NL post-fix integrity trip.  NL
+   integer reference broken directly.
+3. **cycle-slip-flush** (existing engine path).  LLI / GF /
+   MW-jump / arc-gap / locktime-drop slip detector — same logical
+   class as GF_STEP, different signal source.
+
+Without trust decay on these three, an SV that genuinely re-acquires
+after a slip would be falsely held to its pre-slip integer
+expectation; admissions would face the lenient TRUSTED bar against
+a possibly-different post-slip integer.  Direct mirror of WL's
+`WlDriftMonitor.forget_history()` pattern.
 
 ## Open questions
 
