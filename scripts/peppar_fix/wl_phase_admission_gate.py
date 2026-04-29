@@ -106,11 +106,22 @@ from statistics import median, mean
 log = logging.getLogger(__name__)
 
 
-# Default trip threshold (metres).  Mean OR std of the per-SV
-# post-fit phase residual deque exceeding this fails the gate.
-# Matches IfStepMonitor's threshold for architectural consistency
-# at the phase-residual scale across both layers.
-_DEFAULT_THRESHOLD_M = 0.05
+# Default mean threshold (metres).  Per-SV post-fit phase residual
+# mean exceeding this fails the gate.  Loosened from the original
+# 5 cm to 15 cm after the morning deploy (I-131954-main, 2026-04-29
+# afternoon) showed natural per-SV residual means of 7-17 cm in
+# normal operation — the 5 cm value was below the noise floor and
+# blocked every admission on clkPoC3.  Catches gross outliers
+# (the day0428night wrong-integer cycling SVs had means in the
+# 30-100 cm range per the WL_FIX_LIFE log).
+_DEFAULT_MEAN_THRESHOLD_M = 0.15
+
+# Default std threshold (metres).  Per-SV post-fit phase residual
+# std exceeding this fails the gate.  Tighter than mean because
+# residual std on a clean float is mm-cm and any sustained
+# volatility above 5 cm indicates either a bad arc or a wrong-
+# integer signature.
+_DEFAULT_STD_THRESHOLD_M = 0.05
 
 # Rolling window for per-SV stats (epochs).  Matches the WL
 # admission warmup (typical mw.min_epochs=30).  Long enough that
@@ -141,13 +152,25 @@ class WlPhaseAdmissionGate:
 
     def __init__(
         self,
-        threshold_m: float = _DEFAULT_THRESHOLD_M,
+        threshold_m: float = _DEFAULT_MEAN_THRESHOLD_M,
         window_epochs: int = _DEFAULT_WINDOW,
         min_samples: int = _DEFAULT_MIN_SAMPLES,
         min_cohort_size: int = _DEFAULT_MIN_COHORT,
         pr_prior_sigma_m: float | None = None,
+        std_threshold_m: float | None = None,
     ) -> None:
         self._threshold = float(threshold_m)
+        # std_threshold_m defaults to _DEFAULT_STD_THRESHOLD_M (5 cm).
+        # When the caller passes a value, that overrides; when None,
+        # the default is used.  Decoupled from mean threshold per
+        # I-131954-main: morning deploy showed mean and std need
+        # different thresholds because they have different
+        # signatures (mean carries the slow PR-bias contribution;
+        # std carries the noise-floor + sub-cycle volatility).
+        self._std_threshold = (
+            float(std_threshold_m) if std_threshold_m is not None
+            else _DEFAULT_STD_THRESHOLD_M
+        )
         self._window = int(window_epochs)
         self._min_samples = int(min_samples)
         self._min_cohort = int(min_cohort_size)
@@ -234,7 +257,7 @@ class WlPhaseAdmissionGate:
         mu = sum(adjusted) / n
         var = sum((x - mu) ** 2 for x in adjusted) / n
         std = var ** 0.5
-        return m <= self._threshold and std <= self._threshold
+        return m <= self._threshold and std <= self._std_threshold
 
     def evaluation_detail(self, sv: str) -> dict | None:
         """Diagnostic snapshot of the gate's per-SV state.  Useful
@@ -256,6 +279,7 @@ class WlPhaseAdmissionGate:
             'mean_m': float(mu),
             'std_m': float(std),
             'threshold_m': self._threshold,
+            'std_threshold_m': self._std_threshold,
             'cohort_median_m': cohort_med,
         }
 
@@ -267,6 +291,7 @@ class WlPhaseAdmissionGate:
     def summary(self) -> str:
         return (
             f"wl_phase_admission_gate: tracking {len(self._hist)} SVs "
-            f"(threshold=±{self._threshold*100:.1f}cm, "
+            f"(mean_thr=±{self._threshold*100:.1f}cm, "
+            f"std_thr=±{self._std_threshold*100:.1f}cm, "
             f"window={self._window}ep)"
         )

@@ -175,13 +175,62 @@ class WlPhaseAdmissionGatePrPriorReservedTest(unittest.TestCase):
 
 class WlPhaseAdmissionGateSummaryTest(unittest.TestCase):
     def test_summary_text(self):
-        gate = WlPhaseAdmissionGate(threshold_m=0.05, window_epochs=30)
+        gate = WlPhaseAdmissionGate(threshold_m=0.05, window_epochs=30,
+                                    std_threshold_m=0.05)
         gate.ingest("E07", 0.001)
         gate.ingest("E12", 0.001)
         s = gate.summary()
         self.assertIn("2 SVs", s)
         self.assertIn("5.0cm", s)
         self.assertIn("30ep", s)
+
+
+class WlPhaseAdmissionGateThresholdSplitTest(unittest.TestCase):
+    """I-131954-main: mean and std thresholds are decoupled.  Mean
+    is loosened to 15 cm (natural per-SV residual mean is 7-17 cm
+    in normal operation); std stays tight at 5 cm so volatile
+    arcs are still caught."""
+
+    def test_default_thresholds_match_loosened_values(self):
+        """Default constructor should use the post-I-131954 values:
+        15 cm mean, 5 cm std."""
+        gate = WlPhaseAdmissionGate()
+        self.assertAlmostEqual(gate._threshold, 0.15)
+        self.assertAlmostEqual(gate._std_threshold, 0.05)
+
+    def test_natural_residual_mean_passes_default(self):
+        """A 10 cm sustained mean (within the 7-17 cm normal range
+        observed in the lab) passes the default gate."""
+        gate = WlPhaseAdmissionGate(min_cohort_size=99)  # disable cohort
+        for _ in range(15):
+            gate.ingest("E07", 0.10)  # 10cm mean, near-zero std
+        self.assertTrue(gate.is_phase_consistent("E07"))
+
+    def test_high_mean_exceeds_default(self):
+        """20 cm sustained mean exceeds the 15 cm default."""
+        gate = WlPhaseAdmissionGate(min_cohort_size=99)
+        for _ in range(15):
+            gate.ingest("E07", 0.20)
+        self.assertFalse(gate.is_phase_consistent("E07"))
+
+    def test_high_std_blocks_at_default(self):
+        """8 cm std (volatile arc) exceeds the 5 cm std default
+        even though mean is well below the 15 cm mean default."""
+        gate = WlPhaseAdmissionGate(min_cohort_size=99)
+        seq = [0.08, -0.08] * 8  # zero-mean ±8cm volatility
+        for r in seq:
+            gate.ingest("E07", r)
+        self.assertFalse(gate.is_phase_consistent("E07"))
+
+    def test_explicit_std_threshold_overrides(self):
+        """Caller can pass std_threshold_m to override the default."""
+        gate = WlPhaseAdmissionGate(threshold_m=0.20,
+                                    std_threshold_m=0.10,
+                                    min_cohort_size=99)
+        seq = [0.08, -0.08] * 8  # std ≈ 8cm; below 10 cm threshold
+        for r in seq:
+            gate.ingest("E07", r)
+        self.assertTrue(gate.is_phase_consistent("E07"))
 
 
 if __name__ == "__main__":
