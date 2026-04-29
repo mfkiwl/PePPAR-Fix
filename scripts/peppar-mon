@@ -18,8 +18,32 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Venv discovery, in priority order:
+#
+#   1. $VIRTUAL_ENV — caller already activated a venv
+#      ("source venv-mon/bin/activate && scripts/peppar-mon ...").
+#      Honour the user's explicit choice; don't second-guess.
+#   2. $REPO_ROOT/venv-mon/ — peppar-mon's dedicated venv per the
+#      requirements-mon.txt convention.  Lets the engine venv stay
+#      tight without textual + rich + textual-serve weight.
+#   3. $REPO_ROOT/venv/ — engine venv.  Works if the user followed
+#      the requirements-mon.txt header comment ("install into venv/")
+#      rather than maintaining a separate venv-mon.
+#   4. $HOME/pygpsclient/bin/python — legacy host-wide venv on hosts
+#      where pygpsclient set one up first.
+#   5. python3 — system Python; will fail with ModuleNotFoundError
+#      on textual unless someone pip-installed system-wide.
+#
+# Earlier versions only checked steps 3-5 and silently overrode an
+# active venv-mon, producing the "ModuleNotFoundError: No module named
+# 'textual'" surprise when peppar-mon-deps were installed in venv-mon
+# but the launcher used venv/bin/python.
 PYTHON_BIN="python3"
-if [[ -x "$REPO_ROOT/venv/bin/python" ]]; then
+if [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
+    PYTHON_BIN="$VIRTUAL_ENV/bin/python"
+elif [[ -x "$REPO_ROOT/venv-mon/bin/python" ]]; then
+    PYTHON_BIN="$REPO_ROOT/venv-mon/bin/python"
+elif [[ -x "$REPO_ROOT/venv/bin/python" ]]; then
     PYTHON_BIN="$REPO_ROOT/venv/bin/python"
 elif [[ -x "$HOME/pygpsclient/bin/python" ]]; then
     PYTHON_BIN="$HOME/pygpsclient/bin/python"

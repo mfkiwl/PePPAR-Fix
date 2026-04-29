@@ -4,8 +4,14 @@
 # stays tight.  Install into a dedicated venv (see scripts/peppar-mon
 # and peppar_mon/__init__.py for the boundary contract):
 #
-#   python3 -m venv venv
-#   venv/bin/pip install -r requirements-mon.txt
+#   python3 -m venv venv-mon
+#   venv-mon/bin/pip install -r requirements-mon.txt
+#
+# The launcher (``scripts/peppar-mon``) discovers ``venv-mon/`` ahead
+# of the engine ``venv/`` so the two stay separate.  Installing into
+# the engine ``venv/`` instead also works (the launcher falls through
+# to it as a fallback) but bloats the engine venv with monitor deps —
+# avoid unless you have a reason.
 #
 # Textual pulls in rich, markdown-it-py, linkify-it-py, platformdirs,
 # and a few smaller deps automatically.  Total install ~30-40 MB.
