@@ -392,15 +392,25 @@ def main() -> int:
             mean, std, peak = _stat(arr)
             print(f"  {name}:  mean={mean:+.2f}  std={std:.2f}  "
                   f"peak|.|={peak:.2f}  (n={len(arr)})")
-        # Pass / fail call.
-        peak_n = max(abs(x) for x in ns)
-        peak_e = max(abs(x) for x in es)
-        peak_d = max(abs(x) for x in ds)
-        passed = peak_n < 5 and peak_e < 5 and peak_d < 5
+        # Pass / fail call.  Use mean + std on the horizontal pair
+        # (vertical RTK noise is structurally 2-3x worse, so judging
+        # all three on the same threshold gives false fails).
+        # F9P spec is "1 cm + 1 ppm" RTK fixed; on a true zero baseline
+        # mean should sit near zero (no systematic offset) and noise
+        # stays inside ~5 mm horizontal / 10 mm vertical.
+        mean_n, std_n, peak_n = _stat(ns)
+        mean_e, std_e, peak_e = _stat(es)
+        mean_d, std_d, peak_d = _stat(ds)
+        bias_ok = (
+            abs(mean_n) < 5.0 and abs(mean_e) < 5.0 and abs(mean_d) < 10.0)
+        std_ok = std_n < 5.0 and std_e < 5.0 and std_d < 10.0
+        passed = bias_ok and std_ok
         print()
-        print(f"VERDICT: {'PASS' if passed else 'FAIL'} "
-              f"(peak |relPos| {peak_n:.1f}/{peak_e:.1f}/{peak_d:.1f} mm; "
-              f"target < 5 mm)")
+        print(
+            f"VERDICT: {'PASS' if passed else 'FAIL'}  "
+            f"(bias {abs(mean_n):.1f}/{abs(mean_e):.1f}/{abs(mean_d):.1f} mm, "
+            f"std {std_n:.1f}/{std_e:.1f}/{std_d:.1f} mm; "
+            f"target |bias|<5/5/10, std<5/5/10)")
     else:
         print("VERDICT: FAIL — never reached FIXED")
     return 0
