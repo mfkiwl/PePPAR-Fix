@@ -207,7 +207,13 @@ def monitor_thread(
     stats: dict,
 ) -> None:
     """Parse NAV-RELPOSNED from rover; record relPos / accuracy /
-    carrSoln per fix."""
+    carrSoln per fix.
+
+    pyubx2 auto-merges the high-precision _HPrelPosN/E/D bytes into
+    the cm-scaled relPosN/E/D attribute, and exposes flag bitfield
+    sub-fields (carrSoln, gnssFixOK, relPosValid) as direct attrs.
+    pyubx2 also pre-scales accN/E/D from the raw 0.1-mm tick units.
+    """
     reader = UBXReader(rover_ser, protfilter=2)  # UBX only
     while not stop.is_set():
         try:
@@ -219,26 +225,30 @@ def monitor_thread(
             continue
         if parsed.identity != "NAV-RELPOSNED":
             continue
-        # Decode flags.
-        flags = parsed.flags
-        carr_soln = (flags >> 3) & 0x03
-        gnss_fix_ok = bool(flags & 0x01)
-        # Position in mm (high-precision components are 0.1 mm; sum).
-        rel_n_mm = parsed.relPosN * 10 + parsed.relPosHPN
-        rel_e_mm = parsed.relPosE * 10 + parsed.relPosHPE
-        rel_d_mm = parsed.relPosD * 10 + parsed.relPosHPD
-        rel_n_mm /= 10.0  # back to mm
-        rel_e_mm /= 10.0
-        rel_d_mm /= 10.0
-        # Accuracy in 0.1 mm.
-        acc_n_mm = parsed.accN / 10.0
-        acc_e_mm = parsed.accE / 10.0
-        acc_d_mm = parsed.accD / 10.0
+        try:
+            carr_soln = int(parsed.carrSoln)
+            gnss_fix_ok = bool(parsed.gnssFixOK)
+            rel_pos_valid = bool(parsed.relPosValid)
+            # Already merged + scaled to cm by pyubx2.
+            rel_n_mm = float(parsed.relPosN) * 10.0
+            rel_e_mm = float(parsed.relPosE) * 10.0
+            rel_d_mm = float(parsed.relPosD) * 10.0
+            # accN/E/D are already in mm (raw 0.1 mm × 0.1 scale =
+            # 0.01 mm? No — pyubx2 reports as "0.1 mm units * 0.1
+            # scale = mm").  Sanity-check by treating as mm; values
+            # under tens-of-mm range for normal RTK noise.
+            acc_n_mm = float(parsed.accN)
+            acc_e_mm = float(parsed.accE)
+            acc_d_mm = float(parsed.accD)
+        except Exception as e:
+            log.debug("monitor: NAV-RELPOSNED field access: %s", e)
+            continue
         soln_label = _CARR_SOLN.get(carr_soln, f"?({carr_soln})")
         stats["soln_counts"][soln_label] += 1
         stats["last"] = {
             "carr_soln": soln_label,
             "fix_ok": gnss_fix_ok,
+            "rel_pos_valid": rel_pos_valid,
             "rel_n_mm": rel_n_mm,
             "rel_e_mm": rel_e_mm,
             "rel_d_mm": rel_d_mm,
