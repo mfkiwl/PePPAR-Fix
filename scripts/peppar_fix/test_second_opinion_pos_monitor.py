@@ -82,6 +82,127 @@ class SecondOpinionPosMonitorTest(unittest.TestCase):
         ev = m.evaluate(2, -7.0)
         self.assertIsNotNone(ev)
 
+    # ── hAcc quality gate (workstream C1, dayplan I-115539) ─── #
+
+    def test_hacc_gate_holds_off_when_hacc_too_high(self):
+        """Streak hits sustained but rolling-mean hAcc is above the
+        gate threshold — should hold off without firing.  Mirrors the
+        operational case where NAV2's own opinion is uncertain (multipath
+        transient, geometry change), so its disagreement with PPP-AR
+        is unreliable evidence of a wrong PPP-AR lock."""
+        m = SecondOpinionPosMonitor(
+            threshold_m=5.0, sustained_epochs=3,
+            hacc_threshold_m=1.5,
+        )
+        # nav2Δ above threshold + hAcc bad — gate holds off
+        for ep in range(5):
+            ev = m.evaluate(ep, 7.0, nav2_h_acc_m=3.0)
+            self.assertIsNone(ev, f"epoch {ep}: gate should hold off")
+        # Streak is still preserved — once NAV2 settles, next call fires
+        self.assertGreaterEqual(m.streak(), 3)
+
+    def test_hacc_gate_releases_when_hacc_settles(self):
+        """Once rolling-mean hAcc drops below threshold while the
+        streak is still above sustained, the next call fires."""
+        m = SecondOpinionPosMonitor(
+            threshold_m=5.0, sustained_epochs=3,
+            hacc_threshold_m=1.5,
+            hacc_window_epochs=4,
+        )
+        # 4 epochs of bad hAcc — gate held off
+        for ep in range(4):
+            self.assertIsNone(
+                m.evaluate(ep, 7.0, nav2_h_acc_m=3.0))
+        # Now NAV2 settles — feed 4 epochs of good hAcc to
+        # roll the bad ones out of the deque
+        for ep in range(4, 7):
+            m.evaluate(ep, 7.0, nav2_h_acc_m=0.5)
+        ev = m.evaluate(7, 7.0, nav2_h_acc_m=0.5)
+        # Some epoch in 4-7 should have fired (depends on rolling mean
+        # crossing threshold).  At minimum, by epoch 7 the deque is
+        # all good values and the gate should be open.
+        self.assertTrue(
+            ev is not None or m._fired_this_period,
+            "gate never released even after NAV2 settled",
+        )
+
+    def test_hacc_gate_disabled_back_compat(self):
+        """Setting hacc_threshold_m=None disables the gate.  Calls
+        without nav2_h_acc_m work as before — the existing engine
+        behavior is preserved for callers that haven't been updated."""
+        m = SecondOpinionPosMonitor(
+            threshold_m=5.0, sustained_epochs=3,
+            hacc_threshold_m=None,
+        )
+        # No hAcc passed at all — should fire on streak alone
+        m.evaluate(0, 7.0)
+        m.evaluate(1, 7.0)
+        ev = m.evaluate(2, 7.0)
+        self.assertIsNotNone(ev)
+
+    def test_hacc_unset_skips_gate(self):
+        """If the gate is enabled but the caller never provides hAcc
+        (older Nav2PositionStore version, pre-update), the gate is
+        skipped — fires on streak alone.  Back-compat for the
+        transition window."""
+        m = SecondOpinionPosMonitor(
+            threshold_m=5.0, sustained_epochs=3,
+            hacc_threshold_m=1.5,
+        )
+        # Caller provides nav2_delta but not nav2_h_acc — gate is
+        # in "no samples ever arrived" mode → permissive
+        m.evaluate(0, 7.0)
+        m.evaluate(1, 7.0)
+        ev = m.evaluate(2, 7.0)
+        self.assertIsNotNone(ev)
+
+    def test_hacc_history_persists_across_below_threshold(self):
+        """hAcc samples accumulate continuously, including epochs
+        where nav2Δ is below the trip threshold.  This way when a
+        streak does start, the rolling mean already represents NAV2's
+        recent quality rather than only the streak window."""
+        m = SecondOpinionPosMonitor(
+            threshold_m=5.0, sustained_epochs=3,
+            hacc_threshold_m=1.5,
+            hacc_window_epochs=10,
+        )
+        # 10 epochs below trip threshold but with bad hAcc
+        for ep in range(10):
+            m.evaluate(ep, 1.0, nav2_h_acc_m=3.0)
+        # Now nav2Δ jumps above threshold — gate should hold off
+        # because rolling-mean hAcc is bad
+        for ep in range(10, 14):
+            ev = m.evaluate(ep, 7.0, nav2_h_acc_m=3.0)
+            self.assertIsNone(ev)
+
+    def test_hacc_gate_event_carries_rolling_hacc(self):
+        """Trip event includes rolling_hacc_m for diagnostic visibility."""
+        m = SecondOpinionPosMonitor(
+            threshold_m=5.0, sustained_epochs=3,
+            hacc_threshold_m=1.5,
+        )
+        m.evaluate(0, 7.0, nav2_h_acc_m=0.5)
+        m.evaluate(1, 7.0, nav2_h_acc_m=0.7)
+        ev = m.evaluate(2, 7.0, nav2_h_acc_m=0.6)
+        self.assertIsNotNone(ev)
+        self.assertIn('rolling_hacc_m', ev)
+        self.assertAlmostEqual(ev['rolling_hacc_m'], 0.6, places=2)
+
+    def test_recovery_clears_hacc_history(self):
+        """After note_recovery, hAcc history starts fresh — otherwise
+        the post-reset window might still be poisoned by the pre-reset
+        bad values that triggered the original event."""
+        m = SecondOpinionPosMonitor(
+            threshold_m=5.0, sustained_epochs=3,
+            hacc_threshold_m=1.5,
+        )
+        # Pre-reset: build some history
+        m.evaluate(0, 7.0, nav2_h_acc_m=3.0)
+        m.evaluate(1, 7.0, nav2_h_acc_m=3.0)
+        m.note_recovery()
+        # History cleared
+        self.assertIsNone(m._rolling_hacc())
+
 
 if __name__ == "__main__":
     unittest.main()

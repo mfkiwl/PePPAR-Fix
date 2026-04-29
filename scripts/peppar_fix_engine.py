@@ -2938,19 +2938,26 @@ class AntPosEstThread(threading.Thread):
                     and self._n_epochs >= self._nav2_cooldown_until):
                 _so_opinion = self._nav2_store.get_opinion(max_age_s=30.0)
                 _so_delta = None
+                _so_hacc = None
                 if _so_opinion is not None:
                     _so_delta = float(np.linalg.norm(
                         pos_ecef - _so_opinion['ecef']))
+                    _so_hacc = _so_opinion.get('h_acc_m')
                 _so_ev = self._second_opinion.evaluate(
-                    self._n_epochs, _so_delta)
+                    self._n_epochs, _so_delta, _so_hacc)
                 if _so_ev is not None:
+                    _rh = _so_ev.get('rolling_hacc_m')
+                    _rh_tag = (
+                        f" rolling_hAcc={_rh:.2f}m" if _rh is not None
+                        else "")
                     log.warning(
                         "[SECOND_OPINION_POS] tripped: nav2Δ=%.2fm > "
-                        "%.2fm sustained %d ep — full re-init at "
+                        "%.2fm sustained %d ep%s — full re-init at "
                         "NAV2 LLA (%.6f,%.6f,%.1fm); unfixing %d NL.",
                         _so_ev['nav2_delta_3d_m'],
                         _so_ev['threshold_m'],
                         _so_ev['sustained_epochs'],
+                        _rh_tag,
                         _so_opinion['lat'], _so_opinion['lon'],
                         _so_opinion['alt_m'], len(nl._fixed),
                     )
