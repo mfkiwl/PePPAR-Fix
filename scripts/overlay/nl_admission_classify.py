@@ -126,6 +126,18 @@ def _parse_history(s: str) -> list[int]:
 
 
 def _parse_ts(date: str, time_s: str, tz_offset_h: float) -> float:
+    # tz_offset_h is the engine clock's offset from UTC in hours, ISO
+    # convention: positive = local clock AHEAD of UTC (CEST=+2),
+    # negative = BEHIND UTC (CDT=-5).  Matches the convention in
+    # ``wl_drift_bnc_validate_v2.py``'s ``--engine-tz-offset-hours``
+    # so all overlay tools take the same flag values.
+    #
+    # Engine logs are emitted in local time; we parse them naively-as-
+    # UTC (which assumes the local-time wall clock IS UTC, and is
+    # therefore wrong by exactly ``tz_offset_h`` hours) and SUBTRACT
+    # the offset to recover true UTC.  When CDT engine logs `21:43`,
+    # that's actually `02:43` UTC = `21:43 - (-5)`h → naive parse minus
+    # `-5`h = naive plus 5h.  CDT callers pass `--tz-offset-hours -5`.
     offset_s = tz_offset_h * 3600.0
     return datetime.fromisoformat(f"{date}T{time_s}").replace(
         tzinfo=timezone.utc).timestamp() - offset_s
@@ -329,8 +341,10 @@ def main(argv: list[str]) -> int:
                    help='Comma-separated host labels (one per --engine, '
                         'in matching order).  Defaults to engine basename.')
     p.add_argument('--tz-offset-hours', type=float, default=0.0,
-                   help='Hours to subtract from engine timestamps to align '
-                        'with UTC.  Use 5 for CDT-emitted logs.')
+                   help='Engine clock offset from UTC, hours, ISO sign '
+                        'convention: positive = engine local clock AHEAD of '
+                        'UTC (CEST=+2), negative = BEHIND UTC (CDT=-5). '
+                        'Use -5 for CDT-emitted logs.')
     p.add_argument('--format', choices=('text', 'json'), default='text',
                    help='Output format (default text).  json emits per-event '
                         'records with consistency tag for joining with BNC '

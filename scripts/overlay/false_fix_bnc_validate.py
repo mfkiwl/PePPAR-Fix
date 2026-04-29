@@ -265,9 +265,11 @@ def main(argv: list[str]) -> int:
                         'integer-jump if they fall within ±window of the '
                         'same SV.  Default 30 s.')
     p.add_argument('--tz-offset-hours', type=float, default=0.0,
-                   help='Hours to subtract from engine timestamps to align '
-                        'with BNC UTC.  Default 0 (engine logs already UTC). '
-                        'Use 5 for CDT-emitted engine logs.')
+                   help='Engine clock offset from UTC, hours, ISO sign '
+                        'convention: positive = engine local clock AHEAD of '
+                        'UTC (CEST=+2), negative = BEHIND UTC (CDT=-5). '
+                        'Default 0 (engine logs already UTC). '
+                        'Use -5 for CDT-emitted engine logs.')
     p.add_argument('--min-cycles', type=float, default=1.0,
                    help='BNC AMB integer-jump magnitude threshold (default 1)')
     p.add_argument('--format', choices=('text', 'json'), default='text',
