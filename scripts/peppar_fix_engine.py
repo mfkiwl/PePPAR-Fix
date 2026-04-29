@@ -61,10 +61,7 @@ from peppar_fix.if_step_monitor import IfStepMonitor
 from peppar_fix.setting_sv_drop_monitor import SettingSvDropMonitor
 from peppar_fix.fix_set_integrity_monitor import FixSetIntegrityMonitor
 from peppar_fix.wl_drift_monitor import WlDriftMonitor
-from peppar_fix.gf_phase_monitor import (
-    GfPhaseRollingMeanMonitor, gf_phase_m,
-)
-from peppar_fix.gf_step_monitor import GfStepMonitor
+from peppar_fix.gf_step_monitor import GfStepMonitor, gf_phase_m
 from peppar_fix.second_opinion_pos_monitor import SecondOpinionPosMonitor
 from peppar_fix.wl_phase_admission_gate import WlPhaseAdmissionGate
 from peppar_fix.wl_readmission_gate import WlReAdmissionGate
@@ -1597,23 +1594,13 @@ class AntPosEstThread(threading.Thread):
         # docs/wl-only-foundation.md for the motivating overnight
         # 2026-04-22/23 analysis.
         self._wl_drift = WlDriftMonitor()
-        # GF (geometry-free phase) post-fix rolling-mean monitor —
-        # phase-only sibling to WlDriftMonitor.  Observe-only mode
-        # for I-163535-charlie / 2026-04-28: emits [GF_DRIFT] log
-        # events but does not demote.  Validated against BNC over
-        # one or two overnights; switched to demoter if its chance-
-        # corrected agreement with BNC exceeds the 10 % bar that
-        # cycle-slip-flush already meets.  See
-        # ``docs/wl-drift-redesign-proposal.md`` and
-        # ``project_wl_drift_smooth_float_signal_20260428``.
-        self._gf_drift = GfPhaseRollingMeanMonitor()
-        # GF step demoter — replaces wl_drift's flush action per
-        # I-194752-main (2026-04-28 evening).  Uses per-epoch
-        # cohort-median Δgf to cancel common-mode iono; trips on
-        # per-SV residual exceeding threshold for ≥ 2 consecutive
-        # epochs.  This is the canonical post-fix integrity gate;
-        # WlDriftMonitor stays as a logging-only diagnostic.  See
-        # ``docs/wl-drift-redesign-proposal.md`` for the rationale.
+        # GF step demoter — canonical post-fix integrity gate.
+        # Uses per-epoch cohort-median Δgf to cancel common-mode iono;
+        # trips on per-SV residual exceeding threshold for ≥ 2
+        # consecutive epochs.  Replaces the retired MW-residual
+        # rolling-mean demoter and the observe-only GF rolling-mean
+        # sibling (both retired 2026-04-29 / I-202241).  See
+        # ``docs/wl-drift-redesign-proposal.md`` for rationale.
         self._gf_step = GfStepMonitor()
         # Phase-residual admission gate — pre-WL-fix consistency
         # check that prevents PR-driven false admissions.  Per
@@ -2428,8 +2415,8 @@ class AntPosEstThread(threading.Thread):
             nl._epoch = self._n_epochs  # resolver also uses _epoch for logs
             readmit_blocked: list[str] = []
             # Per-SV GF observation for this epoch.  Populated alongside
-            # the MW update; consumed by the GfPhaseRollingMeanMonitor
-            # below.  Pure phase, geometry-free.
+            # the MW update; consumed by the GF step demoter below.
+            # Pure phase, geometry-free.
             gf_now: dict[str, float] = {}
             for obs in observations:
                 sv = obs['sv']
@@ -2493,13 +2480,12 @@ class AntPosEstThread(threading.Thread):
             for sv in _newly_fixed:
                 fix_n_wl = mw._state[sv].get('n_wl')
                 self._wl_drift.note_fix(sv, n_wl=fix_n_wl)
-                # Mirror lifecycle on both GF monitors.  Skip when
-                # the GF observation is missing this epoch (would
+                # Initialise the GF step demoter for this SV.  Skip
+                # when the GF observation is missing this epoch (would
                 # happen if the SV's MW updated from a prior-epoch
                 # latch with the current obs missing fields).
                 _gf_ref = gf_now.get(sv)
                 if _gf_ref is not None:
-                    self._gf_drift.note_fix(sv, gf_ref_m=_gf_ref)
                     self._gf_step.note_fix(sv, gf_initial_m=_gf_ref)
                 # Newly-fixed SV passed the re-admission gate (or was
                 # never held).  Clear any prior hold so a subsequent
@@ -2523,17 +2509,8 @@ class AntPosEstThread(threading.Thread):
             for sv in self._wl_drift_prev_fixed - fixed_now:
                 self._wl_drift.note_unfix(sv)
                 self._gf_step.note_unfix(sv)
-                _gf_exit = self._gf_drift.note_unfix(sv)
-                if _gf_exit is not None:
-                    log.info(
-                        "[GF_DRIFT] %s kind=exit reason=unfix "
-                        "drift=%+.4fm window=%dep gf_ref=%+.3fm "
-                        "[observe-only]",
-                        _gf_exit['sv'], _gf_exit['drift_m'],
-                        _gf_exit['window_epochs'], _gf_exit['gf_ref_m'],
-                    )
-                # Fix-life logging — exit (caller didn't trigger via
-                # wl_drift; could be slip, dropout, or other).
+                # Fix-life logging — exit (slip, dropout, or other
+                # exit path that didn't go through gf_step).
                 _t0 = self._wl_fix_life_t0.pop(sv, None)
                 _n_wl = self._wl_fix_life_n_wl.pop(sv, None)
                 _life_elev = elevations.get(sv)
@@ -2547,65 +2524,6 @@ class AntPosEstThread(threading.Thread):
                     self._wl_drift.consistency_level(sv),
                 )
             drift_actions: list[str] = []
-            for sv in list(fixed_now):
-                st = mw._state[sv]
-                f1, f2 = st.get('f1'), st.get('f2')
-                n_wl = st.get('n_wl')
-                if f1 is None or f2 is None or n_wl is None:
-                    continue
-                lambda_wl = C / (f1 - f2)
-                # Post-fix residual: fractional part of (mw_avg / λ_WL − N_WL).
-                # Zero when the integer commitment is consistent with
-                # subsequent observations; drifts away from zero when
-                # the commitment is wrong.
-                resid_cyc = st['mw_avg'] / lambda_wl - n_wl
-                samples_since_fix = self._wl_drift._ingest_count.get(sv, 0)
-                log.info(
-                    "[WL_RESID] sv=%s resid=%+.4fcyc n_wl=%d ssf=%d",
-                    sv, resid_cyc, n_wl, samples_since_fix,
-                )
-                # Phase-only sibling: GF post-fix rolling-mean monitor,
-                # observe-only.  Logs [GF_DRIFT] when it would have
-                # fired but does not demote.  Validates against BNC
-                # over one or two overnights (I-163535-charlie); if
-                # its chance-corrected agreement with BNC slip events
-                # exceeds the +12 % bar that cycle-slip-flush already
-                # meets, it'll be promoted to a demoter and the
-                # MW-residual monitor (this WL_DRIFT block) retired.
-                _gf_cur = gf_now.get(sv)
-                if _gf_cur is not None:
-                    gf_ev = self._gf_drift.ingest(sv, _gf_cur)
-                    if gf_ev is not None:
-                        log.info(
-                            "[GF_DRIFT] %s kind=%s drift=%+.4fm "
-                            "thr=±%.3fm n=%d window=%dep "
-                            "gf_ref=%+.3fm [observe-only]",
-                            gf_ev['sv'], gf_ev['kind'],
-                            gf_ev['drift_m'], gf_ev['threshold_m'],
-                            gf_ev['n_samples'], gf_ev['window_epochs'],
-                            gf_ev['gf_ref_m'],
-                        )
-
-                # WlDriftMonitor is now LOG-ONLY (per I-194752-main /
-                # 2026-04-28 evening).  GF step demoter replaces the
-                # MW-residual flush action below.  WlDriftMonitor
-                # remains in the loop because (1) its consistency
-                # classifier output goes into [WL_FIX_LIFE]; (2) the
-                # [WL_DRIFT] log line is still useful for analytical
-                # comparison against the GF stream.
-                ev = self._wl_drift.ingest(sv, resid_cyc)
-                if ev is not None:
-                    flush_elev = elevations.get(sv)
-                    log.info(
-                        "[WL_DRIFT] %s drift=%+.3fcyc > ±%.2f "
-                        "(n=%d, window=%dep, consistency=%s) "
-                        "[log-only — GF step is canonical demoter] "
-                        "elev=%s",
-                        ev['sv'], ev['drift_cyc'], ev['threshold_cyc'],
-                        ev['n_samples'], ev['window_epochs'],
-                        ev.get('consistency', '?'),
-                        f"{flush_elev:.1f}°" if flush_elev is not None else "?",
-                    )
 
             # GF step demoter — phase-only, cohort-median Δgf
             # detection.  Per I-194752-main, this replaces the
@@ -2646,15 +2564,6 @@ class AntPosEstThread(threading.Thread):
                 mw.reset(sv)
                 self._wl_drift.note_unfix(sv)
                 self._gf_step.note_unfix(sv)
-                _gf_exit = self._gf_drift.note_unfix(sv)
-                if _gf_exit is not None:
-                    log.info(
-                        "[GF_DRIFT] %s kind=exit reason=gf_step_flush "
-                        "drift=%+.4fm window=%dep gf_ref=%+.3fm "
-                        "[observe-only]",
-                        _gf_exit['sv'], _gf_exit['drift_m'],
-                        _gf_exit['window_epochs'], _gf_exit['gf_ref_m'],
-                    )
                 # Layer 3: take a re-admission hold at the current
                 # elevation.  MW updates for this SV are skipped
                 # until elevation moves ≥ 2°.
@@ -2703,12 +2612,11 @@ class AntPosEstThread(threading.Thread):
             self._setting_drop.ingest(self._n_epochs, resid, labels)
             self._fix_set_integrity.ingest(self._n_epochs, resid, labels)
             # NL-layer residual logger — per-epoch per-NL-fixed-SV PR
-            # and IF (phi) residuals.  Mirrors WL_RESID at the NL
-            # layer.  Feeds the empirical case for IF-residual eviction
-            # (I-221332-main) — the IF residual is what Charlie's
-            # detector should be acting on, not PR.  Volume:
-            # ~5-10 NL-fixed SVs * 2 residuals * 1 Hz = ~20 lines/sec
-            # max; one combined line per SV per epoch.
+            # and IF (phi) residuals.  Feeds the empirical case for
+            # IF-residual eviction (I-221332-main) — the IF residual
+            # is what Charlie's detector should be acting on, not PR.
+            # Volume: ~5-10 NL-fixed SVs * 2 residuals * 1 Hz =
+            # ~20 lines/sec max; one combined line per SV per epoch.
             _sv_resid: dict[str, dict[str, float]] = {}
             for _i, _lbl in enumerate(labels):
                 if _i >= len(resid):

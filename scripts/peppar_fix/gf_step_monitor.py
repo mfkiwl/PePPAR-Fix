@@ -6,10 +6,10 @@ rolling mean is uncorrelated with BNC slip events at chance level
 (Z = -0.17, p = 0.86 — see
 ``project_wl_drift_vs_bnc_finding_20260428``).  The MW combination
 mixes phase and pseudorange; PR multipath dominates the residual.
-``GfPhaseRollingMeanMonitor`` (the v1 phase-only sibling) tripped
-on accumulated iono drift on long-fixed SVs because (gf_current -
-gf_at_fix) grows linearly with iono drift since fix — verified in
-2026-04-28 afternoon deploy.
+A v1 phase-only rolling-mean sibling (``GfPhaseRollingMeanMonitor``,
+retired 2026-04-29 / I-202241) tripped on accumulated iono drift on
+long-fixed SVs because (gf_current - gf_at_fix) grows linearly with
+iono drift since fix — verified in 2026-04-28 afternoon deploy.
 
 This detector uses the **first difference** of GF (Δgf), not the
 cumulative residual against a fixed reference.  Real cycle slips
@@ -292,3 +292,13 @@ class GfStepMonitor:
             f"(threshold=±{self._threshold*100:.1f}cm, "
             f"consecutive={self._consecutive}ep)"
         )
+
+
+def gf_phase_m(phi1_cyc: float, phi2_cyc: float,
+               wl_f1_m: float, wl_f2_m: float) -> float:
+    """Geometry-free phase combination in metres.
+
+    Helper for engine call sites and unit tests.  Inputs are L1 and
+    L5 carrier phase in cycles plus their wavelengths in metres.
+    """
+    return phi1_cyc * wl_f1_m - phi2_cyc * wl_f2_m

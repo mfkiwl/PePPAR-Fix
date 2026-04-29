@@ -1,75 +1,34 @@
-"""Wide-lane post-fix MW residual rolling-mean monitor.
+"""Per-SV WL integer-consistency tracker.
 
 ⚠ **Misnomer warning** (logged 2026-04-28 in
-``docs/misnomers.md``).  This class was originally designed and
-documented as a "wrong WL integer detector," motivated by the
-2026-04-22/23 sunrise TEC slip storm.  Empirically (BNC validation
-on day0427night, see ``project_wl_drift_smooth_float_signal_20260428``)
-the MW-residual rolling mean it watches is **statistically
-indistinguishable from random** when correlated against an
-independent IF-based PPP engine's slip events (Z = −0.17, p = 0.86).
-It does NOT measure what its old name suggested.
+``docs/misnomers.md``).  Despite the historical name, this class no
+longer watches drift.  The MW-residual rolling-mean monitor that
+this class used to host was empirically uncorrelated with real slip
+events (Z = −0.17 vs BNC AMB integer jumps, p = 0.86 — see
+``project_wl_drift_smooth_float_signal_20260428``) and was retired
+2026-04-29 (I-202241).  The GF step demoter (``GfStepMonitor``) is
+the canonical post-fix integrity gate now.
 
-What it actually does: tracks the per-SV rolling mean of the
-**Melbourne-Wübbena combination residual** post-fix.  MW combines
-phase **and pseudorange** (MW = phase − pseudorange in WL cycles,
-roughly).  A disturbance in the MW residual can therefore originate
-on either side: real phase events (slips, ambiguity errors) **or**
-pseudorange-domain noise (PR multipath, code-bias drift, receiver
-front-end PR shifts).  A direct probe of three SVs during 2026-04-28
-overnight wl_drift events showed BNC's IF (phase-only) filter saw
-**no event** while this monitor fired — i.e., on those events the
-disturbance was PR-side, not phase-side.
+What this class still does: track the last K_short n_wl values
+committed for each SV across re-fix cycles, and classify each SV as
+HIGH / MEDIUM / LOW / UNKNOWN consistency on that history.  Output
+feeds ``[WL_FIX_LIFE]`` log lines for downstream analysis.  Bob's
+thought experiment: a HIGH-consistency SV always re-fixes to the
+same integer; a LOW-consistency SV wanders.
 
-For carrier-phase tracking, only phase-side events are worth
-demoting an SV for.  See I-153334-main on dayplan/2026-04-28 for
-the planned adaptive-threshold mitigation, and the open proposal
-to redesign this monitor around a phase-only signal (GF or IF
-residual) following BNC / RTKLIB's lead.  The original use case
-(rare wrong-integer commit catching) is still legitimate, but the
-current MW-rolling-mean approach surfaces it buried in PR-domain
-noise.
-
-Historical context (kept for the design rationale): originally
-motivated by the overnight 2026-04-22/23 WL-only run.  All four
-hosts reached a high-quality converged state pre-sunrise (L5 fleet
-agreed to 0.50 m altitude, σ ≈ 18 mm, ZTD within ±310 mm), then a
-sunrise TEC slip storm corrupted two hosts (clkPoC3, MadHat) via
-wrong WL re-acquisitions while the other two (TimeHat, ptpmon)
-rode through.  Post-hoc: the "pull phase" between a bad integer
-landing and ZTD breaching threshold was 30–45 minutes on the
-compromised hosts.  A per-SV drift monitor firing at 3-minute
-rolling window would have caught it in the pull phase.  See
-``docs/wl-only-foundation.md`` and the corresponding analysis memo.
-The redesigned phase-only version of this monitor will still
-catch that population-of-1 event signature; the current version
-catches it buried in noise (≥ 200 events/host/night dominated by
-PR disturbances).
-
-Statistical framing (correct for what's measured, agnostic to
-whether MW residual is the right signal): under the null hypothesis
-of correct integer + zero-mean MW noise, the rolling mean is bounded
-by σ_MW / √N.  A persistent non-zero rolling mean exceeding
-threshold falsifies the null — but the null can be falsified by
-*either* a wrong integer or a non-zero-mean MW noise process (e.g.,
-slow PR multipath).  This monitor cannot distinguish the two.
+A rename to ``IntegerConsistencyTracker`` is queued (option ``a`` of
+the I-202241 split: signal-removal first, naming-honesty rename in a
+follow-up PR).
 
 Usage pattern:
 
     monitor = WlDriftMonitor()
-    # Each epoch, after MW tracker has updated this epoch's obs:
     fixed_now = {sv for sv, s in mw._state.items() if s.get('fixed')}
     for sv in fixed_now - prev_fixed:
-        monitor.note_fix(sv)
+        monitor.note_fix(sv, n_wl=...)
     for sv in prev_fixed - fixed_now:
         monitor.note_unfix(sv)
-    for sv in fixed_now:
-        residual_cyc = post_fix_residual(mw, sv)
-        ev = monitor.ingest(sv, residual_cyc)
-        if ev is not None:
-            mw.reset(sv)
-            monitor.note_unfix(sv)
-            sv_state.transition(sv, FLOATING, reason="wl_drift")
+    # Read consistency_level / integer_history for [WL_FIX_LIFE] logs.
     prev_fixed = fixed_now
 
 Not thread-safe.  Call from the AntPosEst thread only (matches the
@@ -89,7 +48,6 @@ log = logging.getLogger(__name__)
 # Bob's thought experiment: if a HIGH-consistency SV is forced out, on
 # re-fix it consistently picks the same integer; LOW does not.
 #
-# Used as a key into per-level threshold + readmit-quarantine policy.
 # String constants (not Enum) to keep the log line format stable.
 CONS_HIGH = "HIGH"      # n_wl history range = 0 across last K_short cycles
 CONS_MEDIUM = "MEDIUM"  # range = 1 (legitimate adjacent-integer boundary)
@@ -98,71 +56,14 @@ CONS_UNKNOWN = "UNKNOWN"  # < K_short cycles observed; default to LOW behavior
 
 
 class WlDriftMonitor:
-    """Per-SV rolling-mean drift detector on post-fix MW residual.
+    """Per-SV WL integer consistency tracker."""
 
-    Tracks ``(sv → deque of post-fix residuals in cycles)`` for every
-    WL-fixed SV.  When the rolling mean of an SV's residuals exceeds
-    ``threshold_cyc`` in magnitude over at least ``min_samples``
-    samples, ``ingest()`` returns a drift event.  Caller is
-    responsible for acting on the event (flushing MW, demoting the
-    SV) and calling ``note_unfix``.
-
-    Parameters are in MW cycles (λ_WL ≈ 0.75 m for L1-L5, so 1 cycle
-    is a large drift — threshold ``0.15`` cyc ≈ 11 cm is well below
-    typical WL measurement noise after 60-epoch averaging, and 7×
-    below a single wrong-integer offset).
-    """
-
-    def __init__(
-        self,
-        window_epochs: int = 30,
-        threshold_cyc: float = 0.25,
-        min_samples: int = 15,
-        warmup_epochs: int = 30,
-        k_short: int = 4,
-        threshold_high_cyc: float = 0.60,
-        threshold_medium_cyc: float = 0.35,
-    ) -> None:
-        self._window = int(window_epochs)
-        # Backward-compat single threshold; used as LOW/UNKNOWN level.
-        self._threshold = float(threshold_cyc)
-        # Per-consistency-level thresholds.  HIGH is roughly 4× a clean
-        # noise-floor std (~0.15 cyc) — well outside any plausible
-        # bias-model error.  MEDIUM is ~5σ.  LOW stays at the historical
-        # 0.25 cyc since these SVs need cycling.
-        self._thresholds: dict[str, float] = {
-            CONS_HIGH: float(threshold_high_cyc),
-            CONS_MEDIUM: float(threshold_medium_cyc),
-            CONS_LOW: float(threshold_cyc),
-            CONS_UNKNOWN: float(threshold_cyc),
-        }
+    def __init__(self, k_short: int = 4) -> None:
         # Number of fix cycles to remember per SV for consistency
         # classification.  Too small → unstable label flapping; too
         # large → slow to recognise an SV that recovered after a real
         # slip.  4 picked as compromise.
         self._k_short = int(k_short)
-        self._min_samples = int(min_samples)
-        # Post-fix warmup: don't feed the rolling window for this
-        # many ingest calls after ``note_fix``.  The MW tracker's EMA
-        # (tau ≈ 60 epochs) takes ~30 epochs to settle to the
-        # post-fix mean even when the integer commitment is correct,
-        # because fixes happen at ``|frac| < 0.15`` rather than
-        # exactly zero.  Ingesting during that settling window
-        # produces correct-integer residuals that legitimately
-        # drift from 0.14 → 0 — indistinguishable from wrong-
-        # integer drift without context.  Warmup suppresses the
-        # ambiguity.  Day0423a showed ~270 drift events per host
-        # in 1h20m without warmup (3.4/min) — 90% false positives
-        # kicking marginal-frac fixes out of the set faster than
-        # they could re-acquire.
-        self._warmup = int(warmup_epochs)
-        # sv → deque of cycles.  Present ⇔ SV is being monitored
-        # (fixed, post-note_fix, pre-note_unfix).
-        self._hist: dict[str, deque[float]] = {}
-        # sv → count of ingest calls received since note_fix.  Used
-        # to skip the warmup window.  Reset on note_fix, cleared on
-        # note_unfix.
-        self._ingest_count: dict[str, int] = {}
         # sv → deque of last K_short n_wl values committed for this SV.
         # Persists across note_fix/note_unfix cycles so consistency
         # classification has memory.  Cleared only by explicit
@@ -172,19 +73,9 @@ class WlDriftMonitor:
     # ── Lifecycle ───────────────────────────────────────────────── #
 
     def note_fix(self, sv: str, n_wl: int | None = None) -> None:
-        """Start tracking ``sv`` — call when its WL integer is
-        committed.  Idempotent: re-notifying an already-tracked SV
-        clears its post-fix residual history and restarts the warmup
-        count (fresh window after re-fix), but the per-SV integer
-        history is preserved across cycles for consistency
-        classification.
-
-        Pass ``n_wl`` (the integer committed at this fix) to enable
-        consistency classification.  Without it, the SV stays at
-        UNKNOWN consistency and uses the default conservative
-        threshold."""
-        self._hist[sv] = deque(maxlen=self._window)
-        self._ingest_count[sv] = 0
+        """Record a WL integer commit for ``sv``.  Pass ``n_wl`` (the
+        integer committed at this fix) to feed consistency
+        classification.  Idempotent over no-op when ``n_wl`` is None."""
         if n_wl is not None:
             hist = self._int_history.setdefault(
                 sv, deque(maxlen=self._k_short)
@@ -192,71 +83,21 @@ class WlDriftMonitor:
             hist.append(int(n_wl))
 
     def note_unfix(self, sv: str) -> None:
-        """Stop tracking ``sv``'s post-fix residual window — call
-        when its MW state is reset, the SV is dropped, or the drift
-        monitor itself flagged it and the caller acted.
-
-        The per-SV integer history is **preserved** so re-fix sees the
-        previous integer commitments and can classify consistency.
-        Use ``forget_history(sv)`` after a confirmed real cycle slip
-        to wipe the history (so the SV starts fresh)."""
-        self._hist.pop(sv, None)
-        self._ingest_count.pop(sv, None)
+        """Lifecycle hook called on WL un-fix.  The per-SV integer
+        history is **preserved** so re-fix sees the previous integer
+        commitments and can classify consistency.  Use
+        ``forget_history(sv)`` after a confirmed real cycle slip to
+        wipe the history (so the SV starts fresh)."""
+        # No transient state to clear — kept for API stability while
+        # callers are migrated.
 
     def forget_history(self, sv: str) -> None:
         """Wipe the per-SV integer history.  Call only after a
         confirmed real cycle slip (LLI / GF jump / arc gap) so the
-        next fix is classified from scratch.  Routine wl_drift
-        demotions should NOT call this — the whole point is that
-        consistency tracking persists across re-fixes."""
+        next fix is classified from scratch.  Routine demotions should
+        NOT call this — the whole point is that consistency tracking
+        persists across re-fixes."""
         self._int_history.pop(sv, None)
-
-    # ── Observation intake ──────────────────────────────────────── #
-
-    def ingest(self, sv: str, residual_cyc: float) -> dict | None:
-        """Add one post-fix residual sample for ``sv``.
-
-        Returns a drift event dict when the rolling-mean magnitude
-        exceeds ``threshold_cyc`` over ≥ ``min_samples`` samples,
-        else ``None``.  The event carries:
-
-          - ``sv``: the offending SV id
-          - ``drift_cyc``: signed rolling mean (sign tells direction)
-          - ``threshold_cyc``: the configured trip threshold
-          - ``n_samples``: number of samples in the rolling window
-          - ``window_epochs``: configured window size
-
-        Untracked SVs (no ``note_fix``) return ``None`` silently.
-        """
-        h = self._hist.get(sv)
-        if h is None:
-            return None
-        # Warmup: count the call, but don't feed it to the window
-        # until the EMA has had time to settle past the fix-time
-        # fractional offset.
-        self._ingest_count[sv] = self._ingest_count.get(sv, 0) + 1
-        if self._ingest_count[sv] <= self._warmup:
-            return None
-        h.append(float(residual_cyc))
-        if len(h) < self._min_samples:
-            return None
-        mean = sum(h) / len(h)
-        # Adaptive threshold: HIGH-consistency SVs get a wide threshold
-        # (their residual bias is real signal-side, not a wrong-integer
-        # signature); LOW-consistency SVs stay at the strict threshold
-        # since they need cycling.
-        cons = self.consistency_level(sv)
-        threshold = self._thresholds[cons]
-        if abs(mean) <= threshold:
-            return None
-        return {
-            'sv': sv,
-            'drift_cyc': mean,
-            'threshold_cyc': threshold,
-            'consistency': cons,
-            'n_samples': len(h),
-            'window_epochs': self._window,
-        }
 
     # ── Consistency classification ─────────────────────────────── #
 
@@ -264,11 +105,6 @@ class WlDriftMonitor:
         """Per-SV WL integer consistency over the last K_short fix
         cycles.  Returns one of ``CONS_HIGH | CONS_MEDIUM | CONS_LOW |
         CONS_UNKNOWN``.
-
-        Bob's thought experiment: if a HIGH-consistency SV is forced
-        out of the fix set, it would on re-fix consistently choose the
-        same integer it had on eviction.  A LOW-consistency SV would
-        come back with a wildly different integer.
 
         Classification rule on the per-SV integer history deque:
           range = 0  → HIGH    (always the same integer)
@@ -286,12 +122,6 @@ class WlDriftMonitor:
             return CONS_MEDIUM
         return CONS_LOW
 
-    def threshold_for(self, sv: str) -> float:
-        """The wl_drift trip threshold currently applicable to ``sv``,
-        per its consistency level.  Returns LOW/UNKNOWN default for
-        SVs with no integer history."""
-        return self._thresholds[self.consistency_level(sv)]
-
     def integer_history(self, sv: str) -> list[int]:
         """Read-only snapshot of the last K_short n_wl values
         committed for ``sv``, oldest first.  Empty list if no
@@ -301,24 +131,8 @@ class WlDriftMonitor:
 
     # ── Diagnostics ─────────────────────────────────────────────── #
 
-    def n_tracking(self) -> int:
-        return len(self._hist)
-
-    def rolling_mean(self, sv: str) -> float | None:
-        """Current rolling mean for ``sv``, or ``None`` if untracked
-        or window not yet filled to ``min_samples``.  Exposed for
-        tests and for engine-level summary logging."""
-        h = self._hist.get(sv)
-        if h is None or len(h) < self._min_samples:
-            return None
-        return sum(h) / len(h)
-
     def summary(self) -> str:
         return (
-            f"wl_drift: tracking {len(self._hist)} SVs "
-            f"(window={self._window}ep, "
-            f"thresholds=H{self._thresholds[CONS_HIGH]:.2f}/"
-            f"M{self._thresholds[CONS_MEDIUM]:.2f}/"
-            f"L{self._thresholds[CONS_LOW]:.2f}cyc, "
-            f"k_short={self._k_short})"
+            f"wl_drift: tracking {len(self._int_history)} SVs "
+            f"(k_short={self._k_short})"
         )
