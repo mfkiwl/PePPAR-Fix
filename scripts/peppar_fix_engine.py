@@ -202,6 +202,29 @@ from peppar_fix.states import (
 log = logging.getLogger("peppar-fix")
 
 
+# Saved-position trust gate.  When loading state/receivers/<uid>.json
+# at startup, positions tagged with σ < this threshold are treated as
+# "trusted" and the live-LS-fix validation step is skipped (fast
+# warm-start path).  Above this, the loaded position is still useful
+# as a Phase-2 seed but gets re-validated against a fresh LS fix
+# (100 m separation gate) before Phase 2 starts.
+_TRUSTED_POSITION_SIGMA_M = 10.0
+
+# Phase-1 bootstrap save floor.  The Phase-1 CONVERGED gate accepts
+# σ up to --sigma (default 3 m) plus W2 horizontal disagreement up to
+# --bootstrap-nav2-horiz-m (default 5 m); it is therefore *not* a
+# claim of sub-decimeter quality.  If a Phase-1 σ value were written
+# verbatim into the state file, the next session's trust gate above
+# would skip validation on a position whose actual confidence is
+# meter-scale — fine until something physical changes between runs
+# (antenna reorientation, rewire).  We deliberately store Phase-1
+# saves *above* the trust threshold so the next session always
+# re-validates against a fresh LS fix.  Phase-2 steady-state saves
+# (gated by σ < 0.1 m) are written verbatim — those are the
+# legitimate fast-start path.
+_PHASE1_BOOTSTRAP_SAVE_FLOOR_M = _TRUSTED_POSITION_SIGMA_M + 1.0
+
+
 @dataclass
 class BootstrapResult:
     """Result from run_bootstrap — includes live objects for AntPosEstThread."""
@@ -6521,11 +6544,21 @@ def run(args):
             ape_sm.transition(AntPosEstState.CONVERGING,
                               f"bootstrap converged (σ={sigma_m:.1f}m), entering steady state")
 
-            # Save position
+            # Save position.  Inflated σ — see
+            # _PHASE1_BOOTSTRAP_SAVE_FLOOR_M above for why Phase-1
+            # bootstrap saves opt out of the trust-skip-validation
+            # fast-start path.
             uid = getattr(args, 'receiver_unique_id', None)
             if uid is not None:
-                save_position_to_receiver(uid, known_ecef, sigma_m, "ppp_bootstrap")
-                log.info("Position saved to receiver state")
+                stored_sigma = max(sigma_m, _PHASE1_BOOTSTRAP_SAVE_FLOOR_M)
+                save_position_to_receiver(
+                    uid, known_ecef, stored_sigma, "ppp_bootstrap")
+                log.info(
+                    "Position saved to receiver state "
+                    "(true σ=%.2fm, stored σ=%.2fm above trust "
+                    "threshold so next start re-validates against "
+                    "live LS fix)",
+                    sigma_m, stored_sigma)
 
         if stop_event.is_set():
             return 0
@@ -6535,9 +6568,13 @@ def run(args):
         # into 100+ km residuals without any warning.
         #
         # Skip validation for trusted positions: receiver state with
-        # sigma < 10m (PPP bootstrap or known_pos) and config known_pos.
-        # Only validate legacy file migrations and high-sigma positions.
-        skip_validation = (pos_sigma_m is not None and pos_sigma_m < 10.0)
+        # sigma < _TRUSTED_POSITION_SIGMA_M (Phase-2 steady-state save
+        # at σ<0.1 m, or known_pos at σ=0).  Phase-1 bootstrap saves
+        # are deliberately stored above this threshold (see
+        # _PHASE1_BOOTSTRAP_SAVE_FLOOR_M) so they fall through to the
+        # live-LS-fix validation step below.
+        skip_validation = (pos_sigma_m is not None
+                           and pos_sigma_m < _TRUSTED_POSITION_SIGMA_M)
         uid = getattr(args, 'receiver_unique_id', None)
         if skip_validation:
             log.info('Position from trusted source (σ=%.1fm) — skipping LS validation',
@@ -6590,8 +6627,15 @@ def run(args):
                     sigma_m = bootstrap_result.sigma_m
                     uid = getattr(args, 'receiver_unique_id', None)
                     if uid is not None:
-                        save_position_to_receiver(uid, known_ecef, sigma_m, "ppp_bootstrap")
-                        log.info("Position saved to receiver state (re-bootstrapped)")
+                        stored_sigma = max(
+                            sigma_m, _PHASE1_BOOTSTRAP_SAVE_FLOOR_M)
+                        save_position_to_receiver(
+                            uid, known_ecef, stored_sigma, "ppp_bootstrap")
+                        log.info(
+                            "Position saved to receiver state "
+                            "(re-bootstrapped; true σ=%.2fm, stored "
+                            "σ=%.2fm above trust threshold)",
+                            sigma_m, stored_sigma)
                 else:
                     log.info(f'  Position validated (within {separation_m:.0f}m of LS fix)')
                     ape_sm.transition(AntPosEstState.CONVERGING,
