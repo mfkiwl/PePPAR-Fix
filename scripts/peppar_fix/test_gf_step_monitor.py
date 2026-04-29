@@ -19,7 +19,7 @@ class GfStepMonitorBasicTest(unittest.TestCase):
     def test_no_event_below_min_cohort(self):
         """Single fixed SV: cohort too small, no events even on
         large step."""
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", gf_initial_m=1000.0)
         # Step of 19 cm — would trip if cohort ≥ 2.
         evs = m.update({"E07": 1000.19})
@@ -45,7 +45,7 @@ class GfStepMonitorBasicTest(unittest.TestCase):
         """When the caller passes both tracked and untracked SVs,
         only tracked SVs participate in the cohort."""
         m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2,
-                          min_cohort_size=2)
+                          min_cohort_size=2, warmup_epochs=0)
         # Track only E07, E12, E33.
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
@@ -63,7 +63,7 @@ class GfStepMonitorBasicTest(unittest.TestCase):
 
     def test_stable_cohort_no_events(self):
         """Three SVs with stable GF (no slip) produce no events."""
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         m.note_fix("E33", 3000.0)
@@ -74,7 +74,7 @@ class GfStepMonitorBasicTest(unittest.TestCase):
     def test_cohort_median_cancels_common_mode_iono(self):
         """5 cm/min iono drift across all SVs equally produces zero
         residual after cohort-median subtraction.  No trips."""
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         m.note_fix("E33", 3000.0)
@@ -93,7 +93,7 @@ class GfStepMonitorBasicTest(unittest.TestCase):
         """Even fast iono (sunrise TEC, 30 cm / min) cancels via
         cohort-median when applied uniformly.  No trips on common-
         mode regardless of magnitude."""
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         m.note_fix("E33", 3000.0)
@@ -117,7 +117,7 @@ class GfStepMonitorSlipDetectionTest(unittest.TestCase):
         """A clean 19 cm step on E07 (one-cycle L1 slip) trips after
         two consecutive over-threshold epochs.  Other cohort SVs
         stay clean."""
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         m.note_fix("E33", 3000.0)
@@ -150,7 +150,7 @@ class GfStepMonitorSlipDetectionTest(unittest.TestCase):
         epochs — e.g., a tracker drifting at 5 cm/epoch while the
         rest of the cohort is stable — trips after ``consecutive``
         epochs."""
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         m.note_fix("E33", 3000.0)
@@ -172,7 +172,7 @@ class GfStepMonitorSlipDetectionTest(unittest.TestCase):
         """A 5 cm / minute iono ramp on a single SV (other SVs
         stable) produces ~0.83 mm Δgf per epoch — well below the
         4 cm threshold.  No trip across multiple minutes."""
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         m.note_fix("E33", 3000.0)
@@ -188,7 +188,7 @@ class GfStepMonitorSlipDetectionTest(unittest.TestCase):
         """Common-mode iono ramp + a single-SV slip: cohort-median
         cancels the iono; the slipped SV's residual remains and
         trips."""
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         m.note_fix("E33", 3000.0)
@@ -216,7 +216,7 @@ class GfStepMonitorLifecycleTest(unittest.TestCase):
 
     def test_unfix_clears_state(self):
         """note_unfix wipes prev_gf, streak, and tripped flag."""
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         # Drive a trip.
@@ -240,7 +240,7 @@ class GfStepMonitorLifecycleTest(unittest.TestCase):
         """Below-threshold residual after partial streak resets the
         counter; a subsequent over-threshold sequence has to
         accumulate from scratch."""
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=3)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=3, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         m.note_fix("E33", 3000.0)
@@ -261,7 +261,7 @@ class GfStepMonitorLifecycleTest(unittest.TestCase):
         Uses a 3-SV cohort so the slipping SV's Δgf doesn't dominate
         the median (with only 2 SVs the median is the mean and the
         residual is half the slip — just at threshold)."""
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         m.note_fix("E33", 3000.0)
@@ -283,7 +283,7 @@ class GfStepMonitorEdgeCaseTest(unittest.TestCase):
         contribute to that epoch's cohort; on the next update it
         re-contributes against its held prev_gf."""
         m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2,
-                          min_cohort_size=2)
+                          min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         m.note_fix("E33", 3000.0)
@@ -302,7 +302,7 @@ class GfStepMonitorEdgeCaseTest(unittest.TestCase):
         cohort median of one SV's Δgf is itself, residual is zero,
         no trip."""
         m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2,
-                          min_cohort_size=1)
+                          min_cohort_size=1, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         for _ in range(5):
             evs = m.update({"E07": 1000.0 + 1.0})  # huge Δgf
@@ -313,7 +313,7 @@ class GfStepMonitorEdgeCaseTest(unittest.TestCase):
         in this cohort still trips (residual = (a − b) / 2 from
         the slipped SV's perspective, which exceeds threshold for
         a clean λ_L1 step)."""
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         # Stable epoch.
@@ -333,9 +333,50 @@ class GfStepMonitorEdgeCaseTest(unittest.TestCase):
         self.assertGreaterEqual(len(evs_total), 1)
 
 
+class GfStepMonitorPostI140938DefaultsTest(unittest.TestCase):
+    """Verify the post-I-140938 default changes."""
+
+    def test_min_cohort_size_default_is_4(self):
+        """Bumped from 2 → 4 to prevent the n=2 cohort pathology."""
+        m = GfStepMonitor()
+        self.assertEqual(m._min_cohort, 4)
+
+    def test_warmup_epochs_default_is_30(self):
+        m = GfStepMonitor()
+        self.assertEqual(m._warmup, 30)
+
+    def test_warming_up_sv_excluded_from_cohort(self):
+        """A freshly-fixed SV's first warmup epochs do NOT pollute
+        the cohort median."""
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2,
+                          min_cohort_size=2, warmup_epochs=10)
+        m.note_fix("E07", 1000.0)
+        m.note_fix("E12", 2000.0)
+        # Past warmup with stable Δgf.
+        for i in range(15):
+            gf07 = 1000.0 + (i + 1) * 0.001
+            gf12 = 2000.0 + (i + 1) * 0.001
+            m.update({"E07": gf07, "E12": gf12})
+        # Add E21 fresh with a big Δgf swing that would pollute.
+        m.note_fix("E21", 3000.0)
+        e07_e12_trips: list[dict] = []
+        gf07, gf12 = 1000.015, 2000.015
+        gf21 = 3000.0
+        for _ in range(3):
+            gf07 += 0.001
+            gf12 += 0.001
+            gf21 += 0.10  # 10 cm/epoch on the warming-up SV
+            evs = m.update({"E07": gf07, "E12": gf12, "E21": gf21})
+            for ev in evs:
+                if ev['sv'] in ("E07", "E12"):
+                    e07_e12_trips.append(ev)
+        # E07 + E12 stay clean — E21 didn't pollute the cohort.
+        self.assertEqual(e07_e12_trips, [])
+
+
 class GfStepMonitorSummaryTest(unittest.TestCase):
     def test_summary_text_includes_threshold_and_count(self):
-        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2)
+        m = GfStepMonitor(threshold_m=0.04, consecutive_epochs=2, min_cohort_size=2, warmup_epochs=0)
         m.note_fix("E07", 1000.0)
         m.note_fix("E12", 2000.0)
         s = m.summary()

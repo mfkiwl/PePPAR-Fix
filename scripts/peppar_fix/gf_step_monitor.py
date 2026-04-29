@@ -99,11 +99,24 @@ _DEFAULT_THRESHOLD_M = 0.04
 # multipath bursts) without losing real sustained-offset slips.
 _DEFAULT_CONSECUTIVE = 2
 
-# Minimum cohort size for cohort-median to be meaningful.  Below
-# this, the detector skips evaluation entirely (returns no events).
-# Default 2 — with two SVs the median is the average of the two,
-# which still cancels common-mode iono perfectly.
-_DEFAULT_MIN_COHORT = 2
+# Minimum cohort size for cohort-median to be meaningful.  Bumped
+# from 2 → 4 per I-140938-main (2026-04-29 morning).  At n=2 the
+# median IS the mean, so any per-SV disagreement makes BOTH SVs
+# look like outliers — the same pathology that lost ANCHORED
+# E23 + E33 simultaneously on clkPoC3 09:00:09 at the NL layer
+# applies symmetrically here at the WL layer.
+_DEFAULT_MIN_COHORT = 4
+
+# Per-SV warmup epochs before the SV's Δgf contributes to the
+# cohort median.  Per I-140938-main: a freshly admitted SV's first
+# few Δgf samples are dominated by the float-ambiguity convergence
+# transient, not by the per-epoch iono drift the cohort cancels.
+# Including them in the median pollutes the reference and can
+# carry well-behaved fixed SVs out with them.  SVs in warmup are
+# still EVALUATED for trips themselves — they just don't
+# contribute to the cohort median.  Default matches WlDriftMonitor
+# convention.
+_DEFAULT_WARMUP = 30
 
 
 class GfStepMonitor:
@@ -117,13 +130,20 @@ class GfStepMonitor:
         threshold_m: float = _DEFAULT_THRESHOLD_M,
         consecutive_epochs: int = _DEFAULT_CONSECUTIVE,
         min_cohort_size: int = _DEFAULT_MIN_COHORT,
+        warmup_epochs: int = _DEFAULT_WARMUP,
     ) -> None:
         self._threshold = float(threshold_m)
         self._consecutive = int(consecutive_epochs)
         self._min_cohort = int(min_cohort_size)
+        self._warmup = int(warmup_epochs)
         # sv → previous-epoch GF observation (m).  Used to compute
         # Δgf on the next epoch.
         self._prev_gf: dict[str, float] = {}
+        # sv → epochs since note_fix (excluding the first which
+        # only seeds prev_gf).  SVs with epochs_since_fix < warmup
+        # do not contribute to the cohort median (but are still
+        # evaluated for trips themselves).
+        self._epochs_since_fix: dict[str, int] = {}
         # sv → consecutive-over-threshold counter.  Resets to zero
         # any epoch the SV's residual is at or below threshold.
         self._streak: dict[str, int] = {}
@@ -139,11 +159,12 @@ class GfStepMonitor:
         committed.  Stores the initial GF observation as the
         previous-epoch reference for the first Δgf.
 
-        Idempotent: re-notifying clears prior state and starts
-        fresh.
+        Idempotent: re-notifying clears prior state, restarts the
+        warmup count, and re-seeds the GF reference.
         """
         self._prev_gf[sv] = float(gf_initial_m)
         self._streak[sv] = 0
+        self._epochs_since_fix[sv] = 0
         self._tripped.discard(sv)
 
     def note_unfix(self, sv: str) -> None:
@@ -152,6 +173,7 @@ class GfStepMonitor:
         acted on the trip event."""
         self._prev_gf.pop(sv, None)
         self._streak.pop(sv, None)
+        self._epochs_since_fix.pop(sv, None)
         self._tripped.discard(sv)
 
     # ── Per-epoch update ──────────────────────────────────────── #
@@ -194,8 +216,19 @@ class GfStepMonitor:
             prev = self._prev_gf[sv]
             deltas[sv] = float(gf_cur) - prev
             self._prev_gf[sv] = float(gf_cur)
+            self._epochs_since_fix[sv] = (
+                self._epochs_since_fix.get(sv, 0) + 1
+            )
 
-        if len(deltas) < self._min_cohort:
+        # Cohort = SVs that have completed warmup.  Warming-up SVs
+        # are still EVALUATED (so they can trip on their own bad
+        # Δgf) but don't pollute the median reference.
+        cohort_deltas = {
+            sv: d for sv, d in deltas.items()
+            if self._epochs_since_fix.get(sv, 0) > self._warmup
+        }
+
+        if len(cohort_deltas) < self._min_cohort:
             # Cohort too small — common-mode estimation isn't
             # meaningful.  Don't update streaks; reset them so we
             # don't trip on the next sufficient cohort with a stale
@@ -205,8 +238,9 @@ class GfStepMonitor:
             return []
 
         # Cohort-median Δgf (common-mode iono estimate).
-        cohort_median = median(deltas.values())
-        cohort_size = len(deltas)
+        cohort_median = median(cohort_deltas.values())
+        cohort_size = len(cohort_deltas)
+        cohort_size_total = len(deltas)
 
         events: list[dict] = []
         for sv, delta in deltas.items():
@@ -236,6 +270,7 @@ class GfStepMonitor:
                     'threshold_m': self._threshold,
                     'consecutive_epochs': self._streak[sv],
                     'cohort_size': cohort_size,
+                    'cohort_size_total': cohort_size_total,
                 })
 
         return events

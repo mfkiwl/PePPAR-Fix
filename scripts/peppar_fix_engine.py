@@ -2815,18 +2815,27 @@ class AntPosEstThread(threading.Thread):
             for lab, r in zip(labels or (), resid if resid is not None else ()):
                 if len(lab) >= 2 and lab[1] == 'phi' and lab[0] in nl_fixed_now:
                     phi_resid_by_sv[lab[0]] = float(r)
-            if_step_events = self._if_step.update(phi_resid_by_sv)
+            # ANCHORED protection per I-140938-main: SVs that have
+            # earned ANCHORED state (survived Δaz=15° validation) get
+            # a 2× threshold, configurable via IfStepMonitor's
+            # anchored_threshold_mult.  Caller (us) supplies the set
+            # so the monitor stays decoupled from the SV state tracker.
+            anchored_svs = set(self._sv_state.svs_in(SvAmbState.ANCHORED))
+            if_step_events = self._if_step.update(
+                phi_resid_by_sv, anchored_svs=anchored_svs)
             for ev in if_step_events:
                 sv = ev['sv']
                 elev = self._sv_state.get(sv).last_elev_deg
                 log.warning(
                     "[IF_STEP] %s residual=%+.4fm cohort_residual=%+.4fm "
-                    "cohort_median=%+.4fm (n_cohort=%d, %d-epoch "
-                    "sustained, thr=±%.3fm): NL unfix + ambiguity "
+                    "cohort_median=%+.4fm (n_cohort=%d/%d, %d-epoch "
+                    "sustained, thr=±%.3fm%s): NL unfix + ambiguity "
                     "inflate, demoting to WAITING, elev=%s",
                     sv, ev['residual_m'], ev['cohort_residual_m'],
                     ev['cohort_median_m'], ev['cohort_size'],
+                    ev.get('cohort_size_total', ev['cohort_size']),
                     ev['consecutive_epochs'], ev['threshold_m'],
+                    " ANCHORED-2x" if ev.get('anchored', False) else "",
                     f"{elev:.1f}°" if elev is not None else "?",
                 )
                 # Standard NL eviction action — same as
