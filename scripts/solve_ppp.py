@@ -313,7 +313,7 @@ class PPPFilter:
         self.initialized = False
 
     def initialize(self, pos_ecef, clock_m, isb_gal=0.0, isb_bds=0.0,
-                   systems=None):
+                   systems=None, pos_sigma_m=10.0, ztd_sigma_m=0.2):
         """Initialize filter state.
 
         systems: optional iterable of constellations that will feed
@@ -325,6 +325,22 @@ class PPPFilter:
         settle anywhere along the rank-1 ridge (filter reports tight σ
         on positions tens to hundreds of metres off the truth — see
         2026-04-17 overnight investigation).
+
+        pos_sigma_m: 1-σ on the initial position estimate (each ECEF
+        axis).  Default 10 m is appropriate for an SPP-grade seed (~1-5 m
+        hAcc).  Engine callers should pass NAV2.hAcc when seeding from
+        the receiver's secondary nav engine — see I-024532-charlie.  Old
+        default (100 m) was wide enough to absorb systematic SSR phase-
+        bias residuals into position rather than into ambiguities, which
+        is the wrong sink — see docs/weak-antenna-doom-loop-2026-04-29.md.
+
+        ztd_sigma_m: 1-σ on the **residual** wet ZTD (on top of the
+        Saastamoinen+GMF bulk).  Default 0.2 m matches the ~200 mm
+        physical envelope of residual wet delay at sea level.  Old
+        default (0.5 m) was wide enough to absorb systematic SSR phase-
+        bias residuals (GPS L5Q, BDS B2a-I in CNES) into ZTD, producing
+        the ZTD doom-loop / ztd_impossible / ztd_cycling integrity-trip
+        cascade observed on TimeHat 2026-04-29 overnight (36/73 trips).
         """
         self.x = np.zeros(N_BASE)
         self.x[:3] = pos_ecef
@@ -332,12 +348,14 @@ class PPPFilter:
         self.x[IDX_ISB_GAL] = isb_gal
         self.x[IDX_ISB_BDS] = isb_bds
         self.x[IDX_ZTD] = 0.0  # residual ZTD (a priori model handles bulk)
+        self._ztd_sigma_m = float(ztd_sigma_m)
+        self._pos_sigma_m_init = float(pos_sigma_m)
         self.P = np.diag([
-            100.0**2, 100.0**2, 100.0**2,
+            pos_sigma_m**2, pos_sigma_m**2, pos_sigma_m**2,
             1e8,
             1e6,
             1e6,
-            0.5**2,  # ZTD residual: 0.5m initial sigma
+            self._ztd_sigma_m**2,  # ZTD residual prior
         ])
         self._ztd_window_elapsed = 0.0  # PWC-60 segment timer (s)
         # Pin ISBs whose reference system isn't present.  Priority order:
@@ -407,10 +425,17 @@ class PPPFilter:
         if IDX_ISB_BDS not in pinned:
             Q[IDX_ISB_BDS, IDX_ISB_BDS] = 1.0 * dt
         # ZTD model.  Two regimes:
-        # - default (RW): Q = (5e-5)² · dt — ~5 cm/hour RMS, IGS standard.
+        # - default (RW): Q sized for ~1 cm² / min PSD — i.e. the random
+        #   walk admits ~7.7 cm of σ growth per hour, which comfortably
+        #   covers real-weather wet-ZTD drift (a fast frontal passage
+        #   moves ZTD ~30 mm in 15 min ≈ 2 mm/min, well inside the
+        #   budget) without standing-baseline-loose.  Tightening this
+        #   would cause the filter to push back against legitimate
+        #   weather; looser would let it absorb systematic δ_PB.  Per
+        #   I-024532-charlie / I-133648-main (2026-04-30).
         # - PWC-N (PRIDE-style piece-wise constant): Q ≈ 0 within an
         #   N-second segment; at segment boundary, inflate P[IDX_ZTD]
-        #   back to seed sigma (0.5²) so a fresh estimate forms.
+        #   back to ``self._ztd_sigma_m**2`` so a fresh estimate forms.
         #   Enable by setting class attr ZTD_PWC_WINDOW_S > 0
         #   (e.g. 3600 for PRIDE's PWC-60).
         ztd_pwc_window_s = getattr(self, "ZTD_PWC_WINDOW_S", 0.0)
@@ -418,13 +443,14 @@ class PPPFilter:
             elapsed = getattr(self, "_ztd_window_elapsed", 0.0) + dt
             if elapsed >= ztd_pwc_window_s:
                 # Segment boundary — let ZTD re-form by inflating P.
-                self.P[IDX_ZTD, IDX_ZTD] = 0.5**2
+                self.P[IDX_ZTD, IDX_ZTD] = self._ztd_sigma_m**2
                 elapsed = 0.0
             else:
                 Q[IDX_ZTD, IDX_ZTD] = (1e-7)**2 * dt  # ~negligible
             self._ztd_window_elapsed = elapsed
         else:
-            Q[IDX_ZTD, IDX_ZTD] = (5e-5)**2 * dt  # ~5 cm/hour RMS (IGS standard)
+            # 1 cm² / min PSD = 1.67e-6 m²/s → (1.29e-3 m/√s)² · dt.
+            Q[IDX_ZTD, IDX_ZTD] = (1.29e-3)**2 * dt
         self.P = self.P + Q
 
     def _q_clk(self):
