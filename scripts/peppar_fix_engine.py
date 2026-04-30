@@ -1135,16 +1135,49 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
                 )
             continue
 
-        # Initialize filter on first epoch with enough satellites
+        # Initialize filter on first epoch with enough satellites.
+        #
+        # Seed-source priority (I-024532-charlie / I-133648-main):
+        #   1. args.seed_pos — explicit operator override (kept).
+        #   2. NAV2 fixType=3 + hAcc < 5 m — receiver's secondary nav
+        #      engine; independent of our PPP filter, ~1 m hAcc on
+        #      clean sky.  Initial P[0:3] is set from NAV2.hAcc so
+        #      the filter is stiff-but-not-anchored from epoch 0
+        #      and systematic SSR phase-bias residuals fall into
+        #      ambiguities (correctly) instead of into position.
+        #   3. LS init via broadcast ephemeris — fallback for cold
+        #      starts where NAV2 hasn't converged yet, and for the
+        #      regression harness running file-based without a live
+        #      F9T.  Initial P[0:3] uses the legacy 100 m σ via the
+        #      pos_sigma_m=100.0 override, since LS init is
+        #      km-level on its first epoch.
         if not filt_initialized:
+            init_pos_sigma_m = None
+            seed_source = None
             if seed_ecef is not None:
                 init_pos = seed_ecef
                 init_clk = 0.0
-            else:
-                # Use broadcast-only for LS init (same rationale as position
-                # validation: SSR orbit corrections poison the absolute LS
-                # solver).  Broadcast-only gives ~5m accuracy which is
-                # plenty for PPPFilter seeding.
+                seed_source = "args.seed_pos"
+                # Operator-supplied seed: caller knows the position
+                # quality.  Default 10 m σ is a reasonable assumption.
+                init_pos_sigma_m = 10.0
+            elif nav2_store is not None:
+                opinion = nav2_store.get_opinion(max_age_s=10.0)
+                if (opinion is not None
+                        and opinion.get('fix_type') == 3
+                        and opinion.get('h_acc_m') is not None
+                        and opinion['h_acc_m'] < 5.0):
+                    init_pos = np.asarray(opinion['ecef'], dtype=float)
+                    init_clk = 0.0
+                    init_pos_sigma_m = float(opinion['h_acc_m'])
+                    seed_source = (f"NAV2 (fix=3, hAcc={init_pos_sigma_m:.2f}m, "
+                                   f"nSV={opinion.get('num_sv', '?')})")
+
+            if seed_source is None:
+                # Fallback: LS init via broadcast ephemeris.  SSR
+                # orbit corrections poison the absolute LS solver, so
+                # broadcast-only.  ~5 m accuracy, plenty for seeding
+                # PPPFilter when NAV2 isn't ready.
                 _beph = corrections.beph
                 x_ls, ok, n_sv = ls_init(observations, _beph, gps_time,
                                           clk_file=None)
@@ -1153,14 +1186,22 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
                     continue
                 init_pos = x_ls[:3]
                 init_clk = x_ls[3]
-                log.info(f"LS init: {n_sv} SVs, pos error ~km-level")
+                seed_source = f"LS init (n_sv={n_sv}, fallback)"
+                # LS init is km-level on its first epoch; the legacy
+                # 100 m default kept here so behaviour matches the
+                # pre-NAV2-seed regression cases.  Once the engine
+                # converges past 100 m via observations, the looser
+                # initial P doesn't matter.
+                init_pos_sigma_m = 100.0
 
             systems_set = (set(args.systems.split(',')) if args.systems
                            else None)
-            filt.initialize(init_pos, init_clk, systems=systems_set)
+            filt.initialize(init_pos, init_clk, systems=systems_set,
+                            pos_sigma_m=init_pos_sigma_m)
             filt_initialized = True
             prev_t = gps_time
-            log.info("PPPFilter initialized, starting convergence")
+            log.info("PPPFilter initialized via %s, σ_pos=%.1fm",
+                     seed_source, init_pos_sigma_m)
             continue
 
         # EKF predict
