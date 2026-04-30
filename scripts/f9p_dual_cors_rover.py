@@ -141,28 +141,37 @@ def configure_rover(ser: serial.Serial) -> None:
 def ntrip_to_usb_thread(
     label: str,
     stream: NtripStream,
-    ser: serial.Serial,
+    targets: list[tuple[str, serial.Serial, dict]],
     stop: threading.Event,
-    stats: dict,
 ) -> None:
-    """Pull RTCM frames from one NTRIP mountpoint; write each frame
-    verbatim to the F9P's USB.  We use raw_frames() (which yields
-    complete RTCM messages) rather than streaming raw socket bytes
-    — this guarantees we never send a half-message and lets us tally
-    per-message-type counts for diagnostics."""
-    log.info("%s: NTRIP→USB thread starting", label)
-    msg_counts: Counter = stats["msg_counts"]
+    """Pull RTCM frames from one NTRIP mountpoint; broadcast each
+    frame verbatim to one or more F9P USB ports.  We use raw_frames()
+    (which yields complete RTCM messages) rather than streaming raw
+    socket bytes — this guarantees we never send a half-message and
+    lets us tally per-message-type counts for diagnostics.
+
+    Each target is a (sub_label, serial.Serial, stats_dict) triple.
+    Per-target byte / msg counts are tallied independently in case
+    one USB write fails.  The Leica casters at this lab enforce a
+    one-data-stream-per-source-IP limit, so the broadcast pattern
+    (one NTRIP, two F9Ps) is how we feed both rovers from a single
+    caster simultaneously.
+    """
+    log.info("%s: NTRIP→USB thread starting (%d targets)",
+             label, len(targets))
     try:
         for msg_type, frame in stream.raw_frames():
             if stop.is_set():
                 break
-            try:
-                ser.write(frame)
-            except serial.SerialException as e:
-                log.warning("%s: USB write error: %s", label, e)
-                continue
-            stats["bytes"] += len(frame)
-            msg_counts[msg_type] += 1
+            for sub_label, ser, st in targets:
+                try:
+                    ser.write(frame)
+                except serial.SerialException as e:
+                    log.warning("%s→%s: USB write error: %s",
+                                label, sub_label, e)
+                    continue
+                st["bytes"] += len(frame)
+                st["msg_counts"][msg_type] += 1
     except Exception as e:
         log.error("%s: NTRIP thread crashed: %s", label, e)
     finally:
@@ -349,10 +358,18 @@ def main() -> int:
     ap.add_argument("--r1-port-tcp", type=int, required=True,
                     help="rover 1 caster TCP port")
     ap.add_argument("--r2-port", required=True, help="rover 2 serial port")
-    ap.add_argument("--r2-mount", required=True, help="rover 2 NTRIP mountpoint")
-    ap.add_argument("--r2-caster", required=True, help="rover 2 caster host")
-    ap.add_argument("--r2-port-tcp", type=int, required=True,
-                    help="rover 2 caster TCP port")
+    ap.add_argument("--r2-mount", help="rover 2 NTRIP mountpoint "
+                    "(omit for --shared mode)")
+    ap.add_argument("--r2-caster", help="rover 2 caster host "
+                    "(omit for --shared mode)")
+    ap.add_argument("--r2-port-tcp", type=int,
+                    help="rover 2 caster TCP port (omit for --shared mode)")
+    ap.add_argument("--shared", action="store_true",
+                    help="open ONE NTRIP stream (using r1 caster/mount) "
+                    "and broadcast to both F9P USB ports.  Use this when "
+                    "the caster enforces a per-source-IP session limit "
+                    "that prevents two simultaneous mountpoint streams "
+                    "(observed on the lab's Leica Spider 7.10.1.168).")
     ap.add_argument("--user", default=os.environ.get("NTRIP_USER"),
                     help="NTRIP user (or env NTRIP_USER)")
     ap.add_argument("--password", default=os.environ.get("NTRIP_PASS"),
@@ -377,6 +394,13 @@ def main() -> int:
                   "or set NTRIP_USER/NTRIP_PASS)")
         return 2
 
+    if not args.shared and (
+            args.r2_mount is None or args.r2_caster is None
+            or args.r2_port_tcp is None):
+        log.error("dual-mount mode requires --r2-mount, --r2-caster, "
+                  "and --r2-port-tcp (or pass --shared)")
+        return 2
+
     # Open both serial ports.
     log.info("Opening rover 1 %s @ %d", args.r1_port, args.baud)
     r1_ser = serial.Serial(args.r1_port, args.baud, timeout=0.1)
@@ -397,11 +421,8 @@ def main() -> int:
 
     # Build NTRIP streams (no auto-connect; the thread will connect).
     tls1 = True if args.tls else (args.r1_port_tcp == 443)
-    tls2 = True if args.tls else (args.r2_port_tcp == 443)
     s1 = NtripStream(args.r1_caster, args.r1_port_tcp, args.r1_mount,
                      user=args.user, password=args.password, tls=tls1)
-    s2 = NtripStream(args.r2_caster, args.r2_port_tcp, args.r2_mount,
-                     user=args.user, password=args.password, tls=tls2)
 
     def _new_stats() -> dict:
         return {
@@ -419,20 +440,49 @@ def main() -> int:
     r2_stats = _new_stats()
 
     stop = threading.Event()
-    threads = [
-        threading.Thread(target=ntrip_to_usb_thread,
-                         args=(f"R1 [{args.r1_mount}]", s1, r1_ser, stop, r1_stats),
-                         daemon=True, name="ntrip-r1"),
-        threading.Thread(target=ntrip_to_usb_thread,
-                         args=(f"R2 [{args.r2_mount}]", s2, r2_ser, stop, r2_stats),
-                         daemon=True, name="ntrip-r2"),
-        threading.Thread(target=monitor_thread,
-                         args=(f"R1 [{args.r1_mount}]", r1_ser, stop, r1_stats),
-                         daemon=True, name="mon-r1"),
-        threading.Thread(target=monitor_thread,
-                         args=(f"R2 [{args.r2_mount}]", r2_ser, stop, r2_stats),
-                         daemon=True, name="mon-r2"),
-    ]
+
+    if args.shared:
+        # One NTRIP, broadcast to both F9Ps.
+        r1_label = f"R1 [{args.r1_mount}]"
+        r2_label = f"R2 [{args.r1_mount}]"  # same mount, different rover
+        threads = [
+            threading.Thread(
+                target=ntrip_to_usb_thread,
+                args=(args.r1_mount, s1,
+                      [(r1_label, r1_ser, r1_stats),
+                       (r2_label, r2_ser, r2_stats)],
+                      stop),
+                daemon=True, name="ntrip-shared"),
+            threading.Thread(target=monitor_thread,
+                             args=(r1_label, r1_ser, stop, r1_stats),
+                             daemon=True, name="mon-r1"),
+            threading.Thread(target=monitor_thread,
+                             args=(r2_label, r2_ser, stop, r2_stats),
+                             daemon=True, name="mon-r2"),
+        ]
+        s2 = None
+    else:
+        tls2 = True if args.tls else (args.r2_port_tcp == 443)
+        s2 = NtripStream(args.r2_caster, args.r2_port_tcp, args.r2_mount,
+                         user=args.user, password=args.password, tls=tls2)
+        r1_label = f"R1 [{args.r1_mount}]"
+        r2_label = f"R2 [{args.r2_mount}]"
+        threads = [
+            threading.Thread(target=ntrip_to_usb_thread,
+                             args=(args.r1_mount, s1,
+                                   [(r1_label, r1_ser, r1_stats)], stop),
+                             daemon=True, name="ntrip-r1"),
+            threading.Thread(target=ntrip_to_usb_thread,
+                             args=(args.r2_mount, s2,
+                                   [(r2_label, r2_ser, r2_stats)], stop),
+                             daemon=True, name="ntrip-r2"),
+            threading.Thread(target=monitor_thread,
+                             args=(r1_label, r1_ser, stop, r1_stats),
+                             daemon=True, name="mon-r1"),
+            threading.Thread(target=monitor_thread,
+                             args=(r2_label, r2_ser, stop, r2_stats),
+                             daemon=True, name="mon-r2"),
+        ]
     for t in threads:
         t.start()
 
@@ -470,18 +520,20 @@ def main() -> int:
             s1.disconnect()
         except Exception:
             pass
-        try:
-            s2.disconnect()
-        except Exception:
-            pass
+        if s2 is not None:
+            try:
+                s2.disconnect()
+            except Exception:
+                pass
         for t in threads:
             t.join(timeout=2.0)
         r1_ser.close()
         r2_ser.close()
 
     t_run = time.monotonic() - r1_stats["t_start"]
+    r2_mount_label = args.r1_mount if args.shared else args.r2_mount
     s1_summary = summarize_one(f"R1 [{args.r1_mount}]", r1_stats, t_run)
-    s2_summary = summarize_one(f"R2 [{args.r2_mount}]", r2_stats, t_run)
+    s2_summary = summarize_one(f"R2 [{r2_mount_label}]", r2_stats, t_run)
     summarize_diff(s1_summary, s2_summary)
     return 0
 
