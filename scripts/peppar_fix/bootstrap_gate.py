@@ -100,14 +100,15 @@ def residuals_consistent(
     return details['ok'], details
 
 
-# ── W2: NAV2 horizontal cross-check ────────────────────────────────── #
+# ── W2: NAV2 horizontal + vertical cross-check ────────────────────── #
 
 def nav2_agrees(
     pos_ecef: np.ndarray,
     nav2_opinion: dict | None,
     horiz_m: float = 5.0,
+    vert_m: float = 10.0,
 ) -> tuple[bool, dict]:
-    """Does NAV2's independent fix agree horizontally?
+    """Does NAV2's independent fix agree both horizontally and vertically?
 
     Returns (ok, details).  ok=True also when nav2_opinion is None (no
     opinion to compare against — don't block convergence on that).
@@ -115,11 +116,21 @@ def nav2_agrees(
     Projects the ECEF displacement onto the local tangent plane so
     "horizontal" is the component perpendicular to up at the filter's
     position.  Same method as the steady-state NAV2 watchdog.
+
+    The vertical check (vert_m default 10 m, ~2× horiz to match the
+    geometry: vertical PPP/SPP error is typically 2-3× horizontal due
+    to vDOP) catches the failure mode where Phase-1 LS-init seeds the
+    altitude axis hundreds-of-metres off truth and observations
+    converge horizontal cleanly while leaving altitude wildly wrong.
+    Empirical case: cold_boot_smoke run-1 2026-04-30 saw nav2_h=3.0 m
+    pass while actual altitude was ~2 km off (ZTD residual went to
+    -110 m absorbing the bias).  Set vert_m=0 to disable.
     """
     details = {
         'available': False,
         'disp_h_m': 0.0, 'disp_v_m': 0.0,
         'threshold_m': horiz_m,
+        'vert_threshold_m': vert_m,
         'ok': True, 'reason': '',
     }
     if nav2_opinion is None:
@@ -133,14 +144,20 @@ def nav2_agrees(
     vertical = float(np.dot(diff, up_hat))
     horiz_vec = diff - vertical * up_hat
     disp_h = float(np.linalg.norm(horiz_vec))
+    disp_v = abs(vertical)
 
     details['disp_h_m'] = disp_h
-    details['disp_v_m'] = abs(vertical)
+    details['disp_v_m'] = disp_v
 
     if disp_h >= horiz_m:
         details['ok'] = False
         details['reason'] = (
             f"horiz disp {disp_h:.1f}m ≥ {horiz_m:.1f}m vs NAV2"
+        )
+    elif vert_m > 0 and disp_v >= vert_m:
+        details['ok'] = False
+        details['reason'] = (
+            f"vert disp {disp_v:.1f}m ≥ {vert_m:.1f}m vs NAV2"
         )
     return details['ok'], details
 

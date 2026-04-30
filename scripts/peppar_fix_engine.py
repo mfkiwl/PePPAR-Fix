@@ -1091,6 +1091,11 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
     n_epochs = 0
     n_empty = 0
     converged_at = None
+    # Tracks the wall time at which we first saw a pre-init epoch
+    # without a fresh NAV2 opinion.  Used to bound the
+    # nav2-seed-timeout-s wait window: while elapsed-since-this <
+    # timeout, we keep waiting (skip LS-init) so NAV2 can be the seed.
+    nav2_wait_started: float | None = None
     # Set on the init epoch by the seed-source dispatch below.  Reads
     # by the convergence-gate logic distinguish NAV2-seeded fast-exit
     # (no 30-epoch wait, W2 redundant) from LS-init full ceremony
@@ -1179,8 +1184,39 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
                     init_pos_sigma_m = float(opinion['h_acc_m'])
                     seed_source = (f"NAV2 (fix=3, hAcc={init_pos_sigma_m:.2f}m, "
                                    f"nSV={opinion.get('num_sv', '?')})")
+                else:
+                    # NAV2 not ready yet.  Wait up to
+                    # --nav2-seed-timeout-s before falling back to
+                    # LS-init.  Per Bob's directive 2026-04-30 +
+                    # cold_boot_smoke run-1 finding (LS-init Phase-1
+                    # converged at horiz-good + 2 km altitude error).
+                    timeout_s = float(getattr(
+                        args, 'nav2_seed_timeout_s', 30.0))
+                    if timeout_s > 0:
+                        if nav2_wait_started is None:
+                            nav2_wait_started = time.time()
+                            _fix = (opinion.get('fix_type')
+                                    if opinion else None)
+                            _hacc = (opinion.get('h_acc_m')
+                                     if opinion else None)
+                            log.info(
+                                "NAV2 not ready (fix_type=%s, "
+                                "h_acc=%s); waiting up to %.0fs "
+                                "before LS-init fallback",
+                                _fix, _hacc, timeout_s)
+                        elapsed = time.time() - nav2_wait_started
+                        if elapsed < timeout_s:
+                            # Keep waiting; skip this epoch's init.
+                            # Drop into the LS-init block below ONLY
+                            # if timeout has expired.
+                            continue
 
             if seed_source is None:
+                if nav2_wait_started is not None:
+                    log.warning(
+                        "NAV2 wait timed out after %.1fs; falling "
+                        "back to LS-init",
+                        time.time() - nav2_wait_started)
                 # Fallback: LS init via broadcast ephemeris.  SSR
                 # orbit corrections poison the absolute LS solver, so
                 # broadcast-only.  ~5 m accuracy, plenty for seeding
@@ -1408,16 +1444,17 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
                     nav2_opinion = nav2_store.get_opinion(max_age_s=30.0)
                 w2_ok, w2 = nav2_agrees(
                     pos_ecef, nav2_opinion,
-                    horiz_m=args.bootstrap_nav2_horiz_m)
+                    horiz_m=args.bootstrap_nav2_horiz_m,
+                    vert_m=args.bootstrap_nav2_vert_m)
 
                 if w1_ok and w2_ok:
                     log.info(
                         "CONVERGED at epoch %d (σ=%.4fm, rms=%.3fm, "
-                        "pr_rms=%.2fm max=%.2fm, nav2_h=%.1fm%s, "
-                        "retries=%d, gate=%s)",
+                        "pr_rms=%.2fm max=%.2fm, nav2_h=%.1fm "
+                        "nav2_v=%.1fm%s, retries=%d, gate=%s)",
                         n_epochs, sigma_3d, rms,
                         w1['rms_pr'], w1['max_pr'],
-                        w2['disp_h_m'],
+                        w2['disp_h_m'], w2['disp_v_m'],
                         "" if w2['available'] else " (no NAV2)",
                         gate_retries,
                         "fast (NAV2 seed)" if seeded_from_nav2
@@ -7004,6 +7041,28 @@ Two-phase operation:
                           "disagreement exceeds this, even when the EKF "
                           "reports σ < --sigma.  Set to 0 to disable the "
                           "NAV2 cross-check (not recommended).")
+    pos.add_argument("--bootstrap-nav2-vert-m", type=float, default=10.0,
+                     help="Phase-1 convergence aborts if NAV2 vertical "
+                          "disagreement exceeds this.  Vertical PPP/SPP "
+                          "error is typically ~2× horizontal due to vDOP "
+                          "geometry; the default 10 m pairs with the 5 m "
+                          "horizontal threshold.  Catches the failure mode "
+                          "where Phase-1 converges with horizontal-good but "
+                          "vertical wildly-off (e.g., LS-init seeding the "
+                          "altitude axis to a 100+ m wrong basin and W2 "
+                          "horizontal-only missing it).  Set to 0 to "
+                          "disable.")
+    pos.add_argument("--nav2-seed-timeout-s", type=float, default=30.0,
+                     help="Pre-init: wait up to this long for NAV2 to "
+                          "deliver a fixType=3 + hAcc<5m opinion before "
+                          "falling back to LS-init.  NAV2 is the preferred "
+                          "seed (~1 m hAcc on clean sky vs LS-init's "
+                          "~5-10 m + km-scale altitude DOP).  On a warm "
+                          "receiver NAV2 is typically ready immediately; "
+                          "on a true cold start (factory reset) it can "
+                          "take 30-60 s.  Set to 0 to disable the wait "
+                          "and use LS-init immediately when NAV2 isn't "
+                          "ready on the first epoch.")
     pos.add_argument("--bootstrap-rms-k", type=float, default=2.0,
                      help="Phase-1 convergence requires PR-residual RMS < "
                           "k × SIGMA_P_IF.  Catches locally-consistent but "

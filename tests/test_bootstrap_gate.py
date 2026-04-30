@@ -118,13 +118,35 @@ class TestNav2Agrees(unittest.TestCase):
         self.assertTrue(ok)
         self.assertLess(d['disp_h_m'], 0.01)
 
-    def test_vertical_offset_ignored(self):
-        # A 30 m pure vertical offset must not fail the horizontal gate.
+    def test_small_vertical_offset_passes_default_threshold(self):
+        # A 5 m vertical offset is below the default 10 m vert_m
+        # threshold and must not fail the gate.
+        up = self._pos_base / np.linalg.norm(self._pos_base)
+        ok, d = nav2_agrees(self._pos_base, self._opinion(up * 5.0))
+        self.assertTrue(ok)
+        self.assertGreater(d['disp_v_m'], 4.0)
+        self.assertLess(d['disp_h_m'], 1.0)
+
+    def test_large_vertical_offset_fails(self):
+        # A 30 m pure vertical offset must FAIL the new vertical leg
+        # (default vert_m=10).  Catches the cold_boot_smoke 2026-04-30
+        # failure mode where Phase-1 LS-init converged horiz-good +
+        # 2 km altitude wrong, with W2 horizontal-only missing it.
         up = self._pos_base / np.linalg.norm(self._pos_base)
         ok, d = nav2_agrees(self._pos_base, self._opinion(up * 30.0))
-        self.assertTrue(ok)
+        self.assertFalse(ok)
         self.assertGreater(d['disp_v_m'], 25.0)
         self.assertLess(d['disp_h_m'], 1.0)
+        self.assertIn('vert disp', d['reason'])
+
+    def test_vertical_check_disabled_when_vert_m_zero(self):
+        # vert_m=0 disables the vertical leg (back-compat with callers
+        # that explicitly opt out).
+        up = self._pos_base / np.linalg.norm(self._pos_base)
+        ok, d = nav2_agrees(self._pos_base, self._opinion(up * 100.0),
+                            vert_m=0.0)
+        self.assertTrue(ok)
+        self.assertGreater(d['disp_v_m'], 90.0)
 
     def test_horizontal_fail(self):
         # Offset perpendicular to up → all horizontal.  Pick any
@@ -138,6 +160,7 @@ class TestNav2Agrees(unittest.TestCase):
                             horiz_m=5.0)
         self.assertFalse(ok)
         self.assertAlmostEqual(d['disp_h_m'], 10.0, places=1)
+        self.assertIn('horiz disp', d['reason'])
 
 
 # ── W3 ────────────────────────────────────────────────────────────── #
