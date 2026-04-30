@@ -171,6 +171,25 @@ def scrub_for_retry(
 
     After scrub the EKF predict/update should tighten things up in
     tens of epochs rather than minutes.
+
+    NAV2-pull pattern (preferred, I-024532-charlie #4):
+        scrub_for_retry(filt, n_base,
+                        reseed_ecef=nav2_ecef,
+                        pos_sigma_m=max(1.0, nav2_h_acc_m))
+
+    The 1 m floor is empirical: NAV2 occasionally reports sub-metre
+    hAcc on exceptionally clean fixes; over-trusting that claim
+    against legitimate position reseed risk loses earned confidence
+    that has to be re-paid in convergence time.
+
+    Legacy P-blowup pattern (deprecated, kept for back-compat):
+        scrub_for_retry(filt, n_base, pos_sigma_m=100.0)
+
+    The 100 m default produces the failure mode documented on MadHat
+    2026-04-29 (22 m altitude drop in 10 s after a SO_POS reset,
+    single-freq iono bias re-walked into position via the loose σ).
+    Callers with access to a NAV2 opinion should always prefer the
+    NAV2-pull pattern.
     """
     if reseed_ecef is not None:
         filt.x[0:3] = np.asarray(reseed_ecef, dtype=float)

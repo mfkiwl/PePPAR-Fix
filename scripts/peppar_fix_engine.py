@@ -1418,19 +1418,37 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
                         correction_gate.stats.as_dict()
                     return None
 
-                # W3: scrub and retry.  Reseed from NAV2 if available
-                # (we know PPP is horizontally off, NAV2 is coarser but
-                # independent); otherwise keep position but inflate
-                # covariance so observations pull it.
+                # W3: scrub and retry.  Reseed from NAV2 when available
+                # — NAV2-pull replaces the legacy 100 m P-blowup (cf.
+                # MadHat 2026-04-29 22 m altitude drop in 10 s after a
+                # SO_POS reset, where the 100 m σ blew away earned
+                # confidence and let single-freq iono bias re-walk).
+                # We keep clock / ISB / ZTD covariances since those
+                # don't carry a position bias; only position + amb
+                # covariances are scrubbed.  Per I-024532-charlie #4.
                 reseed = None
+                reseed_pos_sigma_m = 100.0  # legacy default if no NAV2
                 if (not w2_ok) and nav2_opinion is not None:
                     reseed = nav2_opinion['ecef']
+                    nav2_h_acc = nav2_opinion.get('h_acc_m')
+                    if nav2_h_acc is not None and nav2_h_acc > 0:
+                        # NAV2-pull: use NAV2's claimed horizontal
+                        # accuracy as the reseed σ.  Floor at 1 m so
+                        # we don't over-trust an optimistic NAV2 hAcc
+                        # reading (single-epoch SPP can claim
+                        # sub-metre on an exceptionally clean fix).
+                        reseed_pos_sigma_m = max(1.0, float(nav2_h_acc))
                 log.warning(
                     "Phase-1 gate REJECTED convergence candidate at "
-                    "epoch %d: %s — scrubbing and retrying (attempt %d/%d)",
+                    "epoch %d: %s — scrubbing and retrying "
+                    "(attempt %d/%d, σ_pos=%.1fm%s)",
                     n_epochs, last_gate_reason,
-                    gate_retries + 1, args.bootstrap_max_retries)
-                scrub_for_retry(filt, N_BASE, reseed_ecef=reseed)
+                    gate_retries + 1, args.bootstrap_max_retries,
+                    reseed_pos_sigma_m,
+                    " from NAV2 hAcc" if reseed is not None else
+                    " legacy P-blowup")
+                scrub_for_retry(filt, N_BASE, reseed_ecef=reseed,
+                                pos_sigma_m=reseed_pos_sigma_m)
                 # Also reset the AR state — NL fixes built on the
                 # rejected position must not carry over.
                 for sv in list(nl_resolver._fixed.keys()):
