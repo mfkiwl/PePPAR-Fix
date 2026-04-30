@@ -102,6 +102,38 @@ integers — that is the right behaviour, not a defect to chase.
 K_long = 4 SVs accumulate trust in ~30 min of stable sky, so
 post-event recovery is brisk once the disturbance passes.
 
+## ANCHORED-as-trust-shortcut (I-004810-main)
+
+Reaching ``SvAmbState.ANCHORED`` is stronger evidence than four
+matching admits — the SV cleared the Δaz=15° geometry validation,
+which catches many wrong-integer cycles that pure-history matching
+would not.  ``note_anchored(sv)`` records this earned reputation
+as a per-SV ``past_anchored`` flag.
+
+Effect on classification: when ``tier_for`` would otherwise return
+``NEW`` (empty / single / wide-range history), past-anchored SVs
+return ``PROVISIONAL`` instead.  This is a one-step boost at the
+bottom of the ladder — it gives previously well-behaved SVs a
+faster path back through the gate after an integrity-trip
+re-bootstrap, without skipping the geometry-validated TRUSTED
+threshold above.
+
+The boost is naturally bounded: once the SV accumulates two
+same-integer admits, ``tier_for`` returns ``PROVISIONAL`` on its
+own and the flag is irrelevant.  The boost is also defeated for
+wide-range histories at the ``tier_for_proposed`` level — if the
+proposed integer would push the (history ∪ {proposed}) range past
+1, the gate falls back to ``NEW`` regardless of the flag.
+
+Reset semantics: ``forget_history(sv)`` (called on confirmed real
+cycle slips) clears ``past_anchored`` along with the integer
+history.  This is the load-bearing protection — the spec says
+"real-slip eviction with different integer should not skip the
+trust ladder", and slip → ``forget_history`` → flag cleared
+enforces it.  Integrity trips that don't fire the slip detector
+do NOT clear the flag — the SV is still considered trustworthy
+in the absence of phase-discontinuity evidence.
+
 ## Usage pattern
 
     nl_tier = NlAdmissionTier(k_long=4)
@@ -167,6 +199,13 @@ class NlAdmissionTier:
         # patterns are visible.  Reset only by ``forget_history`` (real
         # cycle slip detected upstream).
         self._int_history: dict[str, deque[int]] = {}
+        # sv → has the SV ever reached SvAmbState.ANCHORED?  Set by
+        # ``note_anchored``, cleared by ``forget_history`` (real slip).
+        # Drives the ANCHORED-shortcut: NEW-classified past-anchored
+        # SVs are upgraded to PROVISIONAL by ``tier_for``.  See
+        # I-004810-main and the module docstring "ANCHORED-as-trust-
+        # shortcut" section.
+        self._past_anchored: dict[str, bool] = {}
 
     # ── Lifecycle ──────────────────────────────────────────────── #
 
@@ -180,29 +219,53 @@ class NlAdmissionTier:
         hist.append(int(n_nl))
 
     def forget_history(self, sv: str) -> None:
-        """Wipe the per-SV integer history.  Call **only** after a
-        confirmed real cycle slip (GF_STEP, IF_STEP, cycle-slip-flush
-        — all represent phase discontinuities that invalidate the
-        ambiguity reference).  Routine NL evictions should NOT call
-        this — the whole point is that trust persists across re-admit
-        cycles."""
+        """Wipe the per-SV integer history AND the past-anchored
+        flag.  Call **only** after a confirmed real cycle slip
+        (GF_STEP, IF_STEP, cycle-slip-flush — all represent phase
+        discontinuities that invalidate the ambiguity reference).
+        Routine NL evictions should NOT call this — the whole point
+        is that trust persists across re-admit cycles.
+
+        Clearing ``past_anchored`` here is the load-bearing
+        protection that the I-004810-main shortcut design depends on:
+        a real slip means the integer reference itself moved, and the
+        SV must climb the trust ladder again from ``NEW``."""
         self._int_history.pop(sv, None)
+        self._past_anchored.pop(sv, None)
+
+    def note_anchored(self, sv: str) -> None:
+        """Record that ``sv`` has reached ``SvAmbState.ANCHORED`` — i.e.
+        cleared the AnchoringSvPromoter's Δaz=15° geometry validation.
+        Idempotent: calling repeatedly leaves the flag True.
+
+        Called by the engine on the ``ANCHORING → ANCHORED`` SvAmbState
+        transition.  Cleared by ``forget_history`` (real slip)."""
+        self._past_anchored[sv] = True
 
     # ── Tier classification ────────────────────────────────────── #
 
     def tier_for(self, sv: str) -> str:
         """The tier of ``sv``'s admission history alone, ignoring any
         proposed integer.  Used for visibility (logs, classifier
-        labels)."""
+        labels).
+
+        ANCHORED-shortcut: when the history-only base would be ``NEW``
+        but the SV has previously reached ``ANCHORED`` (via
+        ``note_anchored``), return ``PROVISIONAL`` instead.  See
+        I-004810-main."""
         hist = self._int_history.get(sv)
         if hist is None or len(hist) < 2:
-            return TIER_NEW
-        rng = max(hist) - min(hist)
-        if len(hist) >= self._k_long and rng == 0:
-            return TIER_TRUSTED
-        if rng <= 1:
+            base = TIER_NEW
+        else:
+            rng = max(hist) - min(hist)
+            if len(hist) >= self._k_long and rng == 0:
+                return TIER_TRUSTED
+            if rng <= 1:
+                return TIER_PROVISIONAL
+            base = TIER_NEW
+        if base == TIER_NEW and self._past_anchored.get(sv, False):
             return TIER_PROVISIONAL
-        return TIER_NEW
+        return base
 
     def tier_for_proposed(self, sv: str, n_nl_proposed: int) -> str:
         """The tier that GOVERNS admission of ``sv`` at integer

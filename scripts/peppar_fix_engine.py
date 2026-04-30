@@ -2875,6 +2875,11 @@ class AntPosEstThread(threading.Thread):
                     if ev['first_fix_az_deg'] is not None else "?",
                     ev['latest_az_deg'] or 0.0,
                 )
+                # I-004810-main: record past-anchored reputation so a
+                # later integrity-trip / re-admit cycle gets the
+                # PROVISIONAL boost over NEW.  Cleared by note_slip
+                # (forget_history) on real cycle slips.
+                nl.note_sv_anchored(ev['sv'])
 
             # Position quality
             sigma_3d = position_sigma_3d(filt.P)

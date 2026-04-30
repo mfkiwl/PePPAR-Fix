@@ -1401,6 +1401,16 @@ class NarrowLaneResolver:
         persists across re-admit cycles by design."""
         self._nl_tier.forget_history(sv)
 
+    def note_sv_anchored(self, sv):
+        """Notify the resolver that ``sv`` has been promoted to
+        ``SvAmbState.ANCHORED`` (cleared the AnchoringSvPromoter's
+        Δaz=15° geometry validation).  Records the past-anchored flag
+        so subsequent re-admissions of this SV after an integrity-trip
+        eviction get the one-step PROVISIONAL boost over NEW.
+
+        See I-004810-main and ``NlAdmissionTier.tier_for``."""
+        self._nl_tier.note_anchored(sv)
+
     def unfix(self, sv):
         """Remove a fix (e.g. after cycle slip detected).
 

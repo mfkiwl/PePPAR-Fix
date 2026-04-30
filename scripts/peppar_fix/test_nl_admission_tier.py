@@ -220,6 +220,113 @@ class ForgetHistoryTest(unittest.TestCase):
         self.assertEqual(m.tier_for("G99"), TIER_NEW)
 
 
+class PastAnchoredShortcutTest(unittest.TestCase):
+    """ANCHORED-as-trust-shortcut (I-004810-main).
+
+    Past-anchored SVs that would otherwise classify as NEW (empty,
+    single, or wide-range history) get bumped one step up to
+    PROVISIONAL.  Slip-driven forget_history clears the flag.
+    """
+
+    def test_note_anchored_lifts_single_admission_to_provisional(self):
+        """SV admitted once, reached ANCHORED, evicted (no slip),
+        re-evaluated.  Without the boost it would be NEW; with the
+        boost it's PROVISIONAL."""
+        m = NlAdmissionTier(k_long=4)
+        m.note_admit("G01", n_nl=10)
+        self.assertEqual(m.tier_for("G01"), TIER_NEW)
+        m.note_anchored("G01")
+        self.assertEqual(m.tier_for("G01"), TIER_PROVISIONAL)
+
+    def test_note_anchored_does_not_promote_above_provisional(self):
+        """A past-anchored SV that already has range≤1 history stays
+        PROVISIONAL — the shortcut never grants TRUSTED.  TRUSTED
+        requires k_long matching admits."""
+        m = NlAdmissionTier(k_long=4)
+        m.note_admit("G01", n_nl=10)
+        m.note_admit("G01", n_nl=11)  # PROVISIONAL via range=1
+        m.note_anchored("G01")
+        self.assertEqual(m.tier_for("G01"), TIER_PROVISIONAL)
+
+    def test_note_anchored_does_not_demote_trusted(self):
+        """A TRUSTED SV stays TRUSTED — the shortcut only fires when
+        base would be NEW."""
+        m = NlAdmissionTier(k_long=4)
+        for _ in range(4):
+            m.note_admit("G01", n_nl=10)
+        self.assertEqual(m.tier_for("G01"), TIER_TRUSTED)
+        m.note_anchored("G01")
+        self.assertEqual(m.tier_for("G01"), TIER_TRUSTED)
+
+    def test_forget_history_clears_past_anchored(self):
+        """Real cycle slip wipes both integer history and the
+        past-anchored flag — the SV climbs from NEW again."""
+        m = NlAdmissionTier(k_long=4)
+        m.note_admit("G01", n_nl=10)
+        m.note_anchored("G01")
+        self.assertEqual(m.tier_for("G01"), TIER_PROVISIONAL)
+        m.forget_history("G01")
+        # No history → tier_for would be NEW.  Past-anchored flag is
+        # cleared, so the boost no longer fires.
+        self.assertEqual(m.tier_for("G01"), TIER_NEW)
+        self.assertEqual(m.integer_history("G01"), [])
+
+    def test_note_anchored_idempotent(self):
+        """Calling note_anchored repeatedly is safe and doesn't
+        compound."""
+        m = NlAdmissionTier(k_long=4)
+        m.note_admit("G01", n_nl=10)
+        m.note_anchored("G01")
+        m.note_anchored("G01")
+        m.note_anchored("G01")
+        self.assertEqual(m.tier_for("G01"), TIER_PROVISIONAL)
+        # Single forget_history still clears it cleanly.
+        m.forget_history("G01")
+        self.assertEqual(m.tier_for("G01"), TIER_NEW)
+
+    def test_proposed_range_check_defeats_shortcut(self):
+        """A past-anchored SV whose tier_for says PROVISIONAL still
+        faces NEW gate at tier_for_proposed when the proposed integer
+        would push the (history ∪ {proposed}) range past 1.  This is
+        the wandering-SV protection."""
+        m = NlAdmissionTier(k_long=4)
+        m.note_admit("G01", n_nl=10)
+        m.note_anchored("G01")
+        # Same integer: range=0 ≤ 1 → PROVISIONAL gate
+        self.assertEqual(m.tier_for_proposed("G01", 10), TIER_PROVISIONAL)
+        # Adjacent: range=1 ≤ 1 → PROVISIONAL gate
+        self.assertEqual(m.tier_for_proposed("G01", 11), TIER_PROVISIONAL)
+        # Wild: range=89 → NEW gate (boost defeated)
+        self.assertEqual(m.tier_for_proposed("G01", 99), TIER_NEW)
+
+    def test_note_anchored_independent_per_sv(self):
+        """Past-anchored is per-SV.  Anchoring G01 doesn't affect E11."""
+        m = NlAdmissionTier(k_long=4)
+        m.note_admit("G01", n_nl=10)
+        m.note_admit("E11", n_nl=20)
+        m.note_anchored("G01")
+        self.assertEqual(m.tier_for("G01"), TIER_PROVISIONAL)
+        self.assertEqual(m.tier_for("E11"), TIER_NEW)
+
+    def test_admits_at_uses_boosted_gate_after_anchored(self):
+        """admits_at, the composite gate used by the resolver, picks
+        up the boosted PROVISIONAL bar (5.0/0.99) instead of the
+        strict NEW bar (10.0/0.999) on a past-anchored re-admit."""
+        m = NlAdmissionTier(k_long=4)
+        m.note_admit("G01", n_nl=10)
+        m.note_anchored("G01")
+        # Stats (5.5, 0.992) clear PROVISIONAL but fail NEW
+        ok, tier = m.admits_at("G01", 10, ratio=5.5, p_bootstrap=0.992)
+        self.assertTrue(ok)
+        self.assertEqual(tier, TIER_PROVISIONAL)
+        # Without the boost (no note_anchored): same stats fail NEW
+        m2 = NlAdmissionTier(k_long=4)
+        m2.note_admit("G01", n_nl=10)
+        ok, tier = m2.admits_at("G01", 10, ratio=5.5, p_bootstrap=0.992)
+        self.assertFalse(ok)
+        self.assertEqual(tier, TIER_NEW)
+
+
 class IsolationAndDiagnosticsTest(unittest.TestCase):
     """SV independence + summary."""
 
