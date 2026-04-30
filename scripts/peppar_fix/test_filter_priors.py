@@ -16,12 +16,15 @@ should require revisiting the integrity-trip cascade evidence.
 
 from __future__ import annotations
 
+import os
 import sys
 import unittest
 
 import numpy as np
 
-sys.path.insert(0, '/home/bob/git/PePPAR-Fix-charlie/scripts')
+_SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
 
 from solve_ppp import PPPFilter, IDX_ZTD
 
