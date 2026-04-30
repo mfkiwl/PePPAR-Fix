@@ -1091,6 +1091,13 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
     n_epochs = 0
     n_empty = 0
     converged_at = None
+    # Set on the init epoch by the seed-source dispatch below.  Reads
+    # by the convergence-gate logic distinguish NAV2-seeded fast-exit
+    # (no 30-epoch wait, W2 redundant) from LS-init full ceremony
+    # (30-epoch wait + W1 + W2).  Per I-024532-charlie #3, the NAV2
+    # path collapses Phase 1's CONVERGED gate down to a 1-epoch sanity
+    # rather than the legacy 30-epoch ceremony.
+    bootstrap_seed_source = None
     start_time = time.time()
     # W1/W2/W3: retry accounting for the convergence gate.  Each abort
     # (residual inconsistency or NAV2 horizontal mismatch) triggers a
@@ -1199,6 +1206,7 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
             filt.initialize(init_pos, init_clk, systems=systems_set,
                             pos_sigma_m=init_pos_sigma_m)
             filt_initialized = True
+            bootstrap_seed_source = seed_source
             prev_t = gps_time
             log.info("PPPFilter initialized via %s, σ_pos=%.1fm",
                      seed_source, init_pos_sigma_m)
@@ -1369,13 +1377,31 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
         if sigma_3d < args.sigma and pos_stable:
             if converged_at is None:
                 converged_at = n_epochs
-            if n_epochs - converged_at >= 30:
+            # NAV2-seeded path bypasses the 30-epoch CONVERGED ceremony
+            # (I-024532-charlie #3): NAV2 already vetted the seed at
+            # initialize time, and the priors-tightening (commit f67871d)
+            # leaves systematic δ_PB nowhere to absorb during convergence.
+            # We require 1 stable epoch instead of 30 — the EKF's own
+            # sigma_3d threshold is sufficient.  W2 (NAV2 cross-check)
+            # is also redundant on this path since the seed itself was
+            # NAV2-validated; we still run it to short-circuit on a
+            # NAV2-vs-PPP disagreement that would have been caught by
+            # the steady-state SO_POS monitor anyway, but the W1
+            # residual gate carries the load.
+            seeded_from_nav2 = (
+                bootstrap_seed_source is not None
+                and bootstrap_seed_source.startswith("NAV2"))
+            stable_epochs_required = 1 if seeded_from_nav2 else 30
+            if n_epochs - converged_at >= stable_epochs_required:
                 # W1: residual-consistency gate.
                 w1_ok, w1 = residuals_consistent(
                     filt, resid, SIGMA_P_IF,
                     pr_rms_k=args.bootstrap_rms_k)
                 # W2: NAV2 horizontal cross-check.  Disabled when
-                # --bootstrap-nav2-horiz-m is ≤ 0.
+                # --bootstrap-nav2-horiz-m is ≤ 0.  On NAV2-seeded
+                # path, redundant by construction (we just used NAV2
+                # to seed) but kept as belt-and-suspenders against a
+                # post-init NAV2 disagreement.
                 nav2_opinion = None
                 if (nav2_store is not None
                         and args.bootstrap_nav2_horiz_m > 0):
@@ -1388,12 +1414,14 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
                     log.info(
                         "CONVERGED at epoch %d (σ=%.4fm, rms=%.3fm, "
                         "pr_rms=%.2fm max=%.2fm, nav2_h=%.1fm%s, "
-                        "retries=%d)",
+                        "retries=%d, gate=%s)",
                         n_epochs, sigma_3d, rms,
                         w1['rms_pr'], w1['max_pr'],
                         w2['disp_h_m'],
                         "" if w2['available'] else " (no NAV2)",
                         gate_retries,
+                        "fast (NAV2 seed)" if seeded_from_nav2
+                        else "ceremony (LS-init)",
                     )
                     run_bootstrap.last_correction_gate_stats = \
                         correction_gate.stats.as_dict()
@@ -1418,14 +1446,33 @@ def run_bootstrap(args, obs_queue, corrections, stop_event, out_w=None,
                         correction_gate.stats.as_dict()
                     return None
 
-                # W3: scrub and retry.  Reseed from NAV2 when available
-                # — NAV2-pull replaces the legacy 100 m P-blowup (cf.
-                # MadHat 2026-04-29 22 m altitude drop in 10 s after a
-                # SO_POS reset, where the 100 m σ blew away earned
-                # confidence and let single-freq iono bias re-walk).
-                # We keep clock / ISB / ZTD covariances since those
-                # don't carry a position bias; only position + amb
-                # covariances are scrubbed.  Per I-024532-charlie #4.
+                # NAV2-seeded path: gate failure means "wait another
+                # stable window, don't scrub" — scrubbing would re-seed
+                # from the same NAV2 we just used.  Resetting
+                # converged_at lets the convergence loop re-attempt on
+                # the next sustained-stable window.  Bounded by the
+                # same gate_retries budget so a degenerate stream
+                # eventually aborts.  Per I-024532-charlie #3.
+                if seeded_from_nav2:
+                    log.warning(
+                        "Phase-1 gate (NAV2-seeded) rejected at "
+                        "epoch %d: %s — extending convergence "
+                        "window (attempt %d/%d, no scrub)",
+                        n_epochs, last_gate_reason,
+                        gate_retries + 1, args.bootstrap_max_retries)
+                    converged_at = None
+                    prev_pos_ecef = None
+                    gate_retries += 1
+                    continue
+
+                # LS-init path: legacy scrub-and-retry semantics.
+                # Reseed from NAV2 when available — NAV2-pull replaces
+                # the 100 m P-blowup (cf. MadHat 2026-04-29 22 m
+                # altitude drop in 10 s after a SO_POS reset, where
+                # the 100 m σ blew away earned confidence and let
+                # single-freq iono bias re-walk).  Keep clock / ISB /
+                # ZTD covariances; only position + amb scrub.  Per
+                # I-024532-charlie #4.
                 reseed = None
                 reseed_pos_sigma_m = 100.0  # legacy default if no NAV2
                 if (not w2_ok) and nav2_opinion is not None:
